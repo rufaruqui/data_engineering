@@ -1,0 +1,443 @@
+%% bibliography.bib — complete reference list for "Data Engineering" textbook
+%% All chapters; BibLaTeX / biber format
+
+%======================================================================
+% CHAPTER 1 — The Big Data Revolution
+%======================================================================
+
+@techreport{Laney2001,
+  author      = {Doug Laney},
+  title       = {{3D Data Management: Controlling Data Volume, Velocity and Variety}},
+  institution = {{META Group}},
+  year        = {2001},
+  number      = {949},
+  type        = {Research Note},
+  month       = {February}
+}
+
+@inproceedings{Brewer2000,
+  author    = {Eric A. Brewer},
+  title     = {Towards Robust Distributed Systems},
+  booktitle = {Proceedings of the 19th Annual {ACM} Symposium on Principles of
+               Distributed Computing ({PODC} 2000)},
+  year      = {2000},
+  pages     = {7},
+  publisher = {{ACM}},
+  address   = {Portland, OR, USA},
+  doi       = {10.1145/343477.343502},
+  note      = {Keynote address}
+}
+
+@article{GilbertLynch2002,
+  author  = {Seth Gilbert and Nancy A. Lynch},
+  title   = {Brewer's Conjecture and the Feasibility of Consistent, Available,
+             Partition-Tolerant Web Services},
+  journal = {{ACM SIGACT} News},
+  year    = {2002},
+  volume  = {33},
+  number  = {2},
+  pages   = {51--59},
+  doi     = {10.1145/564585.564601}
+}
+
+@techreport{McKinsey2011,
+  author      = {James Manyika and Michael Chui and Brad Brown and
+                 Jacques Bughin and Richard Dobbs and Charles Roxburgh and
+                 Angela Hung Byers},
+  title       = {{Big Data: The Next Frontier for Innovation, Competition,
+                 and Productivity}},
+  institution = {{McKinsey Global Institute}},
+  year        = {2011},
+  month       = {May}
+}
+
+@techreport{IDC2018,
+  author      = {David Reinsel and John Gantz and John Rydning},
+  title       = {The Digitization of the World: From Edge to Core},
+  institution = {{International Data Corporation (IDC)}},
+  year        = {2018},
+  month       = {November},
+  note        = {{IDC} White Paper, Doc.\ US44413318}
+}
+
+@article{GartnerBigData2012,
+  author  = {Mark A. Beyer and Douglas Laney},
+  title   = {{The Importance of ``Big Data'': A Definition}},
+  journal = {{Gartner Research}},
+  year    = {2012},
+  note    = {{Gartner} Report G00235055}
+}
+
+%======================================================================
+% CHAPTER 2 — Data Integration
+%======================================================================
+
+@inproceedings{Halevy2006,
+  author    = {Alon Halevy and Anand Rajaraman and Joann Ordille},
+  title     = {Data Integration: The Teenage Years},
+  booktitle = {Proceedings of the 32nd International Conference on Very Large
+               Data Bases ({VLDB} 2006)},
+  year      = {2006},
+  pages     = {9--16},
+  publisher = {{VLDB} Endowment},
+  address   = {Seoul, South Korea}
+}
+
+@book{Doan2012,
+  author    = {AnHai Doan and Alon Halevy and Zachary Ives},
+  title     = {Principles of Data Integration},
+  publisher = {Morgan Kaufmann},
+  year      = {2012},
+  isbn      = {978-0124160446}
+}
+
+%======================================================================
+% CHAPTER 3 — Distributed File Systems: GFS and HDFS
+%======================================================================
+
+@inproceedings{GFS2003,
+  author    = {Sanjay Ghemawat and Howard Gobioff and Shun-Tak Leung},
+  title     = {The {Google} File System},
+  booktitle = {Proceedings of the 19th {ACM} Symposium on Operating Systems
+               Principles ({SOSP} 2003)},
+  year      = {2003},
+  pages     = {29--43},
+  publisher = {{ACM}},
+  doi       = {10.1145/945445.945450}
+}
+
+@book{White2015,
+  author    = {Tom White},
+  title     = {Hadoop: The Definitive Guide},
+  publisher = {O'Reilly Media},
+  year      = {2015},
+  edition   = {4th},
+  isbn      = {978-1491901632}
+}
+
+%======================================================================
+% CHAPTER 4 — MapReduce, Pig, Hive, HBase
+%======================================================================
+
+@inproceedings{MapReduce2004,
+  author    = {Jeffrey Dean and Sanjay Ghemawat},
+  title     = {{MapReduce}: Simplified Data Processing on Large Clusters},
+  booktitle = {Proceedings of the 6th Symposium on Operating System Design
+               and Implementation ({OSDI} 2004)},
+  year      = {2004},
+  pages     = {137--150},
+  publisher = {{USENIX} Association}
+}
+
+@inproceedings{Bigtable2006,
+  author    = {Fay Chang and Jeffrey Dean and Sanjay Ghemawat and Wilson C. Hsieh
+               and Deborah A. Wallach and Michael Burrows and Tushar Chandra and
+               Andrew Fikes and Robert E. Gruber},
+  title     = {{Bigtable}: A Distributed Storage System for Structured Data},
+  booktitle = {Proceedings of the 7th Symposium on Operating System Design
+               and Implementation ({OSDI} 2006)},
+  year      = {2006},
+  pages     = {205--218},
+  publisher = {{USENIX} Association}
+}
+
+@inproceedings{Hive2009,
+  author    = {Ashish Thusoo and Joydeep Sen Sarma and Namit Jain and Zheng Shao
+               and Prasad Chakka and Suresh Anthony and Hao Liu and Pete Wyckoff
+               and Raghotham Murthy},
+  title     = {{Hive} -- A Warehousing Solution Over a {Map-Reduce} Framework},
+  booktitle = {Proceedings of the {VLDB} Endowment ({PVLDB})},
+  year      = {2009},
+  volume    = {2},
+  number    = {2},
+  pages     = {1626--1629},
+  doi       = {10.14778/1687553.1687609}
+}
+
+@inproceedings{Hive2010,
+  author    = {Ashish Thusoo and Joydeep Sen Sarma and Namit Jain and Zheng Shao
+               and Prasad Chakka and Ning Zhang and Suresh Anthony and Hao Liu
+               and Raghotham Murthy},
+  title     = {{Hive} -- A Petabyte Scale Data Warehouse Using {Hadoop}},
+  booktitle = {Proceedings of the 26th {IEEE} International Conference on Data
+               Engineering ({ICDE} 2010)},
+  year      = {2010},
+  pages     = {996--1005},
+  publisher = {{IEEE}},
+  doi       = {10.1109/ICDE.2010.5447738}
+}
+
+%======================================================================
+% CHAPTER 5 — YARN and File Formats
+%======================================================================
+
+@inproceedings{YARN2013,
+  author    = {Vinod Kumar Vavilapalli and Arun C. Murthy and Chris Douglas and
+               Sharad Agarwal and Mahadev Konar and Robert Evans and Thomas Graves
+               and Jason Lowe and Hitesh Shah and Siddharth Seth and
+               Bikas Saha and Carlo Curino and Owen O'Malley and Sanjay Radia
+               and Benjamin Reed and Eric Baldeschwieler},
+  title     = {{Apache Hadoop YARN}: Yet Another Resource Negotiator},
+  booktitle = {Proceedings of the 4th Annual Symposium on Cloud Computing
+               ({SoCC} 2013)},
+  year      = {2013},
+  pages     = {5:1--5:16},
+  publisher = {{ACM}},
+  doi       = {10.1145/2523616.2523633}
+}
+
+%======================================================================
+% CHAPTER 6 — Apache Spark
+%======================================================================
+
+@inproceedings{Spark2010,
+  author    = {Matei Zaharia and Mosharaf Chowdhury and Michael J. Franklin
+               and Scott Shenker and Ion Stoica},
+  title     = {Spark: Cluster Computing with Working Sets},
+  booktitle = {Proceedings of the 2nd {USENIX} Workshop on Hot Topics in
+               Cloud Computing ({HotCloud} 2010)},
+  year      = {2010},
+  publisher = {{USENIX} Association}
+}
+
+@inproceedings{RDD2012,
+  author    = {Matei Zaharia and Mosharaf Chowdhury and Tathagata Das and
+               Ankur Dave and Justin Ma and Murphy McCauley and Michael J. Franklin
+               and Scott Shenker and Ion Stoica},
+  title     = {Resilient Distributed Datasets: A Fault-Tolerant Abstraction
+               for In-Memory Cluster Computing},
+  booktitle = {Proceedings of the 9th {USENIX} Symposium on Networked Systems
+               Design and Implementation ({NSDI} 2012)},
+  year      = {2012},
+  pages     = {15--28},
+  publisher = {{USENIX} Association},
+  note      = {Best Paper Award}
+}
+
+@book{LearningSparkKarau2015,
+  author    = {Holden Karau and Andy Konwinski and Patrick Wendell and Matei Zaharia},
+  title     = {Learning Spark: Lightning-Fast Big Data Analysis},
+  publisher = {O'Reilly Media},
+  year      = {2015},
+  isbn      = {978-1449358624}
+}
+
+%======================================================================
+% CHAPTER 7 — HiveQL and SQL-on-Hadoop
+%======================================================================
+
+@inproceedings{Presto2019,
+  author    = {Raghav Sethi and Martin Traverso and Dain Sundstrom and
+               David Phillips and Wenlei Xie and Yutian Sun and Nezih Yigitbasi
+               and Haozhun Jin and Eric Hwang and Nileema Shingte and
+               Christopher Berner},
+  title     = {{Presto}: {SQL} on Everything},
+  booktitle = {Proceedings of the 35th {IEEE} International Conference on Data
+               Engineering ({ICDE} 2019)},
+  year      = {2019},
+  pages     = {1802--1813},
+  publisher = {{IEEE}},
+  doi       = {10.1109/ICDE.2019.00196}
+}
+
+%======================================================================
+% CHAPTER 8 — Data Pipelines and Data Lakes
+%======================================================================
+
+@inproceedings{Kafka2011,
+  author    = {Jay Kreps and Neha Narkhede and Jun Rao},
+  title     = {Kafka: A Distributed Messaging System for Log Aggregation},
+  booktitle = {Proceedings of the {NetDB} Workshop at {VLDB} 2011},
+  year      = {2011}
+}
+
+@book{Kleppmann2017,
+  author    = {Martin Kleppmann},
+  title     = {Designing Data-Intensive Applications: The Big Ideas Behind
+               Reliable, Scalable, and Maintainable Systems},
+  publisher = {O'Reilly Media},
+  year      = {2017},
+  isbn      = {978-1449373320}
+}
+
+%======================================================================
+% CHAPTER 9 — Data Visualization
+%======================================================================
+
+@book{Tufte1983,
+  author    = {Edward R. Tufte},
+  title     = {The Visual Display of Quantitative Information},
+  publisher = {Graphics Press},
+  year      = {1983},
+  address   = {Cheshire, CT},
+  isbn      = {978-0961392147}
+}
+
+@inproceedings{Shneiderman1996,
+  author    = {Ben Shneiderman},
+  title     = {The Eyes Have It: A Task by Data Type Taxonomy for Information
+               Visualizations},
+  booktitle = {Proceedings of the {IEEE} Symposium on Visual Languages},
+  year      = {1996},
+  pages     = {336--343},
+  publisher = {{IEEE}},
+  doi       = {10.1109/VL.1996.545307}
+}
+
+@article{Bostock2011,
+  author  = {Michael Bostock and Vadim Ogievetsky and Jeffrey Heer},
+  title   = {{D}$^3$: Data-Driven Documents},
+  journal = {{IEEE} Transactions on Visualization and Computer Graphics},
+  year    = {2011},
+  volume  = {17},
+  number  = {12},
+  pages   = {2301--2309},
+  doi     = {10.1109/TVCG.2011.185}
+}
+
+%======================================================================
+% CHAPTER 10 — Domain Applications
+%======================================================================
+
+@inproceedings{Kwak2010,
+  author    = {Haewoon Kwak and Changhyun Lee and Hosung Park and Sue Moon},
+  title     = {What is {Twitter}, a Social Network or a News Media?},
+  booktitle = {Proceedings of the 19th International Conference on World Wide
+               Web ({WWW} 2010)},
+  year      = {2010},
+  pages     = {591--600},
+  publisher = {{ACM}},
+  doi       = {10.1145/1772690.1772751}
+}
+
+@article{Prophet2018,
+  author  = {Sean J. Taylor and Benjamin Letham},
+  title   = {Forecasting at Scale},
+  journal = {The American Statistician},
+  year    = {2018},
+  volume  = {72},
+  number  = {1},
+  pages   = {37--45},
+  doi     = {10.1080/00031305.2017.1380080}
+}
+
+@article{Obermeyer2016,
+  author  = {Ziad Obermeyer and Ezekiel J. Emanuel},
+  title   = {Predicting the Future --- Big Data, Machine Learning,
+             and Clinical Medicine},
+  journal = {New England Journal of Medicine},
+  year    = {2016},
+  volume  = {375},
+  number  = {13},
+  pages   = {1216--1219},
+  doi     = {10.1056/NEJMp1606181}
+}
+
+@inproceedings{Kempe2003,
+  author    = {David Kempe and Jon Kleinberg and {\'E}va Tardos},
+  title     = {Maximizing the Spread of Influence Through a Social Network},
+  booktitle = {Proceedings of the 9th {ACM} {SIGKDD} International Conference
+               on Knowledge Discovery and Data Mining ({KDD} 2003)},
+  year      = {2003},
+  pages     = {137--146},
+  publisher = {{ACM}},
+  doi       = {10.1145/956750.956769},
+  note      = {Best Paper Award}
+}
+
+%======================================================================
+% CHAPTER 11 — The Modern Data Stack
+%======================================================================
+
+@inproceedings{DeltaLake2020,
+  author    = {Michael Armbrust and Tathagata Das and Liwen Sun and Burak Yavuz
+               and Shixiong Zhu and Mukul Murthy and Joseph Torres and Herman
+               van Hovell and Adrian Ionescu and Alicja \L{}uszczak and
+               Micha{\l} \L{}ysakowski and Michał Switakowski and Xiao Li
+               and Takuya Ueshin and Mostafa Mokhtar and Peter Boncz and
+               Ali Ghodsi and Sameer Paranjpye and Pieter Senster and
+               Reynold Xin and Matei Zaharia},
+  title     = {Delta {Lake}: High-Performance {ACID} Table Storage over Cloud
+               Object Stores},
+  booktitle = {Proceedings of the {VLDB} Endowment},
+  year      = {2020},
+  volume    = {13},
+  number    = {12},
+  pages     = {3411--3424},
+  doi       = {10.14778/3415478.3415560}
+}
+
+@inproceedings{Lakehouse2021,
+  author    = {Michael Armbrust and Ali Ghodsi and Reynold Xin and Matei Zaharia},
+  title     = {Lakehouse: A New Generation of Open Platforms That Unify Data
+               Warehousing and Advanced Analytics},
+  booktitle = {Proceedings of the 11th Annual Conference on Innovative Data
+               Systems Research ({CIDR} 2021)},
+  year      = {2021}
+}
+
+@inproceedings{Dataflow2015,
+  author    = {Tyler Akidau and Robert Bradshaw and Craig Chambers and
+               Slava Chernyak and Rafael J. Fern{\'a}ndez-Moctezuma and
+               Reuven Lax and Sam McVeety and Daniel Mills and Frances Perry and
+               Eric Schmidt and Sam Whittle},
+  title     = {The Dataflow Model: A Practical Approach to Balancing
+               Correctness, Latency, and Cost in Massive-Scale, Unbounded,
+               Out-of-Order Data Processing},
+  booktitle = {Proceedings of the {VLDB} Endowment},
+  year      = {2015},
+  volume    = {8},
+  number    = {12},
+  pages     = {1792--1803},
+  doi       = {10.14778/2824032.2824076}
+}
+
+@inproceedings{MLTechnicalDebt2015,
+  author    = {D. Sculley and Gary Holt and Daniel Golovin and Eugene Davydov and
+               Todd Phillips and Dietmar Ebner and Vinay Chaudhary and
+               Michael Young and Jean-Fran{\c c}ois Crespo and Dan Dennison},
+  title     = {Hidden Technical Debt in Machine Learning Systems},
+  booktitle = {Advances in Neural Information Processing Systems ({NeurIPS} 2015)},
+  year      = {2015},
+  volume    = {28},
+  pages     = {2503--2511}
+}
+
+%======================================================================
+% SUPPLEMENTARY REFERENCES (textbooks cited throughout)
+%======================================================================
+
+@book{Acharya2015,
+  author    = {Seema Acharya and Subhashini Chellappan},
+  title     = {Big Data and Analytics},
+  publisher = {Wiley},
+  year      = {2015},
+  isbn      = {978-8126554065}
+}
+
+@book{Erl2016,
+  author    = {Thomas Erl and Wajid Khattak and Paul Buhler},
+  title     = {Big Data Fundamentals: Concepts, Drivers and Techniques},
+  publisher = {Prentice Hall},
+  year      = {2016},
+  isbn      = {978-0134291079}
+}
+
+@book{Leskovec2020,
+  author    = {Jure Leskovec and Anand Rajaraman and Jeffrey David Ullman},
+  title     = {Mining of Massive Datasets},
+  publisher = {Cambridge University Press},
+  year      = {2020},
+  edition   = {3rd},
+  isbn      = {978-1108476348},
+  url       = {http://www.mmds.org}
+}
+
+@book{MayerSchonberger2013,
+  author    = {Viktor {Mayer-Sch\"{o}nberger} and Kenneth Cukier},
+  title     = {Big Data: A Revolution That Will Transform How We Live, Work,
+               and Think},
+  publisher = {Houghton Mifflin Harcourt},
+  year      = {2013},
+  isbn      = {978-0544002692}
+}

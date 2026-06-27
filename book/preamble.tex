@@ -1,0 +1,487 @@
+%% preamble.tex — shared preamble for "Data Engineering" textbook
+%% Include with \input{preamble} before \begin{document}
+%% Compile: pdflatex → biber → pdflatex → pdflatex
+
+%----------------------------------------------------------------------
+% 1. ENCODING AND FONTS
+%----------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{newpxtext}          % Palatino-style text (pdfLaTeX compatible)
+\usepackage{newpxmath}          % matching math font
+\usepackage{inconsolata}        % high-quality monospace for all code
+\usepackage{microtype}          % optical margin alignment, letter spacing
+\usepackage{setspace}
+\setstretch{1.15}               % comfortable reading line spacing
+
+%----------------------------------------------------------------------
+% 2. PAGE GEOMETRY
+%----------------------------------------------------------------------
+\usepackage[
+  b5paper,
+  top=2.5cm, bottom=2.8cm,
+  inner=2.8cm, outer=2.2cm,
+  headsep=0.8cm,
+  footskip=1.2cm
+]{geometry}
+
+%----------------------------------------------------------------------
+% 3. COLOR PALETTE
+%----------------------------------------------------------------------
+\usepackage[dvipsnames,svgnames]{xcolor}
+% Primary palette
+\definecolor{DEBlue}{RGB}{0,60,120}
+\definecolor{DEAccent}{RGB}{210,120,0}
+\definecolor{DEGreen}{RGB}{0,110,70}
+\definecolor{DERed}{RGB}{170,30,30}
+\definecolor{DEGray}{RGB}{80,80,80}
+\definecolor{DEPurple}{RGB}{80,0,120}
+% Light tints (box backgrounds)
+\definecolor{DELightBlue}{RGB}{228,240,255}
+\definecolor{DELightAccent}{RGB}{255,245,218}
+\definecolor{DELightGreen}{RGB}{218,245,228}
+\definecolor{DELightRed}{RGB}{255,232,232}
+\definecolor{DELightGray}{RGB}{248,248,248}
+\definecolor{DELightPurple}{RGB}{244,235,255}
+% Mid tints for lines and rules
+\definecolor{DEBlueMid}{RGB}{0,60,120}
+
+%----------------------------------------------------------------------
+% 4. MATHEMATICS
+%----------------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+
+%----------------------------------------------------------------------
+% 5. TABLES
+%----------------------------------------------------------------------
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{multicol}
+% Convenience column types
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+
+%----------------------------------------------------------------------
+% 6. GRAPHICS AND TikZ
+%----------------------------------------------------------------------
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{
+  shapes.geometric,
+  shapes.misc,
+  shapes.arrows,
+  positioning,
+  arrows.meta,
+  fit,
+  backgrounds,
+  decorations.pathreplacing,
+  decorations.text,
+  calc,
+  matrix,
+  patterns,
+  shadows.blur
+}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+%----------------------------------------------------------------------
+% 7. CODE LISTINGS
+%----------------------------------------------------------------------
+\usepackage{listings}
+\renewcommand{\lstlistingname}{Listing}
+
+% PySpark / Python
+\lstdefinestyle{pyspark}{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{DEBlue!5},
+  frame=single,
+  framerule=0.5pt,
+  rulecolor=\color{DEBlue!30},
+  numbers=left,
+  numberstyle=\tiny\color{DEGray},
+  numbersep=8pt,
+  stepnumber=1,
+  breaklines=true,
+  breakatwhitespace=false,
+  showstringspaces=false,
+  keywordstyle=\color{DEBlue}\bfseries,
+  commentstyle=\color{DEGreen!80!black}\itshape,
+  stringstyle=\color{DERed!80},
+  emphstyle=\color{DEAccent}\bfseries,
+  emph={SparkSession,SparkContext,RDD,DataFrame,sc,spark},
+  morekeywords={as,lambda,True,False,None,self,yield,with},
+  captionpos=b,
+  xleftmargin=14pt,
+  xrightmargin=4pt,
+  aboveskip=8pt,
+  belowskip=4pt,
+  literate={->}{{\texttt{->}}}{2}
+}
+
+% HiveQL / SQL
+\lstdefinestyle{hiveql}{
+  language=SQL,
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{DEAccent!6},
+  frame=single,
+  framerule=0.5pt,
+  rulecolor=\color{DEAccent!40},
+  numbers=left,
+  numberstyle=\tiny\color{DEGray},
+  numbersep=8pt,
+  breaklines=true,
+  showstringspaces=false,
+  keywordstyle=\color{DEBlue}\bfseries,
+  morekeywords={PARTITIONED,STORED,OVERWRITE,ORC,PARQUET,AVRO,
+                LOCATION,MSCK,REPAIR,EXTERNAL,TBLPROPERTIES,
+                CLUSTERED,SORTED,BUCKETS,ROW,FORMAT,SERDE,
+                INPUTFORMAT,OUTPUTFORMAT,LINES,TERMINATED,
+                BY,INTO,SKEWED,EXCHANGE},
+  commentstyle=\color{DEGreen!80!black}\itshape,
+  stringstyle=\color{DERed!80},
+  captionpos=b,
+  xleftmargin=14pt,
+  aboveskip=8pt,
+  belowskip=4pt,
+}
+
+% Pseudocode
+\lstdefinestyle{pseudocode}{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{DEGray!8},
+  frame=single,
+  framerule=0.5pt,
+  rulecolor=\color{DEGray!40},
+  numbers=left,
+  numberstyle=\tiny\color{DEGray},
+  numbersep=8pt,
+  breaklines=true,
+  showstringspaces=false,
+  captionpos=b,
+  xleftmargin=14pt,
+  aboveskip=8pt,
+  belowskip=4pt,
+}
+
+% Shell / terminal
+\lstdefinestyle{shell}{
+  basicstyle=\ttfamily\footnotesize\color{white},
+  backgroundcolor=\color{black!88},
+  frame=single,
+  framerule=0.5pt,
+  rulecolor=\color{black},
+  numbers=none,
+  breaklines=true,
+  showstringspaces=false,
+  captionpos=b,
+  xleftmargin=14pt,
+  aboveskip=8pt,
+  belowskip=4pt,
+}
+
+%----------------------------------------------------------------------
+% 8. TCOLORBOX ENVIRONMENTS
+%----------------------------------------------------------------------
+\usepackage[most,breakable]{tcolorbox}
+\tcbuselibrary{skins,breakable,listings}
+
+% Research Spotlight (blue)
+\newtcolorbox{researchspotlight}[2][]{
+  enhanced, breakable,
+  colback=DELightBlue,
+  colframe=DEBlue,
+  colbacktitle=DEBlue,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={Research Spotlight\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DEBlue, size=small},
+  #1
+}
+
+% Key Insight (amber/accent)
+\newtcolorbox{keyinsight}[2][]{
+  enhanced, breakable,
+  colback=DELightAccent,
+  colframe=DEAccent,
+  colbacktitle=DEAccent,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={Key Insight\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DEAccent, size=small},
+  #1
+}
+
+% System Design Note (green)
+\newtcolorbox{systemdesign}[2][]{
+  enhanced, breakable,
+  colback=DELightGreen,
+  colframe=DEGreen,
+  colbacktitle=DEGreen,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={System Design Note\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DEGreen, size=small},
+  #1
+}
+
+% Common Misconception (red)
+\newtcolorbox{caution}[2][]{
+  enhanced, breakable,
+  colback=DELightRed,
+  colframe=DERed,
+  colbacktitle=DERed,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={Common Misconception\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DERed, size=small},
+  #1
+}
+
+% Production Lesson (gray)
+\newtcolorbox{techdebt}[2][]{
+  enhanced, breakable,
+  colback=DELightGray,
+  colframe=DEGray,
+  colbacktitle=DEGray,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={Production Lesson\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DEGray, size=small},
+  #1
+}
+
+% Formal Definition (white + blue border)
+\newtcolorbox{defbox}[2][]{
+  enhanced, breakable,
+  colback=white,
+  colframe=DEBlue!55,
+  colbacktitle=DEBlue!10,
+  coltitle=DEBlue,
+  fonttitle=\bfseries\small\sffamily,
+  title={Definition\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  #1
+}
+
+% Case Study (purple)
+\newtcolorbox{casestudy}[2][]{
+  enhanced, breakable,
+  colback=DELightPurple,
+  colframe=DEPurple,
+  colbacktitle=DEPurple,
+  coltitle=white,
+  fonttitle=\bfseries\small\sffamily,
+  title={Case Study\quad\textbar\quad #2},
+  left=6pt, right=6pt, top=4pt, bottom=6pt,
+  arc=4pt, boxrule=0.8pt,
+  attach boxed title to top left={yshift=-2mm, xshift=8pt},
+  boxed title style={arc=2pt, colback=DEPurple, size=small},
+  #1
+}
+
+% Chapter Learning Objectives
+\newtcolorbox{chapterlearning}[1][]{
+  enhanced, breakable,
+  colback=DEBlue!5,
+  colframe=DEBlue,
+  colbacktitle=DEBlue,
+  coltitle=white,
+  fonttitle=\bfseries\normalsize\sffamily,
+  title={Learning Objectives},
+  left=8pt, right=8pt, top=6pt, bottom=8pt,
+  arc=4pt, boxrule=1pt,
+  #1
+}
+
+%----------------------------------------------------------------------
+% 9. CHAPTER AND SECTION HEADING STYLES
+%----------------------------------------------------------------------
+\usepackage{titlesec}
+
+% Chapter: oversized gray number, colored title, horizontal rule
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily}
+  {\raggedleft\color{DEBlue!25}\fontsize{90}{90}\selectfont\thechapter}
+  {-24pt}
+  {\raggedright\color{DEBlue}\fontsize{22}{26}\selectfont\bfseries}
+  [\vspace{4pt}\color{DEBlue}\rule{\linewidth}{1.8pt}\vspace{4pt}]
+
+\titlespacing*{\chapter}{0pt}{-40pt}{28pt}
+
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{DEBlue}}
+  {\thesection}{0.9em}{}
+  [\vspace{-4pt}\color{DEBlue!25}\rule{\linewidth}{0.5pt}]
+
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{DEBlue!85}}
+  {\thesubsection}{0.9em}{}
+
+\titleformat{\subsubsection}
+  {\normalfont\sffamily\normalsize\bfseries\color{DEBlue!75}}
+  {\thesubsubsection}{0.9em}{}
+
+%----------------------------------------------------------------------
+% 10. HEADERS AND FOOTERS
+%----------------------------------------------------------------------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyhead[LE]{\small\sffamily\color{DEGray}\nouppercase{\leftmark}}
+\fancyhead[RO]{\small\sffamily\color{DEGray}\nouppercase{\rightmark}}
+\fancyfoot[LE,RO]{\small\sffamily\color{DEGray}\thepage}
+
+\fancypagestyle{plain}{
+  \fancyhf{}
+  \renewcommand{\headrulewidth}{0pt}
+  \fancyfoot[C]{\small\sffamily\color{DEGray}\thepage}
+}
+
+%----------------------------------------------------------------------
+% 11. CAPTIONS
+%----------------------------------------------------------------------
+\usepackage{caption}
+\usepackage{subcaption}
+\captionsetup{
+  font=small,
+  labelfont={bf,color=DEBlue},
+  margin=10pt,
+  justification=justified,
+}
+
+%----------------------------------------------------------------------
+% 12. LISTS
+%----------------------------------------------------------------------
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=*, topsep=4pt, itemsep=2pt, parsep=0pt}
+\setlist[enumerate]{leftmargin=*, topsep=4pt, itemsep=2pt, parsep=0pt}
+\setlist[description]{leftmargin=0pt, topsep=4pt, itemsep=2pt}
+
+%----------------------------------------------------------------------
+% 13. EPIGRAPH
+%----------------------------------------------------------------------
+\usepackage{epigraph}
+\setlength{\epigraphwidth}{0.62\textwidth}
+\renewcommand{\epigraphflush}{flushright}
+\renewcommand{\epigraphrule}{0.4pt}
+
+%----------------------------------------------------------------------
+% 14. BIBLIOGRAPHY
+%----------------------------------------------------------------------
+\usepackage[
+  style=authoryear,
+  backend=biber,
+  maxcitenames=3,
+  maxbibnames=99,
+  giveninits=true,
+  uniquename=init,
+  dashed=false,
+  isbn=false,
+  doi=true,
+  url=false,
+  sorting=nyt
+]{biblatex}
+\addbibresource{bibliography.bib}
+
+%----------------------------------------------------------------------
+% 15. CROSS-REFERENCES AND HYPERLINKS
+%----------------------------------------------------------------------
+\usepackage[
+  colorlinks=true,
+  linkcolor=DEBlue,
+  citecolor=DEGreen,
+  urlcolor=DEAccent,
+  pdftitle={Data Engineering: Distributed Systems, Scalable Processing, and Modern Architectures},
+  pdfauthor={Rokan Uddin Faruqui},
+  pdfsubject={Data Engineering Textbook},
+  pdfkeywords={big data, hadoop, spark, data engineering, distributed systems},
+  bookmarksnumbered=true,
+  bookmarksopen=true,
+]{hyperref}
+\usepackage[capitalise,noabbrev,nameinlink]{cleveref}
+
+%----------------------------------------------------------------------
+% 16. INDEX
+%----------------------------------------------------------------------
+\usepackage{makeidx}
+\makeindex
+
+%----------------------------------------------------------------------
+% 17. BLANK PAGES BETWEEN CHAPTERS
+%----------------------------------------------------------------------
+\usepackage{emptypage}
+
+%----------------------------------------------------------------------
+% 18. UTILITY COMMANDS
+%----------------------------------------------------------------------
+% Defined term (bold + italic) — auto-indexed
+\newcommand{\term}[1]{\textbf{\textit{#1}}\index{#1}}
+% Software tool name (sans-serif) — auto-indexed
+\newcommand{\tool}[1]{\textsf{#1}\index{#1}}
+% Inline code
+\newcommand{\code}[1]{\texttt{#1}}
+% File/dataset name
+\newcommand{\dataset}[1]{\texttt{#1}}
+% Data-size units (upright, non-breaking)
+\newcommand{\KB}{\,\text{KB}}
+\newcommand{\MB}{\,\text{MB}}
+\newcommand{\GB}{\,\text{GB}}
+\newcommand{\TB}{\,\text{TB}}
+\newcommand{\PB}{\,\text{PB}}
+\newcommand{\EB}{\,\text{EB}}
+\newcommand{\ZB}{\,\text{ZB}}
+
+%----------------------------------------------------------------------
+% 19. EXERCISE COUNTERS AND MACROS
+%----------------------------------------------------------------------
+\newcounter{sqctr}[chapter]
+\newcounter{apctr}[chapter]
+\newcounter{dpctr}[chapter]
+\newcounter{pectr}[chapter]
+
+\newcommand{\sq}{\stepcounter{sqctr}%
+  \par\vspace{4pt}\noindent
+  \textbf{SQ\thechapter.\thesqctr.}\enspace}
+\newcommand{\ap}{\stepcounter{apctr}%
+  \par\vspace{6pt}\noindent
+  \textbf{AP\thechapter.\theapctr.}\enspace}
+\newcommand{\dp}{\stepcounter{dpctr}%
+  \par\vspace{6pt}\noindent
+  \textbf{DP\thechapter.\thedpctr.}\enspace}
+\newcommand{\pe}{\stepcounter{pectr}%
+  \par\vspace{6pt}\noindent
+  \textbf{PE\thechapter.\thepectr.}\enspace}
+
+% Section heading shorthand for exercise sections
+\newcommand{\exercisesection}[1]{%
+  \vspace{10pt}
+  {\sffamily\large\bfseries\color{DEBlue} #1}
+  \vspace{4pt}
+  \color{DEBlue!25}\rule{\linewidth}{0.4pt}
+  \vspace{4pt}
+}

@@ -1,0 +1,121 @@
+%% main.tex — Master file for "Data Engineering" textbook
+%% Compile: pdflatex main.tex  →  biber main  →  pdflatex (×2)
+
+\documentclass[11pt,b5paper,twoside,openright]{book}
+
+\input{preamble}
+
+%----------------------------------------------------------------------
+% Title-page metadata
+%----------------------------------------------------------------------
+\title{%
+  \vspace{-1cm}
+  {\sffamily\Huge\bfseries\color{DEBlue} Data Engineering}\\[10pt]
+  {\sffamily\Large\color{DEBlue!70}
+    Distributed Systems, Scalable Processing,\\[4pt]
+    and Modern Architectures}
+}
+\author{Rokan Uddin Faruqui\\[6pt]
+  \normalsize Professor, Department of Computer Science \& Engineering\\
+  \normalsize University of Chittagong
+}
+\date{2026}
+
+%======================================================================
+\begin{document}
+%======================================================================
+
+%----------------------------------------------------------------------
+% FRONT MATTER
+%----------------------------------------------------------------------
+\frontmatter
+
+% Title page
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  \color{DEBlue}
+  \rule{\linewidth}{2pt}\\[12pt]
+  {\sffamily\fontsize{36}{40}\selectfont\bfseries Data Engineering}\\[10pt]
+  {\sffamily\Large\color{DEBlue!70}
+    Distributed Systems, Scalable Processing,\\[4pt]
+    and Modern Architectures}\\[12pt]
+  \rule{\linewidth}{0.8pt}\\[2cm]
+  {\large Rokan Uddin Faruqui}\\[6pt]
+  {\normalsize Professor, Department of Computer Science \& Engineering\\
+  University of Chittagong}\\[3cm]
+  \vfill
+  {\sffamily\color{DEGray} 2026}
+\end{titlepage}
+
+% Copyright page
+\thispagestyle{empty}
+\vspace*{\fill}
+\noindent
+\textcopyright\ 2026 Rokan Uddin Faruqui.
+
+\noindent
+All rights reserved. No part of this publication may be reproduced,
+stored in a retrieval system, or transmitted in any form or by any means,
+electronic, mechanical, photocopying, recording, or otherwise,
+without the prior written permission of the author.
+
+\noindent
+\textit{First Edition, 2026.}
+\vspace{2cm}
+
+% Table of contents
+\tableofcontents
+\listoffigures
+\listoftables
+
+%----------------------------------------------------------------------
+% MAIN CHAPTERS
+%----------------------------------------------------------------------
+\mainmatter
+
+%%% Part I: The Data Engineering Landscape
+\part{The Data Engineering Landscape}
+\input{ch01}
+% \input{ch02}
+
+%%% Part II: Distributed Storage
+% \part{Distributed Storage}
+% \input{ch03}
+
+%%% Part III: Batch Processing at Scale
+% \part{Batch Processing at Scale}
+% \input{ch04}
+% \input{ch05}
+
+%%% Part IV: In-Memory Processing
+% \part{In-Memory Processing}
+% \input{ch06}
+% \input{ch07}
+
+%%% Part V: Data Pipelines and Modern Integration
+% \part{Data Pipelines and Modern Integration}
+% \input{ch08}
+
+%%% Part VI: Insight Delivery
+% \part{Insight Delivery}
+% \input{ch09}
+% \input{ch10}
+
+%%% Part VII: The Modern Data Stack
+% \part{The Modern Data Stack}
+% \input{ch11}
+
+%----------------------------------------------------------------------
+% BACK MATTER
+%----------------------------------------------------------------------
+\backmatter
+
+\printbibliography[
+  heading=bibintoc,
+  title={References}
+]
+
+\printindex
+
+\end{document}
