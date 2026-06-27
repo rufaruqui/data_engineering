@@ -1,0 +1,1685 @@
+%% ch07.tex — Chapter 7: SQL at Scale: HiveQL and the SQL-on-Hadoop Ecosystem
+%% Part of "Data Engineering" textbook
+
+\chapter{SQL at Scale: HiveQL and the SQL-on-Hadoop Ecosystem}
+\label{ch:sql-scale}
+
+\epigraph{\textit{``Presto is the democratisation of data.
+Before Presto, only engineers could query our data warehouse.
+After Presto, every product manager, every analyst, every
+curious Facebooker could answer their own questions.''}}{Dain Sundstrom, Presto co-creator, Meta Engineering Blog, 2013}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Use HiveQL complex data types---\texttt{ARRAY}, \texttt{MAP},
+        and \texttt{STRUCT}---to model semi-structured data, and apply
+        \texttt{LATERAL VIEW EXPLODE} to unnest array and map columns
+        into relational rows.
+  \item Write SQL window function queries using \texttt{OVER},
+        \texttt{PARTITION BY}, \texttt{ORDER BY}, \texttt{ROWS BETWEEN},
+        and the ranking functions \texttt{ROW\_NUMBER}, \texttt{RANK},
+        \texttt{LAG}, and \texttt{LEAD}.
+  \item Distinguish the three Hive UDF categories---scalar UDF, User-Defined
+        Aggregate Function (UDAF), and User-Defined Table-Generating Function
+        (UDTF)---and identify the appropriate category for a given extension.
+  \item Explain how Apache Tez improves on Hive-on-MapReduce by replacing
+        the chain of MapReduce jobs with a single DAG of vertices and
+        edges, and identify which types of intermediate materialisation
+        Tez eliminates.
+  \item Describe the Hive LLAP architecture---the persistent daemon,
+        in-memory columnar cache, and shared executor threads---and explain
+        why LLAP enables sub-second interactive query latency.
+  \item Explain how the Cost-Based Optimizer (CBO) uses table and column
+        statistics from the Hive Metastore to choose join order and join
+        strategy, and describe the difference between rule-based and
+        cost-based optimisation.
+  \item Compare Hive's four join execution strategies---Common Join,
+        Map Join, Bucket Map Join, and Sort-Merge Bucket Join---and select
+        the correct strategy for a given table size and bucketing configuration.
+  \item Describe the Presto/Trino architecture---Coordinator, Workers,
+        and Connectors---and explain how the connector model enables
+        federated SQL queries across heterogeneous data sources.
+  \item Explain the key design differences between Hive and Presto that
+        make Presto suitable for interactive queries ($<$1 minute) and
+        Hive suitable for long-running batch ETL (hours).
+  \item Compare the four major SQL-on-Hadoop engines---Hive, Presto/Trino,
+        Spark SQL, and Apache Impala---on latency, scale, fault tolerance,
+        and data source support, and select the appropriate engine for
+        a given workload.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:mapreduce} introduced Apache Hive as the SQL layer that
+made Hadoop accessible to analysts without MapReduce expertise, covering
+the Hive Metastore, partitioning, bucketing, and the basic HiveQL-to-MapReduce
+compilation pipeline. Chapter~\ref{ch:spark} showed how Spark SQL and the
+Catalyst optimizer brought a faster, in-memory SQL engine to the same Hive
+Metastore and Parquet ecosystem.
+
+This chapter completes the SQL-at-scale picture by examining what sits
+between those two endpoints: the advanced features of HiveQL that make
+it a production-grade analytical SQL dialect; the successive execution
+engines (Tez, LLAP) that have reduced Hive query latency from hours to
+seconds; the cost-based optimizer that brings intelligent query planning
+to Hive; and the family of alternative SQL engines---most importantly
+Presto/Trino---that address the interactive analytics use case that neither
+Hive-on-MapReduce nor batch Spark optimally serves.
+
+The central theme is \emph{trade-off}: no single SQL engine is optimal
+for all workloads. Understanding what each engine optimises for---and
+what it sacrifices in return---is the core competency this chapter develops.
+
+%%====================================================================
+\section{HiveQL: Advanced Language Features}
+\label{sec:hiveql-advanced}
+%%====================================================================
+
+HiveQL extends ANSI SQL with features designed specifically for
+semi-structured data and large-scale analytical workloads. Three categories
+of extensions---complex data types, window functions, and user-defined
+functions---are essential for production data engineering work.
+
+%--------------------------------------------------------------------
+\subsection{Complex Data Types: ARRAY, MAP, and STRUCT}
+\label{subsec:complex-types}
+%--------------------------------------------------------------------
+
+Real-world data rarely arrives in fully normalised form. A web event
+may carry a variable-length list of product categories, an e-commerce
+order may embed a nested shipping address, and a user profile may contain
+a key-value map of arbitrary feature flags. Hive models these patterns
+with three native complex types.
+
+An \term{ARRAY} is an ordered sequence of values of the same type. An
+\term{MAP} is an unordered collection of key-value pairs. A \term{STRUCT}
+is a named tuple of fields with potentially different types, analogous
+to a JSON object:
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: table schema with complex data types}]
+CREATE TABLE user_events (
+    event_id    BIGINT,
+    user_id     BIGINT,
+    event_ts    TIMESTAMP,
+    -- ARRAY: a user may view 0..N product categories
+    categories  ARRAY<STRING>,
+    -- MAP: arbitrary key-value feature flags
+    features    MAP<STRING, DOUBLE>,
+    -- STRUCT: nested shipping address
+    ship_addr   STRUCT<
+                    street: STRING,
+                    city:   STRING,
+                    postal: STRING,
+                    country: STRING
+                >
+)
+STORED AS ORC
+PARTITIONED BY (dt STRING);
+
+-- Accessing nested fields
+SELECT  event_id,
+        categories[0]           AS first_category,
+        features['ctr_score']   AS ctr_score,
+        ship_addr.city          AS city,
+        ship_addr.country       AS country
+FROM    user_events
+WHERE   dt = '2024-03-01'
+  AND   size(categories) > 0;
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{LATERAL VIEW and EXPLODE}
+\label{subsec:lateral-view}
+%--------------------------------------------------------------------
+
+Aggregating or filtering over the elements of an ARRAY or MAP column
+requires first \emph{exploding} the collection into separate rows.
+\term{LATERAL VIEW EXPLODE} generates one output row per element of the
+collection, joining it back to the containing row's other columns:
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: LATERAL VIEW EXPLODE to unnest an array}]
+-- Count page views by category across all events
+SELECT  cat,
+        COUNT(*)        AS views,
+        COUNT(DISTINCT user_id) AS unique_users
+FROM    user_events
+LATERAL VIEW EXPLODE(categories) cat_table AS cat
+WHERE   dt BETWEEN '2024-03-01' AND '2024-03-31'
+GROUP BY cat
+ORDER BY views DESC
+LIMIT 20;
+\end{lstlisting}
+
+Without \texttt{LATERAL VIEW EXPLODE}, this query would require a
+user-defined function to iterate over the array. With it, the HiveQL
+compiler expands each \texttt{user\_events} row into as many rows as
+there are elements in its \texttt{categories} array, making the standard
+\texttt{GROUP BY} aggregation applicable directly.
+
+\begin{defbox}{LATERAL VIEW EXPLODE}
+\texttt{LATERAL VIEW EXPLODE(col)} generates a virtual table by
+unnesting an \texttt{ARRAY} or \texttt{MAP} column. For an
+\texttt{ARRAY<T>} column, each element produces one row. For a
+\texttt{MAP<K,V>} column, each key-value pair produces one row
+with two virtual columns (key and value). The virtual table is
+cross-joined to the source row via the lateral view construct.
+\end{defbox}
+
+For \texttt{MAP} columns, \texttt{EXPLODE} produces a two-column
+virtual table:
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: EXPLODE on a MAP column}]
+-- Find the average feature value by feature name
+SELECT  feature_name,
+        AVG(feature_val) AS avg_val
+FROM    user_events
+LATERAL VIEW EXPLODE(features) feat_table AS feature_name, feature_val
+WHERE   dt = '2024-03-01'
+GROUP BY feature_name;
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Window Functions}
+\label{subsec:window-functions}
+%--------------------------------------------------------------------
+
+\term{Window functions} compute aggregate values over a sliding window
+of rows around each output row, without collapsing the result set the
+way \texttt{GROUP BY} does. They are declared with the \texttt{OVER}
+clause and are essential for time-series analysis, ranking, sessionisation,
+and cohort analytics.
+
+The general syntax is:
+\[
+\texttt{function\_name(args) OVER ([PARTITION BY cols] [ORDER BY cols] [frame])}
+\]
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: window functions for sales ranking and trends}]
+SELECT
+    region,
+    product_id,
+    sale_date,
+    revenue,
+
+    -- Running total within region, ordered by date
+    SUM(revenue) OVER (
+        PARTITION BY region
+        ORDER BY sale_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )   AS running_total,
+
+    -- 7-day moving average
+    AVG(revenue) OVER (
+        PARTITION BY region, product_id
+        ORDER BY sale_date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    )   AS ma7,
+
+    -- Rank product by revenue within region (ties get same rank)
+    RANK() OVER (
+        PARTITION BY region
+        ORDER BY revenue DESC
+    )   AS revenue_rank,
+
+    -- Row number (no ties; deterministic ordering)
+    ROW_NUMBER() OVER (
+        PARTITION BY region
+        ORDER BY revenue DESC
+    )   AS row_num,
+
+    -- Revenue of the previous day for the same product-region
+    LAG(revenue, 1, 0) OVER (
+        PARTITION BY region, product_id
+        ORDER BY sale_date
+    )   AS prev_day_revenue,
+
+    -- Revenue of the next day
+    LEAD(revenue, 1, 0) OVER (
+        PARTITION BY region, product_id
+        ORDER BY sale_date
+    )   AS next_day_revenue
+
+FROM daily_sales
+WHERE dt = '2024-Q1';
+\end{lstlisting}
+
+\begin{table}[ht]
+\centering
+\caption{Key HiveQL window functions}
+\label{tab:window-functions}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{L{3.2cm} L{7.2cm}}
+\toprule
+\textbf{Function} & \textbf{Description} \\
+\midrule
+\texttt{ROW\_NUMBER()}    & Unique sequential integer per row within partition; no ties \\
+\texttt{RANK()}           & Rank with gaps for ties (e.g., 1, 2, 2, 4) \\
+\texttt{DENSE\_RANK()}    & Rank without gaps (e.g., 1, 2, 2, 3) \\
+\texttt{NTILE(n)}         & Divides partition into $n$ approximately equal buckets \\
+\texttt{PERCENT\_RANK()}  & $(rank - 1) / (rows - 1)$; range [0, 1] \\
+\texttt{LAG(col, n, def)} & Value of \texttt{col} from $n$ rows before the current row \\
+\texttt{LEAD(col, n, def)} & Value of \texttt{col} from $n$ rows after the current row \\
+\texttt{FIRST\_VALUE(col)} & First value in the window frame \\
+\texttt{LAST\_VALUE(col)}  & Last value in the window frame \\
+\texttt{SUM/AVG/MIN/MAX}  & Standard aggregates over the window frame \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{User-Defined Functions}
+\label{subsec:udfs}
+%--------------------------------------------------------------------
+
+When built-in HiveQL functions are insufficient, analysts can extend
+HiveQL through three categories of \term{User-Defined Functions} (UDFs):
+
+\textbf{Scalar UDF:} maps one input row to one output row (one-to-one).
+The most common category: URL parsing, custom hashing, text normalisation,
+geolocation lookups. Implemented by extending Hive's
+\texttt{org.apache.hadoop.hive.ql.exec.UDF} class in Java, or defined
+inline as a temporary function from a Python/R script via HiveQL's
+\texttt{TRANSFORM ... USING} clause.
+
+\textbf{User-Defined Aggregate Function (UDAF):} maps many input rows to
+one output row per group (many-to-one). Use when the built-in aggregates
+(\texttt{SUM}, \texttt{AVG}, \texttt{COUNT}, \texttt{COLLECT\_LIST}) are
+insufficient---for example, computing a custom weighted median or a sketch
+(HyperLogLog approximate distinct count). UDAFs must implement both a
+\texttt{partial} phase (within the Map task, analogous to a Combiner)
+and a \texttt{final} phase (within the Reduce task).
+
+\textbf{User-Defined Table-Generating Function (UDTF):} maps one input
+row to zero or more output rows (one-to-many). This is the category that
+\texttt{EXPLODE} belongs to: it takes one row with an array column and
+produces one row per array element. Custom UDTFs are appropriate for
+parsing XML or JSON strings embedded in a column, splitting a delimited
+string into multiple rows, or expanding a compressed binary event log.
+
+%%====================================================================
+\section{HiveServer2 and Concurrent Access}
+\label{sec:hiveserver2}
+%%====================================================================
+
+Original Hive (version 0.x) ran as a command-line tool that executed
+one query at a time. For a production data warehouse serving hundreds of
+concurrent analysts, this is untenable. \term{HiveServer2}, introduced
+in Hive 0.11 (2013), is a long-running service that exposes Hive's query
+capabilities over JDBC and ODBC interfaces, supporting concurrent sessions
+from multiple clients simultaneously.
+
+HiveServer2's architecture separates query compilation from execution.
+A pool of \term{HiveServer2 daemon threads} each manage one client session,
+compiling the client's HiveQL into a query plan and submitting it to the
+cluster's execution engine. Multiple threads may submit queries to YARN
+simultaneously, with the Fair Scheduler or Capacity Scheduler arbitrating
+cluster resources between them.
+
+\begin{systemdesign}{HiveServer2 in Production: Beeline and JDBC}
+The standard command-line client for HiveServer2 is \texttt{beeline},
+which connects over JDBC:
+\begin{lstlisting}[style=shell]
+beeline -u "jdbc:hive2://hs2-host:10000/analytics_db" \
+        -n analyst_user --password=... \
+        -e "SELECT COUNT(*) FROM web_events WHERE dt='2024-03-01'"
+\end{lstlisting}
+Business intelligence tools (Tableau, Power BI, Apache Superset) connect
+to HiveServer2 via their Hive JDBC/ODBC drivers, making the full Hive
+warehouse accessible through standard BI tooling without any
+Hadoop-specific configuration on the analyst's workstation. HiveServer2
+also supports Kerberos authentication for secure enterprise deployments.
+\end{systemdesign}
+
+%%====================================================================
+\section{Execution Engine Evolution: MapReduce, Tez, and LLAP}
+\label{sec:execution-engines}
+%%====================================================================
+
+The HiveQL language has remained stable since Hive 1.0, but the execution
+engines that compile HiveQL into distributed computation have undergone
+three successive architectural generations, each eliminating a specific
+performance bottleneck of its predecessor.
+
+%--------------------------------------------------------------------
+\subsection{Hive-on-MapReduce: The Baseline}
+\label{subsec:hive-mr}
+%--------------------------------------------------------------------
+
+Chapter~\ref{ch:mapreduce} established that a HiveQL query compiles to
+a sequence of MapReduce jobs. A join followed by an aggregation compiles
+to two jobs: Job~1 performs the join (Map reads input tables, Reduce
+co-locates matching rows); Job~2 performs the aggregation (Map reads the
+join output, Reduce computes the aggregate). Between Job~1 and Job~2,
+the entire join result is materialised to HDFS.
+
+This HDFS materialisation is the core performance problem. For a pipeline
+with $k$ intermediate stages, each transition writes and reads the full
+intermediate result from HDFS: $2 \times (k-1)$ HDFS operations. For a
+complex ETL query with 5 stages, that is 8 full HDFS read/write cycles
+before the final result is produced. At 1\TB\ of intermediate data per
+stage, this amounts to 8\TB\ of unnecessary disk I/O in addition to the
+actual computation.
+
+%--------------------------------------------------------------------
+\subsection{Apache Tez: DAG-Based Execution}
+\label{subsec:tez}
+%--------------------------------------------------------------------
+
+\term{Apache Tez}, released in 2014 and developed primarily by Hortonworks,
+replaces the MapReduce execution model with a \term{directed acyclic graph
+(DAG)} of computation vertices connected by data edges. Tez allows Hive
+to express a complex multi-stage query as a single DAG rather than a chain
+of separate MapReduce jobs.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    mr/.style={rectangle, draw=DERed!60, fill=DERed!15, rounded corners=4pt,
+               minimum width=2.0cm, minimum height=0.65cm,
+               font=\small\sffamily, align=center},
+    tez/.style={rectangle, draw=DEGreen!70, fill=DELightGreen, rounded corners=4pt,
+                minimum width=2.0cm, minimum height=0.65cm,
+                font=\small\sffamily, align=center},
+    disk/.style={cylinder, draw=DEGray!60, fill=DEGray!15, shape border rotate=90,
+                 minimum height=0.55cm, minimum width=0.9cm,
+                 font=\tiny\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  %--- Hive-on-MapReduce (top) ---
+  \node[font=\small\bfseries\sffamily, text=DERed] at (1.4, 7.7) {Hive on MapReduce};
+  \node[mr] (m1) at (0,   7.0) {Map 1};
+  \node[mr] (r1) at (2.2, 7.0) {Reduce 1};
+  \node[disk] (d1) at (3.7, 7.0) {HDFS};
+  \node[mr] (m2) at (5.2, 7.0) {Map 2};
+  \node[mr] (r2) at (7.4, 7.0) {Reduce 2};
+  \node[disk] (d2) at (8.9, 7.0) {HDFS};
+  \node[mr] (m3) at (10.4, 7.0) {Map 3};
+  \node[mr] (r3) at (12.0, 7.0) {Reduce 3};
+
+  \draw[arr, DERed!60] (m1.east) -- (r1.west);
+  \draw[arr, DERed!60] (r1.east) -- (d1.west);
+  \draw[arr, DERed!60] (d1.east) -- (m2.west);
+  \draw[arr, DERed!60] (m2.east) -- (r2.west);
+  \draw[arr, DERed!60] (r2.east) -- (d2.west);
+  \draw[arr, DERed!60] (d2.east) -- (m3.west);
+  \draw[arr, DERed!60] (m3.east) -- (r3.west);
+
+  \node[lbl, text=DERed] at (3.7, 6.35) {\tiny full write/read};
+  \node[lbl, text=DERed] at (8.9, 6.35) {\tiny full write/read};
+
+  %--- Hive on Tez (bottom) ---
+  \node[font=\small\bfseries\sffamily, text=DEGreen!70!black] at (4.4, 5.6) {Hive on Tez};
+
+  \node[tez] (v1) at (0,   4.9) {Vertex 1\\(Scan)};
+  \node[tez] (v2) at (2.4, 5.3) {Vertex 2\\(Join)};
+  \node[tez] (v3) at (2.4, 4.5) {Vertex 3\\(Scan)};
+  \node[tez] (v4) at (5.0, 4.9) {Vertex 4\\(Filter)};
+  \node[tez] (v5) at (7.6, 4.9) {Vertex 5\\(Aggregate)};
+  \node[tez] (v6) at (10.2, 4.9) {Vertex 6\\(Sort)};
+
+  \draw[arr, DEGreen!70!black] (v1.east) -- (v2.west);
+  \draw[arr, DEGreen!70!black] (v3.east) -- (v2.west);
+  \draw[arr, DEGreen!70!black] (v2.east) -- (v4.west);
+  \draw[arr, DEGreen!70!black] (v4.east) -- (v5.west);
+  \draw[arr, DEGreen!70!black] (v5.east) -- (v6.west);
+
+  \node[lbl, text=DEGreen!70!black] at (2.4, 3.8)
+       {\tiny pipelined: no HDFS writes};
+  \draw[DEGreen!50, dashed] (1.5, 4.0) -- (1.9, 4.6);
+
+  % Legend
+  \draw[DERed!60, thick] (0.4, 3.1) -- (1.2, 3.1);
+  \node[lbl, text=DERed] at (2.6, 3.1) {Hive/MapReduce (forced HDFS materialisation)};
+  \draw[DEGreen!70!black, thick] (0.4, 2.7) -- (1.2, 2.7);
+  \node[lbl, text=DEGreen!70!black] at (2.3, 2.7) {Hive/Tez (pipelined in memory)};
+
+\end{tikzpicture}
+\caption{Hive-on-MapReduce vs.\ Hive-on-Tez for a three-stage query.
+         MapReduce forces a full HDFS write and read at each stage boundary
+         (shown as cylinders). Tez represents the same query as a DAG of vertices
+         connected by pipelined edges; intermediate results flow in memory
+         without HDFS materialisation.}
+\label{fig:tez-vs-mr}
+\end{figure}
+
+Tez introduces three types of edges between vertices that control how data
+flows between them:
+
+\begin{itemize}
+  \item \textbf{One-to-one edge:} each task of the downstream vertex reads
+        from exactly one task of the upstream vertex---no data movement
+        required. Used for pipelined filtering and projection.
+  \item \textbf{Broadcast edge:} all tasks of the downstream vertex receive
+        a full copy of all data produced by the upstream vertex. Used for
+        broadcasting a small dimension table to all join tasks (equivalent
+        to Spark's broadcast hash join).
+  \item \textbf{Scatter-gather edge:} the standard shuffle---each upstream
+        task partitions its output by key, and each downstream task reads
+        one partition from every upstream task. Used for \texttt{GROUP BY}
+        and sort-merge joins.
+\end{itemize}
+
+The practical speedup of Hive-on-Tez over Hive-on-MapReduce is 2--5$\times$
+for simple queries and up to 100$\times$ for complex multi-stage pipelines,
+because the HDFS write-read cost of each stage boundary is eliminated.
+By 2015, most Hadoop distributions had configured Hive-on-Tez as the
+default execution engine.
+
+%--------------------------------------------------------------------
+\subsection{Hive LLAP: In-Memory Interactive Queries}
+\label{subsec:llap}
+%--------------------------------------------------------------------
+
+Even with Tez, a Hive query incurs several sources of latency that prevent
+sub-minute interactive response times. First, each YARN container must be
+launched fresh for every query---a process that takes 5--30 seconds of
+JVM startup and class-loading overhead. Second, every query must read its
+input data from HDFS, even if a prior query just read the same data seconds
+ago. Third, thread-level parallelism within a YARN container is limited
+to the cores allocated to that container, preventing fine-grained sharing
+of executor resources between concurrent queries.
+
+\term{Hive LLAP} (Live Long And Process), introduced in Hive 2.0 (2016),
+resolves all three bottlenecks through a fundamentally different execution
+model.
+
+\begin{defbox}{Hive LLAP Architecture}
+LLAP replaces per-query YARN containers with \textbf{persistent long-running
+daemon processes} running on each worker node. Each daemon:
+\begin{enumerate}
+  \item Maintains a \textbf{columnar in-memory cache} of recently read
+        ORC/Parquet data, organised at the column chunk granularity.
+  \item Runs a \textbf{shared thread pool} that executes tasks from
+        multiple concurrent queries simultaneously, without per-query
+        JVM startup overhead.
+  \item Performs \textbf{vectorized execution}: processes data in batches
+        of 1{,}024 rows using tight CPU loops rather than the
+        row-at-a-time interpreted execution model.
+\end{enumerate}
+\end{defbox}
+
+The in-memory cache is the key feature that enables interactive latency.
+A workload in which analysts repeatedly query different slices of the
+same large table---typical in a business intelligence environment---will
+find that after the first query warms the cache, subsequent queries
+across the same table read from RAM at 40--100\GB/s rather than from
+HDFS at 1--5\GB/s. Combined with eliminated container startup overhead,
+LLAP delivers sub-second latency for queries over cached data, and
+5--30 second latency for queries requiring HDFS reads.
+
+%%====================================================================
+\section{Query Optimisation in Hive}
+\label{sec:hive-optimisation}
+%%====================================================================
+
+%--------------------------------------------------------------------
+\subsection{Rule-Based vs.\ Cost-Based Optimisation}
+\label{subsec:rbo-cbo}
+%--------------------------------------------------------------------
+
+In Chapter~\ref{ch:mapreduce}, the Hive compilation pipeline applied
+\emph{rule-based optimisation} (RBO): fixed logical rules such as
+``push predicates below joins'' and ``eliminate unused columns.'' These
+rules improve query plans in many cases but are blind to data
+characteristics---they cannot know whether a join's left input has
+100 rows or 100 billion rows.
+
+\term{Cost-Based Optimisation} (CBO), introduced in Hive 0.14 (2014)
+using Apache Calcite as the optimisation framework, extends the
+compilation pipeline with statistics-driven decisions. The CBO reads
+table and column statistics from the Hive Metastore (collected by
+\texttt{ANALYZE TABLE} commands or auto-gathered on partition creation)
+and uses them to estimate the cardinality and selectivity of each
+operator in the logical plan. With these estimates, the CBO can:
+
+\begin{itemize}
+  \item \textbf{Join reordering}: place the smallest table as the build
+        side of a hash join, minimising the memory footprint and build
+        time. For a three-table join, the optimal ordering reduces hash
+        table size from the cross product of all tables to the smallest
+        table's size.
+  \item \textbf{Join strategy selection}: choose between Common Join
+        (sort-merge, for large tables), Map Join (broadcast, for small
+        tables), and Sort-Merge Bucket Join (for pre-bucketed tables)
+        based on estimated sizes.
+  \item \textbf{Partition pruning with statistics}: estimate the fraction
+        of rows eliminated by a predicate and use this to decide whether
+        to perform a partition scan or a full-table scan.
+\end{itemize}
+
+Enabling the CBO requires first collecting statistics:
+
+\begin{lstlisting}[style=hiveql, caption={Collecting Hive statistics for CBO}]
+-- Collect table-level and column-level statistics
+ANALYZE TABLE orders COMPUTE STATISTICS;
+ANALYZE TABLE orders COMPUTE STATISTICS FOR COLUMNS
+    customer_id, order_date, amount, region;
+
+-- Verify statistics in the Metastore
+DESCRIBE FORMATTED orders;
+-- Output includes: numRows, numFiles, totalSize,
+--                  column-level: min, max, numNulls, numDVs, avgLen
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Join Execution Strategies}
+\label{subsec:join-strategies}
+%--------------------------------------------------------------------
+
+Hive implements four distinct join strategies, each suited to different
+combinations of table sizes and data organisation. Selecting the wrong
+join strategy is one of the most common causes of avoidable performance
+degradation in Hive ETL pipelines.
+
+\textbf{Common Join} (Reduce-Side Join): the default for large tables.
+Both tables are shuffled on the join key to co-locate matching rows on
+the same reducer. For two tables of size $A$ and $B$, the shuffle
+transfers $A + B$ bytes of data across the network. The shuffle is the
+bottleneck: for terabyte-scale tables, it can require hours.
+
+\textbf{Map Join} (Broadcast Join): applicable when one table is small
+enough to fit in executor memory (default threshold: 25\MB\ in Hive,
+10\MB\ in Spark SQL). The small table is loaded into a hash table in
+memory at each Map task. The large table is scanned without any shuffle:
+each Map task probes its local hash table to find matching rows. No
+reducer is needed. For a join of a 10\TB\ fact table against a 20\MB\
+dimension table, Map Join eliminates the entire 10\TB\ shuffle.
+
+\textbf{Bucket Map Join}: applicable when both tables are bucketed on
+the join key with the same number of buckets (or one is a multiple of
+the other). Each Map task processes only the corresponding bucket of each
+table, without loading the entire small table. Extends Map Join to
+cases where the ``small'' table is too large for a full broadcast but
+is well-organised.
+
+\textbf{Sort-Merge Bucket Join} (SMB Join): the highest-performance join
+for large tables that are both bucketed \emph{and} sorted on the join key.
+Because matching rows in both tables are co-located (same bucket) and
+pre-sorted, the join can be performed by a single linear scan of each
+bucket pair---analogous to the merge step in merge sort---without any
+shuffle whatsoever. SMB Join requires upfront investment in table design
+(bucketing and sorting at write time) but delivers the best possible
+join performance at read time.
+
+\begin{table}[ht]
+\centering
+\caption{Hive join strategy comparison}
+\label{tab:join-strategies}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{L{2.4cm} L{1.6cm} L{1.6cm} L{4.6cm}}
+\toprule
+\textbf{Strategy} & \textbf{Shuffle?} & \textbf{Requirement} & \textbf{Optimal use case} \\
+\midrule
+Common Join      & Yes (full) & None          & Large–large join; no pre-processing \\
+Map Join         & No         & Small table $<$ threshold & Large table $\times$ small dimension \\
+Bucket Map Join  & No         & Both bucketed on join key & Medium–large join; data pre-bucketed \\
+SMB Join         & No         & Both bucketed + sorted    & Largest tables; highest write cost \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Vectorized Execution}
+\label{subsec:vectorized}
+%--------------------------------------------------------------------
+
+Traditional SQL execution engines process one row at a time through
+a tree of operator nodes---the \term{Volcano model} (or pull-based
+model). For each row, the query engine invokes virtual function calls
+at each operator, navigating the operator tree once per record. At
+billions of rows, the overhead of these function calls and the
+corresponding CPU branch mispredictions becomes significant.
+
+\term{Vectorized execution}, enabled in Hive with
+\texttt{SET hive.vectorized.execution.enabled = true}, processes data
+in batches of 1{,}024 rows (one \emph{vector batch}) rather than one
+row at a time. Each operator receives a batch of column vectors and
+applies a tight loop over all 1{,}024 rows without virtual function
+calls. The CPU can predict the loop branch perfectly and pipeline the
+arithmetic within each column chunk, making effective use of SIMD
+(Single Instruction Multiple Data) instructions on modern hardware.
+
+For CPU-bound operations (arithmetic on numerical columns, string
+comparisons, hash computations), vectorized execution provides a
+2--10$\times$ throughput improvement over the row-at-a-time model.
+ORC files (Chapter~\ref{ch:yarn-formats}) are particularly well-suited
+for vectorized execution because their columnar layout naturally delivers
+data to the engine in column-major order, matching the layout expected
+by the vector batch operators.
+
+%%====================================================================
+\section{Presto and Trino: SQL on Everything}
+\label{sec:presto}
+%%====================================================================
+
+\term{Presto} was created at Facebook in 2012 to solve a specific problem:
+the Facebook data warehouse team had hundreds of analysts running queries
+on petabyte-scale data, and Hive-on-MapReduce was too slow for the
+interactive ad-hoc analytical queries that characterise analyst workflows.
+A query that answers the question ``how many users in Germany clicked on
+ad campaign 4421 in the last 7 days?'' should return in seconds, not hours.
+
+After open-sourcing Presto in 2013, it was adopted by hundreds of
+organisations including LinkedIn, Twitter, Airbnb, and Uber.
+In 2019, the original Presto creators left Facebook and forked the project
+as \term{Trino} (2020). Both Presto (now maintained by the Presto
+Foundation) and Trino remain actively developed, with largely compatible
+SQL dialects. In this chapter, ``Presto'' refers to both unless the
+distinction matters.
+
+\parencite{Presto2019}
+
+%--------------------------------------------------------------------
+\subsection{Presto Architecture}
+\label{subsec:presto-arch}
+%--------------------------------------------------------------------
+
+A Presto cluster consists of one \term{Coordinator} node and multiple
+\term{Worker} nodes, communicating over HTTP/2.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    coord/.style={rectangle, draw=DEBlue!70, fill=DELightBlue!50,
+                  rounded corners=5pt, minimum width=4.8cm, minimum height=0.9cm,
+                  font=\small\bfseries\sffamily, align=center},
+    subcomp/.style={rectangle, draw=DEBlue!40, fill=DEBlue!8,
+                    minimum width=2.0cm, minimum height=0.6cm,
+                    font=\tiny\sffamily, align=center},
+    worker/.style={rectangle, draw=DEGreen!70, fill=DELightGreen,
+                   rounded corners=4pt, minimum width=2.4cm, minimum height=0.7cm,
+                   font=\small\sffamily, align=center},
+    conn/.style={rectangle, draw=DEAccent!70, fill=DELightAccent,
+                 rounded corners=3pt, minimum width=1.8cm, minimum height=0.55cm,
+                 font=\tiny\sffamily, align=center},
+    client/.style={rectangle, draw=DEGray!60, fill=DEGray!15,
+                   rounded corners=3pt, minimum width=1.8cm, minimum height=0.55cm,
+                   font=\small\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % Client
+  \node[client] (cli) at (0, 8.8) {Client\\(JDBC/REST)};
+
+  % Coordinator box
+  \node[coord] (coord) at (4.5, 8.8) {Coordinator};
+  \node[subcomp] (parser)  at (3.2, 7.8) {Parser};
+  \node[subcomp] (planner) at (5.8, 7.8) {Query Planner};
+  \node[subcomp] (sched)   at (3.2, 7.1) {Scheduler};
+  \node[subcomp] (meta)    at (5.8, 7.1) {Metadata (Catalogs)};
+
+  \draw[arr, DEBlue!60] (cli.east) -- (coord.west)
+       node[midway, above, lbl] {\tiny SQL query};
+  \draw[arr, DEBlue!30] (coord.south) -- (parser.north);
+  \draw[arr, DEBlue!30] (coord.south) -- (planner.north);
+  \draw[arr, DEBlue!30] (parser.south) -- (sched.north);
+  \draw[arr, DEBlue!30] (planner.south) -- (meta.north);
+
+  % Workers
+  \node[worker] (w1) at (0.5,  5.6) {Worker 1};
+  \node[worker] (w2) at (3.0,  5.6) {Worker 2};
+  \node[worker] (w3) at (5.5,  5.6) {Worker 3};
+  \node[worker] (w4) at (8.0,  5.6) {Worker 4};
+
+  \draw[arr, DEBlue] (sched.south) to[out=-90, in=90] (w1.north);
+  \draw[arr, DEBlue] (sched.south) to[out=-90, in=90] (w2.north);
+  \draw[arr, DEBlue] (sched.south) to[out=-90, in=90] (w3.north);
+  \draw[arr, DEBlue] (sched.south) to[out=-90, in=90] (w4.north);
+  \node[lbl, text=DEBlue] at (4.5, 6.5) {\tiny distribute tasks};
+
+  % Workers pipeline between themselves
+  \draw[arr, DEGreen!70!black, dashed]
+       (w1.east) -- (w2.west)
+       node[midway, above, lbl, text=DEGreen!70!black] {\tiny pipeline};
+  \draw[arr, DEGreen!70!black, dashed] (w2.east) -- (w3.west);
+  \draw[arr, DEGreen!70!black, dashed] (w3.east) -- (w4.west);
+
+  % Data sources (connectors)
+  \node[conn] (c1) at (0.5,  4.3) {Hive\\(HDFS/S3)};
+  \node[conn] (c2) at (3.0,  4.3) {JDBC\\(MySQL)};
+  \node[conn] (c3) at (5.5,  4.3) {Kafka};
+  \node[conn] (c4) at (8.0,  4.3) {Elastic-\\search};
+
+  \draw[arr, DEAccent] (w1.south) -- (c1.north);
+  \draw[arr, DEAccent] (w2.south) -- (c2.north);
+  \draw[arr, DEAccent] (w3.south) -- (c3.north);
+  \draw[arr, DEAccent] (w4.south) -- (c4.north);
+  \node[lbl, text=DEAccent] at (4.5, 3.7) {\tiny Connectors (read data)};
+
+\end{tikzpicture}
+\caption{Presto cluster architecture. The Coordinator receives SQL queries from clients,
+         parses and plans them, then distributes tasks to Worker nodes. Workers
+         pipeline results between themselves in memory. Each worker reads data
+         through a Connector that abstracts the underlying data source---HDFS,
+         JDBC databases, Kafka, Elasticsearch, or others.}
+\label{fig:presto-arch}
+\end{figure}
+
+The \term{Coordinator} is the query planning and scheduling process:
+\begin{itemize}
+  \item \textbf{Parser}: converts the SQL string into an abstract syntax
+        tree.
+  \item \textbf{Analyser}: resolves table names and column types by
+        querying the registered catalogs (each catalog is backed by a
+        connector's metadata interface).
+  \item \textbf{Query Planner}: produces a distributed execution plan
+        as a tree of \emph{plan fragments}. Each fragment corresponds to
+        a set of tasks that can run concurrently on multiple workers.
+        Plan fragments are connected by \emph{exchange operators}: the
+        upstream fragment's output is buffered in the upstream workers'
+        memory and pulled by the downstream fragment over HTTP.
+  \item \textbf{Scheduler}: assigns fragments to specific workers, taking
+        data locality (HDFS block locations) into account for the scan
+        fragments.
+\end{itemize}
+
+\term{Workers} execute the tasks assigned by the coordinator. Each worker
+processes a subset of the data by reading through its connector and
+applying the plan fragment's operators (filter, project, aggregate, join).
+Workers communicate intermediate results to each other via in-memory
+buffers over HTTP/2. \emph{There is no disk I/O between plan fragments}:
+all intermediate data flows in memory. This is the primary architectural
+difference from Hive-on-MapReduce.
+
+%--------------------------------------------------------------------
+\subsection{The Connector Model: SQL on Everything}
+\label{subsec:connectors}
+%--------------------------------------------------------------------
+
+The most distinctive feature of Presto is its \term{connector model}:
+a pluggable interface that allows Presto to read from (and in some cases
+write to) any data source that implements the connector API. Each connector
+provides:
+\begin{itemize}
+  \item \textbf{Metadata API:} listing catalogs, schemas, tables, columns,
+        and column statistics.
+  \item \textbf{Data location API:} describing how data is split into
+        independently-readable chunks (HDFS splits, Kafka partition
+        offsets, JDBC pagination ranges).
+  \item \textbf{Record cursor / Page source API:} reading actual data
+        records from the underlying storage.
+\end{itemize}
+
+This abstraction enables \term{federated queries}---SQL queries that
+join data from multiple different data sources in a single statement:
+
+\begin{lstlisting}[style=hiveql, caption={Presto federated query: joining HDFS data with a MySQL table}]
+-- Join HDFS order data (Hive connector)
+-- with a MySQL reference table (JDBC connector)
+-- in a single Presto query
+SELECT  h.customer_id,
+        m.customer_name,
+        m.country,
+        SUM(h.order_amount)  AS total_spent,
+        COUNT(*)             AS order_count
+FROM    hive.analytics.orders  AS h          -- HDFS/Parquet via Hive connector
+JOIN    mysql.crm.customers    AS m          -- MySQL via JDBC connector
+     ON h.customer_id = m.customer_id
+WHERE   h.order_date >= DATE '2024-01-01'
+  AND   m.country IN ('US', 'GB', 'DE')
+GROUP BY h.customer_id, m.customer_name, m.country
+ORDER BY total_spent DESC
+LIMIT 100;
+\end{lstlisting}
+
+This query reads the \texttt{orders} table from Hive (backed by Parquet
+files on HDFS) and the \texttt{customers} table from a MySQL database,
+joining them in Presto's memory without any ETL pipeline or intermediate
+data movement. In a Hive-only environment, this query would require first
+exporting the MySQL table to HDFS and creating a Hive external table---a
+process taking hours.
+
+%--------------------------------------------------------------------
+\subsection{Presto vs.\ Hive: Design Philosophy}
+\label{subsec:presto-vs-hive}
+%--------------------------------------------------------------------
+
+The fundamental design difference between Presto and Hive reflects a
+deliberate trade-off between \emph{query latency} and \emph{fault tolerance}.
+
+\textbf{Presto's design choices:}
+\begin{itemize}
+  \item \textbf{No intermediate disk spill (by default).} All data
+        processing is in-memory. A query that exceeds the cluster's
+        total memory fails immediately with an ``exceeded memory limit''
+        error rather than spilling to disk and completing slowly.
+  \item \textbf{No task retry.} If a worker node fails during query
+        execution, the entire query fails. The coordinator does not
+        retry failed tasks on different workers (though more recent
+        Presto/Trino versions have added limited retry capabilities).
+  \item \textbf{Low startup overhead.} Workers are persistent processes;
+        there is no container-launch overhead. A query begins executing
+        within milliseconds of submission.
+  \item \textbf{Push-based pipelining.} Results flow from upstream to
+        downstream operators without waiting for the upstream stage to
+        complete---the first results are produced before the last input
+        row is read.
+\end{itemize}
+
+\textbf{Hive's design choices:}
+\begin{itemize}
+  \item \textbf{Disk-based fault tolerance.} Intermediate results are
+        materialised to HDFS at each stage boundary (MapReduce) or
+        can be spilled to local disk (Tez). A task can be re-executed
+        if it fails, without restarting the entire query.
+  \item \textbf{Unbounded query size.} A Hive query can process any
+        volume of data, regardless of cluster RAM, because it spills
+        to HDFS. A 100\TB\ sort that would exhaust Presto's memory
+        completes in Hive---slowly, but completely.
+  \item \textbf{Higher startup overhead.} YARN container launches add
+        5--30 seconds to every query. LLAP partially mitigates this
+        with persistent daemons.
+\end{itemize}
+
+\begin{caution}{Presto is Not a Hive Replacement for ETL}
+A common mistake is deploying Presto as a general-purpose replacement
+for Hive and then running large ETL pipelines through it. A 50\TB\
+nightly ETL pipeline that produces many intermediate materialised results
+belongs in Hive-on-Tez (or Spark), where disk-based fault tolerance
+and HDFS spill prevent out-of-memory failures. Presto is optimised for
+the interactive analytics use case: queries that return in seconds or
+minutes, over data that fits in the cluster's RAM. Running multi-hour
+ETL jobs through Presto risks losing all progress if any worker fails.
+Use the right engine for each workload.
+\end{caution}
+
+%%====================================================================
+\section{The SQL-on-Hadoop Ecosystem}
+\label{sec:sql-ecosystem}
+%%====================================================================
+
+Hive and Presto are the two most widely deployed SQL-on-Hadoop engines,
+but the ecosystem includes several other significant systems. Understanding
+their design points helps data engineers match engine to workload.
+
+%--------------------------------------------------------------------
+\subsection{Apache Impala}
+\label{subsec:impala}
+%--------------------------------------------------------------------
+
+\term{Apache Impala}, developed by Cloudera and released in 2012, is a
+massively parallel processing (MPP) SQL engine designed for interactive
+analytics. Unlike Hive, which is built on top of MapReduce/Tez, Impala
+is implemented entirely in C++ and runs as a native process on each
+cluster node---bypassing the JVM and YARN container model entirely.
+
+Impala's key design characteristics:
+\begin{itemize}
+  \item \textbf{No JVM.} C++ avoids JVM garbage collection pauses,
+        which can add hundreds of milliseconds of latency to individual
+        query tasks---unacceptable for sub-second interactive queries.
+  \item \textbf{Shared metadata.} Impala reads the Hive Metastore for
+        table definitions, enabling analysts to switch between Hive and
+        Impala queries against the same tables.
+  \item \textbf{In-memory, no fault tolerance.} Like Presto, Impala
+        does not retry failed tasks. Queries that exceed memory fail.
+  \item \textbf{HDFS and Kudu.} Impala supports both HDFS (Parquet, ORC)
+        and Apache Kudu (a columnar storage engine optimised for fast
+        random reads and updates), making it suitable for near-real-time
+        analytics over mutable data.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Comparative Analysis}
+\label{subsec:engine-comparison}
+%%--------------------------------------------------------------------
+
+\begin{table}[ht]
+\centering
+\caption{SQL-on-Hadoop engine comparison}
+\label{tab:engine-comparison}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{L{1.8cm} L{1.7cm} L{1.5cm} L{1.8cm} L{2.0cm} L{2.2cm}}
+\toprule
+\textbf{Engine} & \textbf{Latency} & \textbf{Scale} & \textbf{Fault Tol.} & \textbf{Data sources} & \textbf{Best use case} \\
+\midrule
+Hive/MapReduce  & Hours     & Unlimited & Full       & HDFS (ORC/Parquet/CSV) & Multi-TB batch ETL \\
+Hive/Tez        & Minutes   & Unlimited & Full       & HDFS                   & Complex batch analytics \\
+Hive/LLAP       & Seconds   & Large     & Full       & ORC/Parquet on HDFS    & BI dashboards; repeated queries \\
+Presto/Trino    & Seconds   & RAM-bound & Query-fail & Federated (Hive, JDBC, Kafka, \ldots) & Ad-hoc interactive analytics \\
+Spark SQL       & Seconds   & Large     & Partial    & HDFS, S3, JDBC, Kafka  & ML pipelines; unified batch+stream \\
+Apache Impala   & Sub-second & RAM-bound & Query-fail & HDFS, Kudu             & Fastest interactive on Parquet \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The selection principle is workload-driven:
+\begin{itemize}
+  \item \textbf{Nightly batch ETL over terabytes:} Hive-on-Tez or Spark.
+        Fault tolerance and unlimited scale matter; latency does not.
+  \item \textbf{BI dashboards with repeated queries:} Hive LLAP.
+        The cache warms on the first query; subsequent queries are served
+        from memory at sub-second latency.
+  \item \textbf{Ad-hoc analyst queries ($<$5 minutes):} Presto/Trino.
+        Federated query capability and low startup latency are critical.
+  \item \textbf{Fastest interactive queries on Parquet, low cardinality:}
+        Apache Impala. C++ execution with no JVM overhead.
+  \item \textbf{ML training on the same data as SQL analytics:} Spark SQL.
+        A single framework covers both SQL and MLlib.
+\end{itemize}
+
+\begin{researchspotlight}{Venkataraman et al.\ (2019) --- Presto: SQL on Everything}
+\textbf{Citation:} Sethi, R., Traverso, M., Sundstrom, D., Phillips, D.,
+Xie, W., Sun, Y., Yigitbasi, N., Jin, H., Hwang, E., Shingte, N., and
+Berner, C.\ (2019). Presto: SQL on Everything. \textit{Proceedings of the
+35th IEEE International Conference on Data Engineering (ICDE 2019)},
+pp.\ 1802--1813. \parencite{Presto2019}
+
+\smallskip\noindent
+\textbf{Key insight:} The paper's thesis is that the connector model---a
+clean separation between the SQL execution engine and the data source---
+is the enabling abstraction for ``SQL on everything.'' By standardising
+how the engine asks a data source about its schema and data layout, Presto
+can treat any data source (HDFS, RDBMS, Kafka, Elasticsearch, custom
+REST APIs) identically from the query execution perspective. The paper
+calls this property \emph{data source agnosticism}.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Described the Coordinator/Worker/Connector architecture and
+        the push-based distributed execution model, showing how
+        pipelined query plans eliminate the HDFS materialisation
+        bottleneck of Hive-on-MapReduce.
+  \item Introduced the \emph{Connector SPI} (Service Provider Interface)---
+        the five interfaces (metadata, data location, data source, record
+        cursor, and transaction) that a connector must implement to integrate
+        a new data source into Presto without modifying the core engine.
+  \item Reported Facebook's production deployment: Presto ran on thousands
+        of worker nodes, processing petabytes per day, serving 30{,}000+
+        queries per day from 1{,}000+ internal Facebook users with a
+        median query latency of under 1 minute and a P95 latency of under
+        10 minutes.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} Presto/Trino is deployed at hundreds of organisations
+and has become the de facto standard engine for interactive SQL analytics
+on cloud data lakes. Amazon Athena (serverless SQL on S3) is built on
+Presto. Databricks SQL Warehouse and Snowflake adopted similar connector
+architectures. The Presto SPI was the direct inspiration for Apache
+Arrow's DataFusion connector model and the Delta Sharing protocol's
+reader interface.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: Airbnb's Migration to a Unified SQL Platform}
+\label{sec:airbnb-case}
+%%====================================================================
+
+\begin{casestudy}{Airbnb --- From Hive Monolith to Hive-Plus-Presto Tiered SQL Platform}
+
+\textbf{Background.}
+By 2015, Airbnb had grown to over 2 million listings and 40 million
+users, with a data team of approximately 100 engineers and analysts
+generating more than 10{,}000 Hive queries per day. The company's
+data warehouse ran on a 500-node Hadoop cluster with approximately
+15\PB\ of data, processed exclusively by Hive-on-MapReduce.
+
+The data platform was suffering from three interconnected problems:
+analyst query latency averaged 45 minutes (with some queries taking
+8+ hours), cluster utilisation was chronically at 95\%+ because
+long-running batch ETL jobs and short analyst queries shared the same
+YARN queue, and analyst adoption of data-driven decision-making was
+limited because the 45-minute query latency discouraged exploratory
+iteration.
+
+\smallskip
+\textbf{Phase 1 (2016): Hive Tez Migration.}
+Airbnb's first performance initiative migrated all analyst-facing Hive
+queries from MapReduce to Tez. The migration was transparent to analysts:
+no query rewrites were required, as the HiveQL syntax is identical
+regardless of execution engine. The results were significant:
+
+\begin{itemize}
+  \item Median analyst query latency dropped from 45 minutes to 18 minutes.
+  \item P95 latency dropped from $>$8 hours to 75 minutes.
+  \item Cluster CPU utilisation dropped from 95\% to 70\% for the same
+        analytical workload, because Tez eliminated the HDFS
+        materialisation I/O that had been consuming a disproportionate
+        share of disk bandwidth.
+\end{itemize}
+
+However, even 18 minutes remained too slow for the exploratory, iterative
+analysis style that Airbnb's product and growth teams required. An analyst
+testing hypotheses about booking conversion rates might run 15--20
+queries in sequence; at 18 minutes each, this required a full day.
+
+\smallskip
+\textbf{Phase 2 (2017): Presto Deployment for Interactive Analytics.}
+Airbnb deployed a dedicated 150-node Presto cluster alongside the
+existing Hive cluster. The Presto cluster shared the Hive Metastore,
+so all tables defined for Hive were immediately queryable through Presto
+without any schema migration.
+
+The workload routing strategy divided queries by expected duration:
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Expected duration} & \textbf{Engine} & \textbf{Queue} \\
+\midrule
+$<$5 minutes (interactive) & Presto & \texttt{analyst\_interactive} \\
+5--60 minutes (analytical) & Hive/Tez & \texttt{analyst\_batch} \\
+$>$60 minutes (ETL/batch)  & Hive/Tez & \texttt{production\_etl} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Routing was implemented in Airbnb's internal query routing service,
+which classified incoming queries based on a set of heuristics---estimated
+data scanned (from partition statistics), presence of \texttt{CROSS JOIN}
+or unconstrained \texttt{JOIN} patterns, and explicit analyst preference
+flags. The routing service directed queries to the appropriate cluster
+transparently.
+
+\smallskip
+\textbf{The booking funnel analysis pipeline.}
+A representative workload that benefited most from Presto was the
+booking funnel analysis: understanding how users progress from search
+to booking across Airbnb's platform. The analysis requires joining four
+tables:
+
+\begin{enumerate}
+  \item \textbf{\texttt{search\_events}} ($\sim$2\TB/day): one row
+        per guest search, with search parameters, result count, and
+        filters applied.
+  \item \textbf{\texttt{listing\_views}} ($\sim$500\GB/day): one row
+        per listing viewed from a search results page.
+  \item \textbf{\texttt{booking\_attempts}} ($\sim$50\GB/day): one row
+        per booking initiation, including payment method and price.
+  \item \textbf{\texttt{dim\_listings}} ($\sim$4\GB, daily snapshot):
+        listing metadata including location, price tier, and amenity flags.
+\end{enumerate}
+
+The booking funnel query computes conversion rates at each step of the
+funnel, segmented by geography and listing price tier. On Hive-on-MapReduce,
+this query ran in 4 hours. On Hive-on-Tez, it ran in 55 minutes. On
+Presto, after Catalyst-equivalent optimisations by the Presto analyser
+(broadcast join for \texttt{dim\_listings}, which at 4\GB\ fits within
+each worker's broadcast buffer), the query ran in 4 minutes.
+
+The 4-minute latency transformed analyst behaviour: instead of running
+the funnel analysis once per day and committing to the results, analysts
+began running it hourly during A/B test periods, checking whether a new
+feature was affecting conversion rates in near real time.
+
+\smallskip
+\textbf{Phase 3 (2019): LLAP for Dashboards.}
+Airbnb's engineering dashboards required even lower latency for
+recurring queries: the homepage executive dashboard refreshed every
+5 minutes, pulling the same suite of KPIs (bookings, revenue, host
+activations, guest satisfaction scores) from Hive tables. On Presto,
+these queries took 20--60 seconds depending on cluster load.
+
+Deploying Hive LLAP for the dashboard tier cached the relevant table
+partitions in the LLAP daemons' memory after the first query of each
+5-minute cycle. Subsequent queries in the same cycle served from the
+in-memory cache, reducing dashboard query latency to 1--5 seconds.
+
+\smallskip
+\textbf{Outcomes.}
+The three-tier SQL architecture---LLAP for dashboards, Presto for
+interactive analytics, Hive/Tez for batch ETL---produced measurable
+improvements across every operational dimension:
+
+\begin{itemize}
+  \item \textbf{Analyst query latency:} P50 reduced from 45 minutes
+        (Hive/MR) to 3.5 minutes (Presto), a $13\times$ improvement.
+  \item \textbf{Data-driven decisions:} analyst-submitted queries per day
+        increased from 10{,}000 to 47{,}000 within 18 months of
+        deploying Presto---a $4.7\times$ increase, attributed to the
+        lower iteration cost of interactive query response times.
+  \item \textbf{Cluster efficiency:} separating interactive (Presto)
+        from batch ETL (Hive/Tez) eliminated the queue starvation
+        problem. Long-running ETL jobs no longer delayed analyst queries;
+        the Presto cluster's dedicated allocation guaranteed
+        sub-5-minute response for all routed queries.
+  \item \textbf{Engineering savings:} the number of ``bespoke
+        pre-computed aggregate tables'' (summary tables created by
+        engineers specifically to speed up slow analyst queries)
+        dropped by 60\%, because analysts could run the original
+        queries directly on Presto at acceptable latency.
+\end{itemize}
+
+\textbf{The architectural lesson.}
+Airbnb's platform evolution illustrates the principle that no single
+SQL engine is optimal for all workloads. The cost of this differentiation---
+operating three distinct query engines against the same Hive Metastore---
+is engineering complexity in routing, monitoring, and SLA management.
+The benefit is that each engine operates within its optimal design envelope:
+LLAP for cached sub-second BI, Presto for interactive exploration, Hive/Tez
+for batch ETL that requires fault tolerance and unlimited scale.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch7-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item HiveQL's \textbf{complex data types} (\texttt{ARRAY}, \texttt{MAP},
+        \texttt{STRUCT}) model semi-structured data natively.
+        \textbf{LATERAL VIEW EXPLODE} unnests array and map columns into
+        relational rows, enabling standard \texttt{GROUP BY} aggregation
+        over nested data without UDFs.
+
+  \item \textbf{Window functions} (\texttt{OVER}, \texttt{PARTITION BY},
+        \texttt{ORDER BY}, \texttt{ROWS BETWEEN}) compute running totals,
+        moving averages, and rankings without collapsing the result set.
+        Key functions: \texttt{ROW\_NUMBER}, \texttt{RANK},
+        \texttt{LAG}, \texttt{LEAD}, \texttt{NTILE}.
+
+  \item Hive \textbf{UDF} categories: scalar UDF (one-to-one),
+        \textbf{UDAF} (many-to-one, must implement partial + final phases),
+        and \textbf{UDTF} (one-to-many, used for \texttt{EXPLODE}-style
+        expansion).
+
+  \item \textbf{Apache Tez} replaces MapReduce's chain of jobs with a
+        single DAG of vertices, eliminating forced HDFS materialisation
+        at each stage boundary. Speedup: 2--5$\times$ for simple queries,
+        up to 100$\times$ for complex multi-stage pipelines.
+
+  \item \textbf{Hive LLAP} adds a persistent in-memory columnar cache
+        and shared executor threads, eliminating per-query JVM startup
+        overhead and enabling sub-second latency for cached data.
+
+  \item Hive's \textbf{Cost-Based Optimizer} (CBO, powered by Apache
+        Calcite) uses Metastore statistics (\texttt{ANALYZE TABLE}) to
+        choose join order and join strategy. Without statistics, the CBO
+        falls back to rule-based optimisation.
+
+  \item The four Hive \textbf{join strategies}: Common Join (shuffle,
+        always applicable), Map Join (no shuffle, small table broadcast),
+        Bucket Map Join (no shuffle, both bucketed), and Sort-Merge Bucket
+        Join (no shuffle, both bucketed and sorted --- highest performance,
+        highest write cost).
+
+  \item \textbf{Vectorized execution} processes 1{,}024 rows per batch
+        rather than one row at a time, eliminating virtual function call
+        overhead and enabling SIMD parallelism. Compatible with ORC's
+        columnar layout. Typical speedup: 2--10$\times$ for CPU-bound
+        operations.
+
+  \item \textbf{Presto/Trino} uses a Coordinator + Worker architecture
+        with fully pipelined, in-memory execution and no fault tolerance.
+        The \textbf{Connector SPI} enables federated SQL across HDFS,
+        JDBC databases, Kafka, and arbitrary data sources in a single
+        query.
+
+  \item Key Presto vs.\ Hive trade-off: Presto sacrifices fault tolerance
+        and unbounded scale for low latency and federated access. Use
+        Presto for interactive queries ($<$5 minutes); use Hive for batch
+        ETL (hours) that requires fault tolerance and disk spill.
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch7-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq What is the \texttt{LATERAL VIEW EXPLODE} construct in HiveQL?
+A table \texttt{orders} has a column \texttt{tags ARRAY<STRING>}.
+Write a HiveQL query that counts the total number of times each tag
+appears across all orders.
+
+\sq What is the difference between \texttt{RANK()} and
+\texttt{DENSE\_RANK()}? Give a concrete example with five rows where the
+two functions produce different output.
+
+\sq Explain the three categories of Hive UDFs: UDF, UDAF, and UDTF.
+For each, give one real-world use case and explain why it falls into
+that category.
+
+\sq What problem does Apache Tez solve that Hive-on-MapReduce does not?
+For a HiveQL query that compiles to three MapReduce jobs with 500\MB\
+of intermediate data at each stage boundary, calculate the HDFS I/O
+saved by using Tez instead.
+
+\sq What is Hive LLAP? Describe the three components of LLAP architecture
+and explain why LLAP enables sub-second latency for repeated queries
+over the same table.
+
+\sq What is the difference between rule-based optimisation (RBO) and
+cost-based optimisation (CBO) in Hive? Give one example where RBO would
+produce a suboptimal plan that CBO would avoid.
+
+\sq Explain Hive's Sort-Merge Bucket Join. What preconditions must
+both tables satisfy, and why does this join require no shuffle at query
+time?
+
+\sq What is the Presto Connector SPI? Name three data sources that
+Presto can query through connectors, and explain what interface the
+connector must implement for each source.
+
+\sq A data engineer argues that Presto should replace Hive entirely
+because Presto is always faster. Write a detailed counter-argument
+using a specific workload scenario where Hive is the correct choice.
+
+\sq HiveServer2 replaced the original Hive command-line tool. What
+two problems with the original tool did HiveServer2 address, and what
+interface (protocol) does HiveServer2 expose to clients?
+
+\sq What is vectorized execution in Hive? Explain the difference from
+the Volcano (row-at-a-time) execution model, and identify which file
+format is best suited for vectorized execution in Hive.
+
+\sq A Presto query fails with ``Query exceeded maximum memory.''
+Explain: (a) why this error occurs; (b) why the same query would
+not fail in Hive-on-Tez; (c) what you should do to fix the problem
+without switching engines.
+
+\sq Explain Hive's Map Join strategy. What is the default table size
+threshold for a Map Join, and what happens during query execution
+that eliminates the shuffle?
+
+\sq What is a Presto federated query? Write the SQL statement structure
+(not actual data) for a query that joins a Hive table with a MySQL table.
+What does the Presto Coordinator need to execute this query?
+
+\sq Compare Apache Impala and Presto on three dimensions: implementation
+language, JVM usage, and approach to data source support.
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Window Function Design.}
+A subscription streaming service wants to analyse user churn. The table
+\texttt{user\_daily\_activity} has columns: \texttt{user\_id},
+\texttt{activity\_date}, \texttt{minutes\_streamed} (0 if not active),
+\texttt{country}.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Write a HiveQL window function query that computes, for each
+        user and date, the 7-day rolling average of \texttt{minutes\_streamed}.
+  \item Write a query using \texttt{LAG} to compute the number of days
+        since each user last had a non-zero \texttt{minutes\_streamed}
+        value.
+  \item Write a query using \texttt{NTILE(10)} to divide users into
+        10 deciles by their total minutes streamed in the past 30 days,
+        and compute the churn rate for each decile.
+  \item Explain how the window function queries in (a)--(c) would be
+        compiled by Hive-on-Tez compared to Hive-on-MapReduce. How many
+        jobs/stages would each require?
+\end{enumerate}
+
+\ap \textbf{Join Strategy Selection.}
+A retail analytics system has the following tables:
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Table} & \textbf{Rows} & \textbf{Compressed size} & \textbf{Bucketed on} \\
+\midrule
+\texttt{transactions}  & 80 billion & 12\TB & \texttt{customer\_id} (500 buckets) \\
+\texttt{customers}     & 200 million & 80\GB & \texttt{customer\_id} (500 buckets) \\
+\texttt{dim\_country}  & 250         & 40\KB & None \\
+\texttt{dim\_category} & 8{,}000     & 2\MB  & None \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{enumerate}[label=(\alph*)]
+  \item For a join between \texttt{transactions} and \texttt{dim\_country},
+        identify the optimal join strategy and explain why. Estimate the
+        network traffic for the alternative (Common Join) approach.
+  \item For a join between \texttt{transactions} and \texttt{customers},
+        both bucketed on \texttt{customer\_id} with 500 buckets, identify
+        the optimal join strategy. What additional condition must hold for
+        Sort-Merge Bucket Join to be applicable?
+  \item For a three-table join: \texttt{transactions} JOIN
+        \texttt{customers} JOIN \texttt{dim\_category}, propose the join
+        order and strategy for each join. Justify the order using the CBO's
+        cost minimisation objective.
+  \item Explain what Hive statistics (output of \texttt{ANALYZE TABLE})
+        the CBO would use to automatically determine the join strategies
+        in (a)--(c) without manual hints.
+\end{enumerate}
+
+\ap \textbf{Presto vs.\ Hive Workload Assignment.}
+A data analytics team runs the following five daily workloads:
+\begin{enumerate}[label=(\roman*)]
+  \item A nightly ETL job that reads 200\TB\ of raw clickstream logs,
+        filters and aggregates them, and writes the result to a Hive
+        table (runtime: 4--6 hours).
+  \item Ad-hoc analyst queries over the last 7 days of clickstream data
+        ($\sim$50\GB) to investigate a product anomaly (target: $<$3 min).
+  \item A weekly cohort analysis joining three tables totalling 800\GB
+        with 12 join stages and complex window functions (runtime target:
+        $<$30 minutes).
+  \item A live executive dashboard refreshing every 5 minutes, running
+        the same 5 KPI queries over the last hour of data ($\sim$2\GB).
+  \item A machine learning feature engineering pipeline that generates
+        1{,}000 features per user from 60 days of history, followed by
+        a logistic regression training run (runtime: 2--3 hours).
+\end{enumerate}
+
+For each workload, specify: (a) which engine (Hive/MapReduce, Hive/Tez,
+Hive/LLAP, Presto, Spark SQL) is most appropriate and why; (b) the
+specific property of the workload that drives the engine choice;
+(c) the risk of using the wrong engine.
+
+\ap \textbf{LLAP Cache Sizing.}
+An analytics team deploys Hive LLAP on a 50-node cluster. Each node
+has 128\GB\ of RAM. The LLAP daemon on each node is allocated 80\GB,
+of which 60\GB\ is dedicated to the in-memory columnar cache and 20\GB\
+to the executor thread pool.
+
+The team's most frequently queried table is \texttt{sales\_events}:
+partitioned by day, each day's partition is 400\GB\ compressed (ORC)
+but 1.2\TB\ uncompressed. Analysts typically query the last 30 days.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the total LLAP cache capacity across the cluster.
+  \item The uncompressed size of 30 days of data is 36\TB. What
+        fraction of the 30-day working set fits in the LLAP cache?
+  \item ORC's columnar layout allows the cache to store only the columns
+        accessed by queries rather than full rows. If analyst queries
+        reference an average of 8 of the 120 columns in
+        \texttt{sales\_events}, recalculate the fraction of the
+        working set that fits in cache.
+  \item Propose two changes to the LLAP configuration or table design
+        that would increase the cache hit rate, and explain the trade-off
+        of each.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{Multi-Engine SQL Platform for a Media Company.}
+A digital media company operates a 1{,}000-node Hadoop cluster with
+400\TB\ of data. Three teams use the cluster:
+\begin{itemize}
+  \item \textbf{Data Engineering:} runs nightly ETL pipelines (Hive/MapReduce),
+        producing 20 curated tables from 150\TB\ of raw log data.
+  \item \textbf{Analytics:} runs 500 ad-hoc queries per day, targeting
+        $<$5-minute response time, on the curated tables ($\sim$15\TB).
+  \item \textbf{Business Intelligence:} runs 10 recurring dashboard queries
+        every 15 minutes on 5 summary tables ($\sim$500\GB total).
+\end{itemize}
+
+Design a three-tier SQL platform for this company. Your design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The SQL engine and execution environment (YARN queues, cluster
+        sizing) for each team's workload.
+  \item How the three engines share the Hive Metastore and Parquet/ORC
+        data on HDFS without data duplication.
+  \item A query routing service: how incoming queries are classified and
+        directed to the correct engine. What metadata does the routing
+        service inspect to make this classification?
+  \item The LLAP daemon configuration for the BI dashboard tier: how
+        many nodes, how much cache, and how to ensure the most-queried
+        partitions are warmed in the cache before the first dashboard
+        refresh of the day.
+  \item A monitoring and SLA framework: which metrics to track for each
+        tier, and the alerting thresholds that indicate a tier is degrading.
+\end{enumerate}
+
+\dpr \textbf{HiveQL to Presto SQL Migration.}
+Your company has 2{,}000 HiveQL queries (stored as \texttt{.hql} files
+in a Git repository) that need to be migrated to Presto SQL to reduce
+query latency from 30--45 minutes to $<$5 minutes.
+
+Design the migration. Your design must address:
+\begin{enumerate}[label=(\alph*)]
+  \item The four most common SQL dialect differences between HiveQL and
+        Presto SQL that require query rewrites. Give one example of each.
+  \item An automated compatibility scanning tool: how to programmatically
+        detect which of the 2{,}000 queries require manual rewriting
+        vs.\ which can be migrated automatically.
+  \item A testing strategy to verify that the migrated Presto queries
+        produce results identical to the original HiveQL queries.
+        What is the acceptable tolerance for numerical differences?
+  \item The migration sequence: which 20\% of the 2{,}000 queries should
+        be migrated first, and why? What criterion determines priority?
+  \item A rollback plan if a migrated query produces incorrect results
+        in production (e.g., a finance report that a business user flags
+        as wrong).
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Window Function Analytics Pipeline (HiveQL).}
+Write a HiveQL script that analyses a table \texttt{daily\_sales}
+(columns: \texttt{region STRING}, \texttt{product\_id STRING},
+\texttt{sale\_date STRING}, \texttt{revenue DOUBLE}) and produces a
+report containing:
+(a) 7-day moving average revenue per region-product;
+(b) revenue rank within region for each date;
+(c) day-over-day revenue growth percentage;
+(d) cumulative revenue per region from the start of the month.
+
+\begin{lstlisting}[style=hiveql, caption={PE7.1: Window function analytics pipeline}]
+-- Create the source table (run once to set up)
+CREATE TABLE IF NOT EXISTS daily_sales (
+    region      STRING,
+    product_id  STRING,
+    sale_date   STRING,
+    revenue     DOUBLE
+)
+STORED AS ORC
+PARTITIONED BY (dt STRING);
+
+-- Main analytics query: 4 window metrics in one pass
+SELECT
+    region,
+    product_id,
+    sale_date,
+    revenue,
+
+    -- (a) 7-day moving average
+    ROUND(
+        AVG(revenue) OVER (
+            PARTITION BY region, product_id
+            ORDER BY sale_date
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        ), 2
+    )   AS ma7_revenue,
+
+    -- (b) Revenue rank within region for each date
+    RANK() OVER (
+        PARTITION BY region, sale_date
+        ORDER BY revenue DESC
+    )   AS daily_rank_in_region,
+
+    -- (c) Day-over-day growth %
+    ROUND(
+        100.0 * (revenue - LAG(revenue, 1, revenue) OVER (
+                     PARTITION BY region, product_id
+                     ORDER BY sale_date
+                 )) /
+        NULLIF(LAG(revenue, 1, revenue) OVER (
+                   PARTITION BY region, product_id
+                   ORDER BY sale_date
+               ), 0),
+        2
+    )   AS dod_growth_pct,
+
+    -- (d) Month-to-date cumulative revenue per region
+    SUM(revenue) OVER (
+        PARTITION BY region, SUBSTR(sale_date, 1, 7)
+        ORDER BY sale_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )   AS mtd_revenue
+
+FROM    daily_sales
+WHERE   dt BETWEEN '2024-01-01' AND '2024-03-31'
+ORDER BY region, product_id, sale_date;
+\end{lstlisting}
+
+\pe \textbf{Presto Query Profiler (Python).}
+Implement a Python tool that connects to a Presto/Trino coordinator via
+its REST API, submits a SQL query, polls for completion, and reports
+execution statistics: elapsed time, bytes scanned, rows processed,
+number of splits, and peak memory usage.
+
+\begin{lstlisting}[style=pyspark, caption={PE7.2: Presto query profiler via REST API}]
+import time
+import requests
+import json
+
+PRESTO_HOST = "http://presto-coordinator:8080"
+HEADERS     = {
+    "X-Presto-User":    "analyst",
+    "X-Presto-Catalog": "hive",
+    "X-Presto-Schema":  "analytics",
+    "Content-Type":     "application/json",
+}
+
+def submit_query(sql: str) -> str:
+    """Submit a query and return the query ID."""
+    resp = requests.post(
+        f"{PRESTO_HOST}/v1/statement",
+        headers=HEADERS,
+        data=sql
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("nextUri"), data.get("id")
+
+def poll_query(next_uri: str) -> dict:
+    """Poll until the query completes; return final stats."""
+    while next_uri:
+        resp = requests.get(next_uri, headers=HEADERS)
+        resp.raise_for_status()
+        data = resp.json()
+        state = data.get("stats", {}).get("state", "UNKNOWN")
+
+        if state in ("FINISHED", "FAILED", "CANCELED"):
+            return data
+
+        # Print progress
+        stats = data.get("stats", {})
+        pct = stats.get("progressPercentage", 0)
+        print(f"  [{state}] {pct:.1f}% complete "
+              f"({stats.get('completedSplits',0)}/{stats.get('totalSplits',0)} splits)",
+              end="\r")
+
+        next_uri = data.get("nextUri")
+        time.sleep(0.5)
+
+    return {}
+
+def profile_query(sql: str):
+    """Submit, poll, and report stats for a Presto SQL query."""
+    print(f"Submitting: {sql[:80]}{'...' if len(sql)>80 else ''}")
+    t_start   = time.time()
+    next_uri, query_id = submit_query(sql)
+    result    = poll_query(next_uri)
+    elapsed   = time.time() - t_start
+
+    stats = result.get("stats", {})
+    state = stats.get("state", "UNKNOWN")
+    print(f"\n{'='*60}")
+    print(f"Query ID     : {query_id}")
+    print(f"Final state  : {state}")
+    print(f"Elapsed      : {elapsed:.2f}s")
+
+    if state == "FINISHED":
+        print(f"Rows read    : {stats.get('processedRows',0):,}")
+        print(f"Bytes scanned: {stats.get('processedBytes',0)/1e9:.2f} GB")
+        print(f"Splits done  : {stats.get('completedSplits',0):,}")
+        print(f"Peak mem     : {stats.get('peakMemoryBytes',0)/1e9:.2f} GB")
+        print(f"CPU time     : {stats.get('cpuTimeMillis',0)/1000:.2f}s")
+    elif state == "FAILED":
+        err = result.get("error", {})
+        print(f"Error        : {err.get('errorName','?')}: {err.get('message','?')}")
+
+# --- Run a sample query ---
+SQL = """
+SELECT  region,
+        COUNT(*)          AS num_sales,
+        SUM(revenue)      AS total_revenue,
+        AVG(revenue)      AS avg_revenue
+FROM    hive.analytics.daily_sales
+WHERE   dt BETWEEN '2024-01-01' AND '2024-03-31'
+GROUP BY region
+ORDER BY total_revenue DESC
+"""
+
+profile_query(SQL)
+\end{lstlisting}
+
+\pe \textbf{HiveQL Complex Type Analytics (HiveQL + Python).}
+A table \texttt{session\_events} stores user session data with an
+\texttt{ARRAY<STRING>} column \texttt{pages\_visited} (ordered list
+of page URLs per session) and a \texttt{MAP<STRING,DOUBLE>} column
+\texttt{engagement\_scores} (per-page engagement metrics). Write:
+(a) a HiveQL query using \texttt{LATERAL VIEW EXPLODE} to compute
+the top-10 most visited page URL patterns; (b) a Python script that
+reads the result and visualises the URL frequency distribution.
+
+\begin{lstlisting}[style=hiveql, caption={PE7.3a: LATERAL VIEW EXPLODE on session pages}]
+-- Top 10 most visited pages (unnesting the pages_visited array)
+SELECT  page_url,
+        COUNT(*)                    AS visit_count,
+        COUNT(DISTINCT session_id)  AS unique_sessions,
+        ROUND(AVG(eng_score), 4)    AS avg_engagement
+FROM    session_events
+LATERAL VIEW EXPLODE(pages_visited)    pv_table  AS page_url
+LATERAL VIEW EXPLODE(engagement_scores) es_table AS eng_page, eng_score
+WHERE   dt = '2024-03-01'
+  AND   eng_page = page_url          -- correlate map key with array element
+GROUP BY page_url
+HAVING COUNT(*) > 1000               -- filter low-frequency pages
+ORDER BY visit_count DESC
+LIMIT 10;
+\end{lstlisting}
+
+\begin{lstlisting}[style=pyspark, caption={PE7.3b: Visualise URL frequency from Hive results}]
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# Simulate result of the HiveQL query above
+results = {
+    "page_url": ["/home", "/search", "/listing/123", "/booking",
+                 "/messages", "/profile", "/wishlist", "/help",
+                 "/explore", "/trips"],
+    "visit_count": [9_812_441, 7_234_190, 4_112_030, 2_981_200,
+                     1_822_441, 1_654_022, 1_244_330, 987_441,
+                     872_301, 641_200],
+    "avg_engagement": [0.72, 0.65, 0.81, 0.89, 0.77, 0.68, 0.74,
+                       0.45, 0.58, 0.83],
+}
+df = pd.DataFrame(results).sort_values("visit_count", ascending=True)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Bar chart: visit counts
+axes[0].barh(df["page_url"], df["visit_count"] / 1e6,
+             color="#003c78", alpha=0.8)
+axes[0].set_xlabel("Visit count (millions)")
+axes[0].set_title("Top 10 Pages by Visit Count")
+axes[0].grid(axis="x", alpha=0.3)
+
+# Scatter: engagement vs. volume
+sc = axes[1].scatter(
+    df["visit_count"] / 1e6,
+    df["avg_engagement"],
+    s=120, c=df["visit_count"] / 1e6,
+    cmap="Blues", alpha=0.85, edgecolors="k", linewidths=0.5
+)
+for _, row in df.iterrows():
+    axes[1].annotate(row["page_url"].split("/")[-1] or "home",
+                     (row["visit_count"]/1e6, row["avg_engagement"]),
+                     textcoords="offset points", xytext=(5, 3),
+                     fontsize=8)
+axes[1].set_xlabel("Visit count (millions)")
+axes[1].set_ylabel("Avg engagement score")
+axes[1].set_title("Engagement vs.\ Volume by Page")
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("page_analytics.png", dpi=150)
+print("Saved: page_analytics.png")
+\end{lstlisting}

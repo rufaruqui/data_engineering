@@ -76,24 +76,24 @@ pdflatex main.tex
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
 | 1 | The Big Data Revolution: Scale, Velocity, and Variety | W01 | **DONE** |
-| 2 | Data Integration: Heterogeneity, Quality, and Provenance | W02 | pending |
+| 2 | Data Integration: Heterogeneity, Quality, and Provenance | W02 | **DONE** |
 
 ### Part II — Distributed Storage
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 3 | Distributed File Systems: GFS and HDFS | W03 | pending |
+| 3 | Distributed File Systems: GFS and HDFS | W03 | **DONE** |
 
 ### Part III — Batch Processing at Scale
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 4 | The MapReduce Paradigm and the Hadoop Processing Stack | W04 | pending |
-| 5 | Resource Management, File Formats, and I/O Optimization | W05 | pending |
+| 4 | The MapReduce Paradigm and the Hadoop Processing Stack | W04 | **DONE** |
+| 5 | Resource Management, File Formats, and I/O Optimization | W05 | **DONE** |
 
 ### Part IV — In-Memory Processing
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
 | 6 | Apache Spark: In-Memory Distributed Computing | W06 | **DONE** |
-| 7 | SQL at Scale: HiveQL and the SQL-on-Hadoop Ecosystem | W07 | pending |
+| 7 | SQL at Scale: HiveQL and the SQL-on-Hadoop Ecosystem | W07 | **DONE** |
 
 ### Part V — Data Pipelines and Modern Integration
 | Ch | Title | Source weeks | Status |
