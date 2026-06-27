@@ -1,0 +1,1862 @@
+%% ch03.tex — Chapter 3: Distributed File Systems: GFS and HDFS
+%% Part of "Data Engineering" textbook
+
+\chapter{Distributed File Systems: GFS and HDFS}
+\label{ch:hdfs}
+
+\epigraph{\textit{``We have designed the system for a usage pattern in which
+most files are mutated by appending new data rather than overwriting
+existing data. Random writes within a file are practically non-existent.''}}{Ghemawat, Gobioff \& Leung, SOSP 2003}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain why conventional file systems (NFS, POSIX, SAN) cannot
+        meet the storage requirements of petabyte-scale data engineering,
+        and identify the specific assumptions they violate.
+  \item Describe the GFS architecture---master, chunkservers, clients,
+        chunk size, and metadata design---and explain the key design
+        decisions that made it suitable for Google's workload.
+  \item Draw and explain the HDFS architecture: NameNode, DataNodes,
+        Secondary NameNode, and their interactions.
+  \item Trace the complete HDFS read and write paths step by step,
+        including pipeline replication, checksum verification, and
+        lease management.
+  \item Explain rack-aware replication: the default three-replica
+        placement policy and why it balances fault tolerance against
+        write overhead.
+  \item Describe the NameNode high-availability (HA) architecture with
+        Active/Standby nodes, ZooKeeper leader election, and shared
+        Journal Nodes.
+  \item Identify HDFS's design limitations---the small file problem,
+        no random writes, low-latency access---and contrast HDFS
+        with cloud object stores (Amazon S3, Google Cloud Storage).
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:integration} established how data moves between systems
+and how heterogeneous sources are unified. Before any of that
+integration logic can execute, however, the raw data must live
+somewhere. In 2003, Google faced a storage problem that no existing
+file system could solve: billions of web pages, totalling petabytes of
+data, needed to be stored reliably across thousands of commodity
+servers, indexed sequentially at enormous throughput, and kept
+available even as individual servers failed---which, at that scale,
+happened multiple times per day.
+
+The solution Google published was the \term{Google File System} (GFS)
+\parencite{GFS2003}. Three years later, the Apache Hadoop project
+reimplemented and open-sourced the same design as the \term{Hadoop
+Distributed File System} (HDFS). HDFS became the foundational storage
+layer for an entire ecosystem of distributed data processing tools---
+MapReduce, Hive, Pig, HBase, and eventually Spark---and it remains in
+active production use at organisations ranging from Yahoo! and Facebook
+to LinkedIn and the New York Times. Understanding HDFS is understanding
+the bedrock on which the rest of this book's processing stack rests.
+
+%%====================================================================
+\section{The Storage Problem at Petabyte Scale}
+\label{sec:storage-problem}
+%%====================================================================
+
+A \term{file system} is the software layer responsible for organising,
+naming, accessing, and protecting data stored on physical storage
+devices. The file system abstracts away the physical device---magnetic
+platters, solid-state cells, or optical discs---and presents the
+programmer with a uniform interface of named files in a hierarchical
+directory structure. For four decades, this model served the computing
+industry well. It continues to serve it well for most workloads today.
+
+The model breaks at petabyte scale for three fundamental reasons.
+
+\textbf{Single-machine capacity.} A conventional file system is
+managed by a single host. Even the largest shared file systems---
+Network File System (NFS) and SAN-attached volumes---ultimately
+depend on a finite number of storage controllers. By 2003, Google's
+web crawl was producing hundreds of terabytes per month, a rate that
+had already surpassed what any single storage system could absorb.
+The only solution was to distribute data across a cluster of
+independent machines.
+
+\textbf{Throughput requirements.} Web indexing requires reading an
+entire dataset sequentially to reprocess it---there is no practical
+way to index a subset of the web. A single high-performance SCSI disk
+in 2003 delivered approximately 50 MB/s of sequential read throughput.
+Reading one petabyte from a single disk would take over 230 days.
+Distributing the data across 1,000 disks and reading them in parallel
+reduces this to approximately five hours---a feasible engineering
+timeline.
+
+\textbf{Hardware failure as normal operation.} A conventional file
+system---and the RDBMS systems that sit on top of it---treats hardware
+failure as an exceptional condition to be recovered from. At Google's
+scale in 2003, a cluster of a few thousand commodity PCs experienced
+approximately three node failures per day as normal operation: disk
+bearing failures, memory errors, motherboard failures, and network card
+failures, all occurring on a predictable statistical schedule
+\parencite{GFS2003}. Any storage system that treated such failures as
+exceptional events would be unavailable for recovery most of the time.
+The failure model must instead treat hardware failure as \emph{the
+expected case} and design accordingly.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of storage architectures for big data workloads}
+\label{tab:storage-comparison}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.0cm} L{2.4cm} L{2.4cm} L{4.0cm}}
+\toprule
+\textbf{System} & \textbf{Max capacity} & \textbf{Fault model} & \textbf{Reason it fails at big data scale} \\
+\midrule
+POSIX local FS  & Single disk / array & Single point of failure & No horizontal scaling; one server limit \\
+NFS             & NAS head + array    & NAS head is SPOF       & Centralized metadata and I/O bottleneck \\
+SAN             & Storage array       & Expensive RAID         & Proprietary hardware; prohibitive cost/PB \\
+RDBMS blob      & Server RAM + disk   & WAL recovery           & Tuned for random access; not sequential scan \\
+\textbf{GFS / HDFS} & \textbf{Cluster-wide} & \textbf{Expects failure} & \textbf{Designed for this workload} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%%====================================================================
+\section{The Google File System}
+\label{sec:gfs}
+%%====================================================================
+
+The Google File System, published by Ghemawat, Gobioff, and Leung at
+the ACM Symposium on Operating Systems Principles (SOSP) in October
+2003, is one of the most consequential systems papers of the past two
+decades \parencite{GFS2003}. It describes a purpose-built distributed
+file system designed not to satisfy general-purpose file system
+requirements---POSIX compliance, low-latency random access, small
+file support---but to satisfy the specific requirements of Google's
+production workloads.
+
+%--------------------------------------------------------------------
+\subsection{Workload Assumptions and Design Decisions}
+\label{subsec:gfs-workload}
+%--------------------------------------------------------------------
+
+GFS was designed around a careful empirical study of Google's actual
+workloads. The authors observed that virtually all files in Google's
+production environment were large---multiple gigabytes to hundreds of
+gigabytes---and that data access patterns were dominated by sequential
+reads and sequential appends, with random writes essentially absent.
+Files were written once, read many times, and never modified in place
+after initial creation. Concurrent reads from many clients were the
+norm; concurrent random writes to the same file were not.
+
+These observations drove six key design decisions that distinguish GFS
+from conventional file systems:
+
+\begin{enumerate}
+  \item \textbf{Large chunk size (64 MB).} Files are divided into
+        fixed-size \term{chunks} of 64\MB. This is orders of magnitude
+        larger than the 4-\KB\ blocks used by conventional file systems.
+        Large chunks reduce the amount of metadata the master must
+        maintain (one entry per chunk rather than one per block), reduce
+        client-to-master communication (a client needs the location of
+        fewer chunks to read a large file), and encourage direct TCP
+        connections between clients and chunkservers for sustained
+        sequential I/O.
+
+  \item \textbf{Centralised, in-memory metadata.} The GFS master holds
+        all file system metadata---the file namespace, chunk-to-file
+        mappings, chunk locations, access control lists---entirely in
+        RAM. This enables sub-millisecond metadata lookups. The master
+        has a single-machine capacity for metadata because large chunk
+        sizes keep the number of chunks manageable: at 64\MB\ per chunk,
+        one petabyte of data requires only $\sim$16 million chunk
+        entries, which fits comfortably in modern server RAM.
+
+  \item \textbf{No data caching.} GFS explicitly does not cache file
+        data at either clients or chunkservers. The workload is
+        dominated by streaming reads that iterate through files once;
+        cached data would be evicted before it could be reused. The
+        kernel's buffer cache handles any incidental temporal locality.
+
+  \item \textbf{Write-by-append semantics.} GFS optimises for atomic
+        append operations rather than random writes. A client can append
+        data to any file at the current end-of-file position; this
+        corresponds to how log files, web crawl outputs, and search
+        index segments are naturally produced.
+
+  \item \textbf{Fault tolerance through replication, not redundant
+        hardware.} Each 64\MB\ chunk is stored on three chunkservers
+        by default. If one fails, the master re-replicates the
+        affected chunks on a surviving server. No RAID arrays or
+        specialised storage hardware are required.
+
+  \item \textbf{Relaxed consistency.} GFS provides a consistency model
+        weaker than POSIX. Concurrent writes to the same region from
+        different clients may produce an interleaved, ``defined but
+        inconsistent'' result. Google's applications were designed to
+        tolerate this---for example, by writing unique chunk identifiers
+        with each record and using deduplication at read time.
+\end{enumerate}
+
+%--------------------------------------------------------------------
+\subsection{GFS Architecture}
+\label{subsec:gfs-arch}
+%--------------------------------------------------------------------
+
+A GFS cluster consists of three types of components: one \term{GFS
+master}, multiple \term{chunkservers}, and multiple \term{clients}.
+
+The \textbf{GFS master} maintains all file system metadata in RAM. It
+does not participate in data I/O between clients and chunkservers; once
+a client has obtained the chunk location from the master, all data
+transfer occurs directly between the client and the chunkserver. This
+separation of the control plane (master) from the data plane
+(chunkservers and clients) is the central architectural decision that
+enables GFS to scale: the master handles only lightweight metadata
+operations, while the bulk data flows on separate direct connections.
+
+The master communicates with chunkservers through two periodic
+mechanisms. Each chunkserver sends a \term{heartbeat} to the master
+every few seconds to confirm it is operational; the absence of
+heartbeats for a configurable period causes the master to mark the
+chunkserver as failed. Each chunkserver also sends a periodic
+\term{chunk report} listing all the chunk replicas it currently holds,
+which allows the master to reconstruct its view of chunk locations
+after a restart.
+
+\textbf{Chunkservers} store chunks as plain files on their local Linux
+file systems. They do not cache chunks in memory; the kernel's buffer
+cache provides whatever temporal locality exists. Each chunkserver is
+responsible for maintaining checksum metadata for every chunk it stores,
+and it verifies checksums on every read to detect data corruption.
+
+\textbf{Clients} implement the GFS API (which is not POSIX-compatible).
+A client contacts the master to resolve a file name to a list of chunk
+handles and their chunkserver locations, then communicates directly
+with the appropriate chunkservers for data I/O. Clients cache the
+chunk location information locally for a limited time, reducing
+master load.
+
+\begin{researchspotlight}{Ghemawat, Gobioff \& Leung (2003) --- The Google File System}
+\textbf{Citation:} Ghemawat, S., Gobioff, H., \& Leung, S.-T.\ (2003).
+The Google File System. \textit{Proceedings of the 19th ACM Symposium
+on Operating Systems Principles (SOSP)}, pp.\ 29--43.
+\parencite{GFS2003}
+
+\smallskip\noindent
+\textbf{Key insight:} The authors' central argument is that
+\emph{workload-specific design} outperforms general-purpose design at
+extreme scale. By deliberately abandoning POSIX compliance, random
+write support, and fine-grained access control, GFS achieved
+throughput and fault tolerance impossible with any off-the-shelf
+file system.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Demonstrated that a centralised metadata server (the master)
+        is not a scalability bottleneck when (a) metadata is kept
+        entirely in RAM, (b) chunk sizes are large enough that the
+        total metadata volume is manageable, and (c) data I/O bypasses
+        the master entirely.
+  \item Introduced \emph{atomic record append}---an operation that
+        allows multiple clients to append to the same file
+        concurrently without prior coordination, enabling
+        producer-consumer pipelines over shared log files.
+  \item Quantified failure rates in commodity clusters and provided
+        the engineering argument that replication (software-based
+        redundancy on commodity hardware) is more cost-effective than
+        hardware RAID at petabyte scale.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} GFS is cited in over 14,000 academic papers---
+one of the most-cited systems papers ever published. It directly
+inspired HDFS (the open-source reimplementation), Amazon S3, Microsoft
+Azure Blob Storage, and Google's own successor system, Colossus.
+The paper is assigned reading at Stanford CS246, MIT 6.830, and CMU
+15-721.
+\end{researchspotlight}
+
+%%====================================================================
+\section{HDFS Architecture}
+\label{sec:hdfs-arch}
+%%====================================================================
+
+The Hadoop Distributed File System is the open-source Apache
+implementation of the GFS design. It was initially developed at Yahoo!
+by Doug Cutting and Mike Cafarella---who had been building a web
+crawler called Nutch and needed a production-ready open-source
+replacement for GFS---and contributed to the Apache Software Foundation
+in 2006. HDFS translates the GFS architecture into Java, with some
+naming changes (GFS master $\to$ NameNode, chunkserver $\to$ DataNode,
+chunk $\to$ block) and some incremental design improvements.
+
+%--------------------------------------------------------------------
+\subsection{The NameNode}
+\label{subsec:namenode}
+%--------------------------------------------------------------------
+
+The \term{NameNode} is HDFS's master process. It is the centralised
+metadata server responsible for maintaining the file system namespace
+and the block-to-DataNode mapping. Like the GFS master, it holds all
+metadata entirely in RAM; the typical NameNode memory footprint is
+approximately 150 bytes per file and 150 bytes per block, meaning that
+one million files average $\sim$300\MB\ of heap---manageable on a
+modern server.
+
+The NameNode's metadata is persisted to disk in two complementary
+structures. The \term{FsImage} is a complete, point-in-time snapshot
+of the file system namespace---a serialised checkpoint of all metadata.
+The \term{EditLog} is a write-ahead log of all namespace mutations
+since the last checkpoint: file creations, deletions, permission
+changes, and block allocations. On startup, the NameNode replays the
+EditLog against the last FsImage to reconstruct the current namespace
+state. Under normal operation, the EditLog grows continuously; it is
+periodically merged into the FsImage in a process called
+\term{checkpointing}.
+
+The NameNode does \emph{not} store the physical locations of blocks in
+persistent metadata. Instead, block locations are rebuilt from scratch
+at startup through the DataNode \term{block report}---each DataNode
+reports the full list of blocks it currently holds when it connects to
+the NameNode. This design avoids the risk of stale location data in
+the FsImage becoming inconsistent with the actual DataNode state after
+failures or maintenance.
+
+\begin{defbox}{NameNode Responsibilities}
+\begin{enumerate}
+  \item \textbf{Namespace management:} maintain the directory tree and
+        file-to-block mapping.
+  \item \textbf{Block management:} track which DataNodes hold each
+        block replica; initiate re-replication when a replica is lost.
+  \item \textbf{Access control:} enforce file permissions on all client
+        requests.
+  \item \textbf{Lease management:} grant and revoke write leases that
+        determine which client may currently write to a file.
+  \item \textbf{Load balancing:} coordinate the HDFS Balancer, which
+        moves blocks between DataNodes to equalise disk utilisation.
+\end{enumerate}
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{DataNodes}
+\label{subsec:datanodes}
+%--------------------------------------------------------------------
+
+\term{DataNodes} are the worker processes that store actual block data.
+Each DataNode manages its local storage---one or more hard disks or
+SSDs---and serves block read and write requests directly from clients.
+DataNodes are designed to run on commodity hardware; a typical DataNode
+configuration in 2024 uses 12--24 spinning hard disks of 8--18\TB\
+each, providing 96--432\TB\ of raw capacity per node.
+
+DataNodes communicate with the NameNode through two periodic messages.
+A \term{heartbeat} (sent every 3 seconds by default) confirms the
+DataNode is alive and operational. A \term{block report} (sent every 6
+hours by default, or on demand at startup) lists all block replicas the
+DataNode currently holds. The NameNode uses both to maintain its live
+view of the cluster's block map. If a heartbeat is absent for more than
+10.5 minutes (the default \texttt{dfs.heartbeat.interval} $\times$
+\texttt{dfs.namenode.heartbeat.recheck-interval}), the NameNode marks
+the DataNode as dead and schedules re-replication of all blocks it held.
+
+DataNodes also perform \term{block scanning}: each DataNode
+independently verifies the checksums of all its stored blocks on a
+configurable schedule (default: every three weeks). A block that fails
+checksum verification is reported to the NameNode as corrupted, and
+the NameNode responds by scheduling re-replication from a healthy
+replica.
+
+%--------------------------------------------------------------------
+\subsection{The Secondary NameNode}
+\label{subsec:secondary-nn}
+%--------------------------------------------------------------------
+
+\begin{caution}{The Secondary NameNode is Not a Hot Standby}
+Despite its misleading name, the \textbf{Secondary NameNode} is not a
+standby that takes over if the primary NameNode fails. It performs a
+single function: it periodically merges the EditLog into the FsImage,
+producing a new, updated FsImage that it sends back to the primary
+NameNode. This \emph{checkpointing} service reduces the EditLog size
+and therefore the NameNode startup time after a crash. If the primary
+NameNode fails, the Secondary NameNode's checkpoint can be used to
+recover the namespace, but this requires a manual failover process
+and results in some minutes of downtime. True hot standby failover
+requires the High Availability architecture described in
+Section~\ref{sec:hdfs-ha}.
+\end{caution}
+
+The checkpointing cycle works as follows. The Secondary NameNode
+fetches the current FsImage and EditLog from the primary, applies all
+EditLog transactions to the FsImage in memory, writes the resulting
+merged FsImage to disk, and sends it back to the primary. The primary
+then begins writing subsequent namespace mutations to a fresh, empty
+EditLog. The net result is that the EditLog never grows indefinitely;
+checkpointing occurs every hour by default, or when the EditLog exceeds
+one million transactions.
+
+%--------------------------------------------------------------------
+\subsection{Block Storage}
+\label{subsec:blocks}
+%--------------------------------------------------------------------
+
+\term{Blocks} are the fundamental unit of storage in HDFS. The default
+block size is 128\MB\ (increased from the original 64\MB\ in Hadoop
+2.x). When a client writes a file, HDFS divides it into 128\MB\ blocks
+and distributes those blocks across DataNodes; each block is stored
+three times by default (the \term{replication factor}).
+
+The large block size---32,768 times larger than a typical ext4 file
+system block---serves several purposes. It reduces the number of
+metadata entries the NameNode must maintain. It enables sustained
+sequential I/O at full disk throughput without per-block overhead. And
+it reduces the number of round trips between client and NameNode
+required to locate all blocks of a large file.
+
+A notable edge case: the last block of a file may be smaller than
+128\MB. HDFS does not pad it to 128\MB; the block occupies only as
+much disk space as the actual data. A 1-\GB\ file consists of eight
+full 128\MB\ blocks, not nine.
+
+%--------------------------------------------------------------------
+\subsection*{The Complete HDFS Cluster Architecture}
+\label{subsec:hdfs-arch-overview}
+%--------------------------------------------------------------------
+
+Figure~\ref{fig:hdfs-arch} assembles all three components into a single
+view of the HDFS cluster architecture. The key point to internalise is
+the separation of the \emph{control plane} (all metadata operations that
+involve the NameNode) from the \emph{data plane} (all block transfers
+that flow directly between clients and DataNodes). The NameNode processes
+millions of metadata RPC calls per day but never touches a byte of block
+data; every byte of data is transferred directly between clients and
+DataNodes on independent TCP connections.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    nn/.style={rectangle, draw=DEBlue, fill=DELightBlue!50, rounded corners=5pt,
+               minimum width=8.2cm, minimum height=2.1cm},
+    dn/.style={rectangle, draw=DEGreen!70!black, fill=DELightGreen, rounded corners=4pt,
+               minimum width=2.2cm, minimum height=1.8cm, align=center,
+               font=\small\sffamily},
+    snn/.style={rectangle, draw=DEGray!65, fill=DEGray!10, rounded corners=4pt,
+                minimum width=2.4cm, minimum height=1.5cm, align=center,
+                font=\small\sffamily},
+    cl/.style={rectangle, draw=DEAccent, fill=DELightAccent, rounded corners=4pt,
+               minimum width=2.0cm, minimum height=0.85cm, align=center,
+               font=\small\bfseries\sffamily},
+    ibox/.style={rectangle, draw=DEBlue!40, fill=white, rounded corners=2pt,
+                 minimum width=1.7cm, minimum height=0.6cm,
+                 font=\tiny\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    darr/.style={{Stealth[length=4pt,width=4pt]}-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  %--- NameNode ---
+  \node[nn] (nn) at (4.8, 6.0) {};
+  \node[font=\small\bfseries\sffamily\color{DEBlue}] at (4.8, 7.0)
+       {NameNode \textnormal{(Master)}};
+  \node[ibox] at (2.7, 6.05) {File Namespace\\(in RAM)};
+  \node[ibox] at (4.8, 6.05) {FsImage\\(disk)};
+  \node[ibox] at (6.9, 6.05) {EditLog\\(disk)};
+  \node[font=\tiny\sffamily, text=DEGray] at (4.8, 5.28)
+       {Metadata plane only --- no block data passes through};
+
+  %--- Secondary NameNode ---
+  \node[snn] (snn) at (11.5, 6.2) {Secondary\\NameNode\\[2pt]%
+       {\tiny\textit{(checkpointing)}}};
+
+  %--- DataNodes ---
+  \node[dn] (dn1) at (1.6, 2.0)
+       {DataNode 1\\[3pt]{\scriptsize Rack A}\\[4pt]{\tiny blocks on disk}};
+  \node[dn] (dn2) at (4.8, 2.0)
+       {DataNode 2\\[3pt]{\scriptsize Rack B}\\[4pt]{\tiny blocks on disk}};
+  \node[dn] (dn3) at (8.0, 2.0)
+       {DataNode 3\\[3pt]{\scriptsize Rack B}\\[4pt]{\tiny blocks on disk}};
+
+  %--- Client ---
+  \node[cl] (cl) at (11.5, 2.5) {Client};
+
+  %--- Heartbeat + Block Report: DataNode <-> NameNode ---
+  % NN bottom is at y = 6.0 - 1.05 = 4.95
+  % DN top  is at y = 2.0 + 0.90 = 2.90
+  \draw[darr, DEGreen!65!black]
+    (dn1.north) -- (1.6, 4.95)
+    node[midway, left, lbl, text=DEGreen!65!black]
+         {\tiny heartbeat\\[-2pt]\tiny block report};
+  \draw[darr, DEGreen!65!black]
+    (dn2.north) -- (4.8, 4.95);
+  \draw[darr, DEGreen!65!black]
+    (dn3.north) -- (8.0, 4.95)
+    node[midway, right, lbl, text=DEGreen!65!black]
+         {\tiny heartbeat\\[-2pt]\tiny block report};
+
+  %--- Client <-> NameNode: metadata RPC (control plane, step 1) ---
+  % nn.east is at x = 4.8 + 4.1 = 8.9, y = 6.0
+  \draw[darr, DEAccent]
+    (cl.west) to[out=170, in=0]
+    node[midway, above, lbl, text=DEAccent]
+         {\tiny\textbf{(1)} metadata RPC / block locations}
+    (nn.east);
+
+  %--- Client -> DataNode: direct data I/O (data plane, step 2) ---
+  \draw[arr, DEBlue, dashed, thick]
+    (cl.south) to[out=220, in=-10]
+    node[midway, below, lbl, text=DEBlue]
+         {\tiny\textbf{(2)} data I/O (TCP direct)}
+    (dn3.east);
+
+  %--- NameNode -> Secondary NameNode: send FsImage + EditLog ---
+  \draw[arr, DEGray!60]
+    (nn.north east) to[out=25, in=155]
+    node[midway, above, lbl, text=DEGray!60]
+         {\tiny FsImage + EditLog}
+    (snn.west);
+
+  %--- Secondary NameNode -> NameNode: return merged FsImage ---
+  \draw[arr, DEGray!60]
+    (snn.south) to[out=255, in=5]
+    node[pos=0.45, right, lbl, text=DEGray!60]
+         {\tiny merged FsImage\\[-2pt]\tiny (checkpoint)}
+    (nn.east);
+
+  %--- Rack dashed boundaries ---
+  \draw[dashed, DEGray!40, rounded corners=5pt]
+       (0.4, 0.8) rectangle (2.8, 3.2);
+  \node[font=\tiny\sffamily, text=DEGray!55] at (1.6, 0.5) {Rack A};
+
+  \draw[dashed, DEGray!40, rounded corners=5pt]
+       (3.6, 0.8) rectangle (9.2, 3.2);
+  \node[font=\tiny\sffamily, text=DEGray!55] at (6.4, 0.5) {Rack B};
+
+\end{tikzpicture}
+\caption{Complete HDFS cluster architecture. The NameNode (master) stores
+         all file system metadata in RAM (file namespace, block-to-DataNode
+         map) and persists mutations to the EditLog and FsImage. DataNodes
+         (workers) store blocks on local disks and communicate with the
+         NameNode via periodic heartbeats and block reports. Clients obtain
+         block locations from the NameNode \emph{(step~1 --- control plane)},
+         then read/write block data directly to DataNodes \emph{(step~2 ---
+         data plane)}, bypassing the NameNode entirely. The Secondary
+         NameNode checkpoints the EditLog into the FsImage to bound restart
+         time after a NameNode crash.}
+\label{fig:hdfs-arch}
+\end{figure}
+
+%%====================================================================
+\section{Replication and Fault Tolerance}
+\label{sec:replication}
+%%====================================================================
+
+HDFS achieves fault tolerance through \term{block replication}: storing
+each block on multiple DataNodes such that if any individual DataNode
+fails, the remaining replicas ensure data availability. The default
+replication factor of 3 means that the failure of any single DataNode
+does not result in any data loss or unavailability.
+
+%--------------------------------------------------------------------
+\subsection{Rack-Aware Replication}
+\label{subsec:rack-aware}
+%--------------------------------------------------------------------
+
+Naive replication---placing all three replicas on randomly chosen
+DataNodes---would provide poor fault tolerance in a real data centre.
+Physical servers in a data centre are organised in \term{racks}: sets
+of 20--40 servers sharing a top-of-rack switch. A rack-level failure
+(a switch failure or a power distribution unit trip) takes down every
+server in the rack simultaneously. If all three replicas of a block
+happened to reside on nodes within the same rack, a rack failure would
+destroy all three replicas.
+
+HDFS addresses this with \term{rack-aware replication}. The default
+policy for replication factor 3 places:
+\begin{itemize}
+  \item \textbf{Replica 1}: on the same node as the writing client (or
+        a random node if the client is not running on a DataNode).
+  \item \textbf{Replica 2}: on a DataNode in a \emph{different} rack
+        from Replica 1.
+  \item \textbf{Replica 3}: on a \emph{different} DataNode in the same
+        rack as Replica 2.
+\end{itemize}
+
+This placement balances three competing objectives. Placing Replica 1
+locally (or on a nearby node) minimises write latency for the initial
+block placement. Placing Replica 2 on a different rack ensures that a
+single rack failure cannot destroy all replicas. Placing Replica 3 in
+the same rack as Replica 2 (rather than a third rack) reduces cross-rack
+network traffic: reads can often be satisfied from within the same rack
+as the client, reducing the load on the inter-rack network bandwidth.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    server/.style={rectangle, draw=DEBlue!50, fill=DELightBlue,
+                   minimum width=1.4cm, minimum height=0.6cm,
+                   font=\scriptsize\sffamily, align=center},
+    rack/.style={rectangle, draw=DEGray!60, fill=DEGray!8,
+                 rounded corners=3pt, inner sep=8pt},
+    sw/.style={rectangle, draw=DEGray!60, fill=DEGray!25,
+               minimum width=3.2cm, minimum height=0.4cm,
+               font=\scriptsize\sffamily},
+    wire/.style={draw=DEGray!50, thick},
+    replica/.style={circle, minimum size=0.28cm, inner sep=0pt,
+                    font=\scriptsize\bfseries, text=white}
+  ]
+  % Rack A
+  \begin{scope}[local bounding box=rackA]
+    \node[server] (n1) at (0, 3.6) {DN-1\\{\tiny\itshape Replica 1}};
+    \node[server] (n2) at (0, 2.7) {DN-2};
+    \node[server] (n3) at (0, 1.8) {DN-3};
+    \node[sw]     (swA) at (0, 1.2) {Switch A};
+    \node[rack, fit=(n1)(n2)(n3)(swA),
+          label={[font=\small\bfseries\sffamily\color{DEBlue}]above:Rack A}] {};
+  \end{scope}
+
+  % Rack B
+  \begin{scope}[xshift=4.5cm, local bounding box=rackB]
+    \node[server] (n4) at (0, 3.6) {DN-4\\{\tiny\itshape Replica 2}};
+    \node[server] (n5) at (0, 2.7) {DN-5\\{\tiny\itshape Replica 3}};
+    \node[server] (n6) at (0, 1.8) {DN-6};
+    \node[sw]     (swB) at (0, 1.2) {Switch B};
+    \node[rack, fit=(n4)(n5)(n6)(swB),
+          label={[font=\small\bfseries\sffamily\color{DEBlue}]above:Rack B}] {};
+  \end{scope}
+
+  % Inter-rack switch
+  \node[sw, minimum width=4cm] (core) at (2.25, 0.3)
+        {Core / Aggregation Switch};
+
+  \draw[wire] (swA) -- (core);
+  \draw[wire] (swB) -- (core);
+
+  % Replica indicators
+  \node[replica, fill=DERed]    at (0.9, 3.6) {1};
+  \node[replica, fill=DEAccent] at (0.9, 3.6+0) {};  % already labelled
+  \node[replica, fill=DEGreen]  at (4.5+0.9, 3.6) {2};
+  \node[replica, fill=DEBlue]   at (4.5+0.9, 2.7) {3};
+
+  % Legend
+  \node[font=\scriptsize\sffamily, align=left] at (9.5, 2.8) {%
+    \textbf{Replica placement}\\[3pt]
+    R1: local write node (DN-1)\\
+    R2: different rack (DN-4)\\
+    R3: same rack as R2 (DN-5)\\[5pt]
+    \textit{A single rack failure}\\
+    \textit{cannot lose all replicas.}};
+\end{tikzpicture}
+\caption{HDFS rack-aware replication with replication factor 3.
+         Two replicas in Rack~B; one in Rack~A. A Rack~A failure
+         leaves Replicas~2 and~3 available.}
+\label{fig:rack-aware}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Failure Detection and Re-replication}
+\label{subsec:re-replication}
+%--------------------------------------------------------------------
+
+When the NameNode detects that a DataNode is dead (missed heartbeats
+for more than the configured threshold), it immediately identifies
+every block for which that DataNode held a replica. For each such
+block, the NameNode checks whether the remaining replicas satisfy the
+replication factor. If a block now has fewer than the required number
+of replicas, the NameNode schedules \term{re-replication}: it instructs
+one of the surviving DataNodes that holds a copy to transfer the block
+to a new DataNode, restoring the full replication factor.
+
+Re-replication is prioritised by urgency. Blocks that have only one
+surviving replica (single-replica blocks) are re-replicated first,
+since they are at immediate risk of data loss if the last surviving
+DataNode also fails. Blocks with two surviving replicas are re-replicated
+next. The re-replication process consumes cluster network bandwidth; in
+a large cluster where many DataNodes are replaced simultaneously (e.g.,
+during a scheduled maintenance window), the NameNode throttles
+re-replication to avoid saturating the network.
+
+%%====================================================================
+\section{HDFS Read and Write Paths}
+\label{sec:hdfs-io}
+%%====================================================================
+
+Understanding how data actually flows in and out of HDFS---not merely
+the architecture of the components but the sequence of operations---is
+essential for diagnosing performance problems and for understanding why
+HDFS makes the consistency trade-offs it does.
+
+%--------------------------------------------------------------------
+\subsection{The Read Path}
+\label{subsec:read-path}
+%--------------------------------------------------------------------
+
+Reading a file from HDFS involves the following sequence:
+
+\begin{enumerate}
+  \item \textbf{Open.} The client calls \texttt{FileSystem.open()}.
+        The HDFS client library contacts the NameNode via RPC and
+        requests the block locations for the first few blocks of the
+        target file.
+
+  \item \textbf{Block location response.} The NameNode returns an
+        ordered list of DataNode addresses for each requested block,
+        sorted by their network proximity to the client. The list
+        prioritises DataNodes on the same node as the client, then
+        the same rack, then other racks---the data locality principle
+        from Chapter~\ref{ch:foundations}.
+
+  \item \textbf{Direct DataNode connection.} The client connects
+        directly to the closest DataNode for the first block and
+        streams the data. The client reads data from the DataNode
+        through a TCP socket; no data passes through the NameNode.
+
+  \item \textbf{Checksum verification.} As each 512-byte
+        \term{checksum chunk} is read, the client verifies its CRC-32C
+        checksum against the stored checksum. A mismatch indicates
+        data corruption; the client reports the bad block to the
+        NameNode and retries on an alternative replica.
+
+  \item \textbf{Block boundary.} When one block is fully read, the
+        client contacts the NameNode for the locations of subsequent
+        blocks (if not already cached) and opens a new connection to
+        the appropriate DataNode.
+
+  \item \textbf{Close.} When all blocks have been read, the input
+        stream is closed.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    actor/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40, rounded corners=4pt,
+                  minimum width=2.8cm, minimum height=0.75cm, align=center,
+                  font=\small\bfseries\sffamily},
+    step/.style={rectangle, draw=DEGreen!60, fill=DELightGreen!60, rounded corners=3pt,
+                 minimum width=3.4cm, minimum height=0.6cm, align=center,
+                 font=\scriptsize\sffamily},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % Life-line headers
+  \node[actor] (c) at (0,   8.5) {Client};
+  \node[actor] (n) at (5.5, 8.5) {NameNode};
+  \node[actor] (d) at (11,  8.5) {DataNode};
+
+  % Life-lines (dashed vertical)
+  \draw[dashed, DEGray!40] (0,   8.1) -- (0,   0.0);
+  \draw[dashed, DEGray!40] (5.5, 8.1) -- (5.5, 0.0);
+  \draw[dashed, DEGray!40] (11,  8.1) -- (11,  0.0);
+
+  % Step labels (left margin)
+  \foreach \y/\txt in {
+    7.7/{\textbf{1.}\ open()},
+    6.7/{\textbf{2.}\ block locations (sorted by proximity)},
+    5.5/{\textbf{3.}\ TCP connect to closest DataNode},
+    4.3/{\textbf{4.}\ stream block data (512-byte chunks)},
+    3.2/{\textbf{5.}\ CRC checksum verification},
+    2.1/{\textbf{6.}\ next block (repeat 3--5)},
+    0.9/{\textbf{7.}\ close()}}
+  {
+    \node[lbl, text=DEGray, anchor=east] at (-0.3, \y) {};
+  }
+
+  % 1. Client -> NameNode: open()
+  \draw[arr, DEAccent]
+    (0, 7.7) -- (5.3, 7.7)
+    node[midway, above, lbl, text=DEAccent] {\tiny open()};
+
+  % 2. NameNode -> Client: block locations
+  \draw[arr, DEAccent]
+    (5.3, 6.7) -- (0.2, 6.7)
+    node[midway, above, lbl, text=DEAccent]
+         {\tiny block locations (ordered by network proximity)};
+
+  % 3. Client -> DataNode: TCP connect
+  \draw[arr, DEBlue]
+    (0.2, 5.5) -- (10.7, 5.5)
+    node[midway, above, lbl, text=DEBlue]
+         {\tiny TCP connect to closest DN};
+
+  % 4. DataNode -> Client: stream data
+  \draw[arr, DEGreen!70!black, very thick]
+    (10.7, 4.3) -- (0.2, 4.3)
+    node[midway, above, lbl, text=DEGreen!70!black]
+         {\tiny stream block data at full disk bandwidth};
+
+  % 5. Client: checksum verify (self-loop)
+  \draw[arr, DEBlue!60]
+    (0.2, 3.5) to[out=30, in=-30] (0.2, 3.0)
+    node[pos=0.5, right, lbl, text=DEBlue!60]
+         {\tiny CRC-32C verify};
+
+  % 6. Client -> DataNode: next block
+  \draw[arr, DEBlue]
+    (0.2, 2.1) -- (10.7, 2.1)
+    node[midway, above, lbl, text=DEBlue]
+         {\tiny open next block (NN re-consulted if needed)};
+
+  \draw[arr, DEGreen!70!black, very thick]
+    (10.7, 1.6) -- (0.2, 1.6)
+    node[midway, above, lbl, text=DEGreen!70!black]
+         {\tiny stream next block};
+
+  % 7. Client -> NameNode: close
+  \draw[arr, DEAccent]
+    (0.2, 0.9) -- (5.3, 0.9)
+    node[midway, above, lbl, text=DEAccent] {\tiny close()};
+
+  % Shaded region showing data bypasses NameNode
+  \fill[DEGreen!8] (0.15, 1.4) rectangle (11.1, 4.5);
+  \node[font=\tiny\sffamily\itshape, text=DEGreen!60!black, rotate=90]
+       at (11.3, 3.0) {data plane (bypasses NameNode)};
+
+\end{tikzpicture}
+\caption{HDFS read-path sequence diagram. Steps~1--2 are control-plane
+         operations (RPC to the NameNode); steps~3--6 are data-plane
+         operations (direct TCP to DataNodes). The shaded region highlights
+         that all block data flows between client and DataNode, never
+         through the NameNode. Checksum verification (step~5) runs at the
+         client for every 512-byte chunk; a mismatch triggers a retry on
+         a different replica.}
+\label{fig:hdfs-read}
+\end{figure}
+
+The key performance characteristic of the read path is that data flows
+directly between client and DataNode, bypassing the NameNode entirely.
+This means that the NameNode's throughput is not a bottleneck for read
+operations: it handles only the metadata lookup (typically measured in
+microseconds), while data transfer runs at full network speed
+(typically 1--10 Gbit/s per connection).
+
+%--------------------------------------------------------------------
+\subsection{The Write Path}
+\label{subsec:write-path}
+%--------------------------------------------------------------------
+
+Writing to HDFS is more complex than reading, because data must be
+reliably distributed to multiple DataNodes simultaneously while
+ensuring consistency in the presence of potential DataNode failures.
+
+\begin{enumerate}
+  \item \textbf{Create.} The client calls \texttt{FileSystem.create()}.
+        The client library contacts the NameNode to create a new
+        file entry in the namespace. The NameNode verifies that the
+        file does not already exist and that the client has write
+        permission, then creates the file and grants the client a
+        \term{write lease}.
+
+  \item \textbf{Block allocation.} As the client accumulates data in
+        a write buffer (default 64\KB\ per packet), it requests a new
+        block from the NameNode. The NameNode selects DataNodes for
+        the block---applying the rack-aware placement policy---and
+        returns a list of DataNodes ordered by the pipeline sequence.
+
+  \item \textbf{Pipeline construction.} The client establishes a
+        TCP connection to the first DataNode in the pipeline; that
+        DataNode connects to the second; the second connects to the
+        third. This forms a \term{replication pipeline}: data flows
+        through the pipeline rather than being sent from the client
+        to each DataNode independently, reducing the client's outbound
+        bandwidth requirement.
+
+  \item \textbf{Packet streaming.} The client sends data in
+        \term{packets} of 64\KB\ down the pipeline. As the first
+        DataNode receives a packet, it writes it to its local disk and
+        simultaneously forwards it to the second DataNode. The second
+        DataNode writes and forwards to the third. Each DataNode sends
+        an \term{acknowledgement} back up the pipeline once it has
+        durably written the packet.
+
+  \item \textbf{Block completion.} When all packets for a block have
+        been acknowledged by all three DataNodes, the client notifies
+        the NameNode that the block is complete. The NameNode records
+        the block's DataNode locations in its metadata.
+
+  \item \textbf{Close.} When the client calls \texttt{close()}, all
+        remaining buffered packets are flushed through the pipeline,
+        all blocks are completed, and the NameNode marks the file as
+        complete, releasing the write lease.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    comp/.style={rectangle, rounded corners=3pt,
+                 minimum width=2.0cm, minimum height=0.85cm,
+                 font=\small\bfseries\sffamily, align=center},
+    arr/.style={-{Stealth[length=5pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+  \node[comp, fill=DELightAccent, draw=DEAccent!70] (client) at (0,   2.5) {Client};
+  \node[comp, fill=DELightBlue,   draw=DEBlue!50]   (nn)     at (0,   0)   {NameNode};
+  \node[comp, fill=DELightGreen,  draw=DEGreen!60]  (dn1)    at (4.5, 2.5) {DataNode 1\\{\scriptsize\normalfont(Rack A)}};
+  \node[comp, fill=DELightGreen,  draw=DEGreen!60]  (dn2)    at (7.5, 2.5) {DataNode 2\\{\scriptsize\normalfont(Rack B)}};
+  \node[comp, fill=DELightGreen,  draw=DEGreen!60]  (dn3)    at (10.5,2.5) {DataNode 3\\{\scriptsize\normalfont(Rack B)}};
+
+  % Control plane: client <-> NameNode
+  \draw[arr, DEBlue] (client.south) -- (nn.north)
+        node[midway, left, lbl] {1. create()\\3. add block\\7. complete()};
+
+  % Data pipeline
+  \draw[arr, DEGreen!70!black, very thick]
+        (client.east) -- (dn1.west)
+        node[midway, above, lbl] {4. packets};
+  \draw[arr, DEGreen!70!black, very thick]
+        (dn1.east) -- (dn2.west)
+        node[midway, above, lbl] {forward};
+  \draw[arr, DEGreen!70!black, very thick]
+        (dn2.east) -- (dn3.west)
+        node[midway, above, lbl] {forward};
+
+  % ACK pipeline (dashed, reverse direction)
+  \draw[arr, DEAccent!80, dashed]
+        (dn3.south) to[out=-90,in=-90,looseness=0.5] (dn2.south)
+        node[midway, below, lbl] {ACK};
+  \draw[arr, DEAccent!80, dashed]
+        (dn2.south) to[out=-90,in=-90,looseness=0.6] (dn1.south)
+        node[midway, below, lbl] {ACK};
+  \draw[arr, DEAccent!80, dashed]
+        (dn1.south) to[out=-90,in=-90,looseness=1.2] (client.south)
+        node[midway, below, lbl] {ACK};
+
+  % Labels
+  \node[lbl, text=DEBlue]  at (0, -1.0) {Control plane (RPC)};
+  \node[lbl, text=DEGreen!80!black] at (7.5, 3.5) {Data pipeline (TCP)};
+\end{tikzpicture}
+\caption{HDFS write path. The client communicates with the NameNode
+         only for control messages; all block data flows through the
+         three-DataNode replication pipeline. ACKs propagate back
+         through the pipeline to confirm durable writes.}
+\label{fig:hdfs-write}
+\end{figure}
+
+\begin{systemdesign}{Pipeline Failure Handling}
+If a DataNode fails mid-pipeline during a write, HDFS recovers as
+follows. The pipeline is closed. Packets that were acknowledged by
+the failed DataNode but not yet confirmed by the client are marked for
+re-send. A new block replica is allocated on a healthy DataNode, and a
+new pipeline is constructed excluding the failed DataNode. The NameNode
+is notified of the incomplete replica on the failed node and schedules
+re-replication after the write completes. The client experiences a
+brief pause but the write succeeds as long as at least one DataNode
+survives. This mechanism allows HDFS to absorb DataNode failures
+\emph{during} a write without requiring the client to restart the
+entire write operation.
+\end{systemdesign}
+
+%%====================================================================
+\section{HDFS High Availability}
+\label{sec:hdfs-ha}
+%%====================================================================
+
+In the original HDFS design, the NameNode is a \term{single point of
+failure} (SPOF). If the NameNode process crashes or the NameNode
+machine becomes unavailable, the entire HDFS cluster is inaccessible:
+no client can resolve file names to block locations, and no DataNode
+can be instructed to re-replicate data. At the scale of Yahoo!'s
+production Hadoop cluster---42,000 nodes in 2011---an unplanned
+NameNode outage meant that 42,000 DataNodes became inaccessible
+simultaneously. The resulting loss of analytical capacity during the
+recovery period (which could take 30--60 minutes for a large
+namespace) was a significant operational risk.
+
+Hadoop 2.0 (released 2012) introduced \term{HDFS High Availability}
+(HA), which eliminates the NameNode SPOF by maintaining two NameNode
+instances simultaneously: one \term{Active NameNode} that handles all
+client and DataNode traffic, and one \term{Standby NameNode} that
+continuously mirrors the Active's metadata state and can take over
+within seconds if the Active fails.
+
+%--------------------------------------------------------------------
+\subsection{The HA Architecture}
+\label{subsec:ha-arch}
+%--------------------------------------------------------------------
+
+The HA architecture requires three key components beyond the standard
+HDFS setup.
+
+\textbf{Journal Nodes} are a quorum of lightweight processes (a minimum
+of three, to tolerate one failure) that implement a shared,
+fault-tolerant edit log. The Active NameNode writes every namespace
+mutation to the Journal Node quorum as it executes; the Standby
+NameNode reads from the Journal Node quorum continuously, replaying
+edits to keep its in-memory namespace state synchronised with the
+Active. Because the Journal Node quorum is shared, the Standby's
+namespace state is always at most a few hundred milliseconds behind
+the Active.
+
+\textbf{ZooKeeper} provides distributed leader election. Each NameNode
+runs a \term{ZooKeeper Failover Controller} (ZKFC) process that
+monitors the NameNode's health and maintains a session with ZooKeeper.
+If the Active NameNode becomes unhealthy---as detected by the ZKFC---
+the Active's ZooKeeper session expires, and ZooKeeper triggers a
+leader election. The Standby's ZKFC wins the election and promotes the
+Standby to Active.
+
+\textbf{Fencing} prevents the \term{split-brain} scenario---where both
+NameNodes believe themselves to be Active and independently accept
+writes, resulting in divergent metadata states. Before promoting the
+Standby, the ZKFC executes a fencing operation that either gracefully
+stops the former Active (via SSH) or, if the former Active is
+unreachable, forcibly terminates its ability to communicate with
+DataNodes using SSH-based remote kill commands or STONITH
+(``Shoot The Other Node In The Head'') hardware mechanisms.
+
+\begin{table}[ht]
+\centering
+\caption{NameNode HA component summary}
+\label{tab:ha-components}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.8cm} L{7.8cm}}
+\toprule
+\textbf{Component} & \textbf{Role} \\
+\midrule
+Active NameNode    & Handles all client and DataNode traffic; writes edits to JN quorum \\
+Standby NameNode   & Continuously replays JN edits; ready to take over within seconds \\
+Journal Nodes (3+) & Shared, quorum-based edit log; tolerates minority failures \\
+ZooKeeper (3+)     & Leader election and health monitoring for the two NameNodes \\
+ZKFC               & Per-NameNode daemon that manages ZooKeeper session and triggers failover \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    ann/.style={rectangle, draw=DEBlue, fill=DELightBlue!50, rounded corners=4pt,
+                minimum width=3.0cm, minimum height=1.2cm, align=center,
+                font=\small\sffamily},
+    snn/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!25, rounded corners=4pt,
+                minimum width=3.0cm, minimum height=1.2cm, align=center,
+                font=\small\sffamily},
+    jn/.style={rectangle, draw=DEGreen!70!black, fill=DELightGreen, rounded corners=3pt,
+               minimum width=1.6cm, minimum height=0.85cm, align=center,
+               font=\scriptsize\sffamily},
+    zk/.style={rectangle, draw=DEAccent!80, fill=DELightAccent, rounded corners=3pt,
+               minimum width=1.5cm, minimum height=0.85cm, align=center,
+               font=\scriptsize\sffamily},
+    zkfc/.style={rectangle, draw=DEGray!60, fill=DEGray!12, rounded corners=2pt,
+                 minimum width=1.4cm, minimum height=0.55cm, align=center,
+                 font=\tiny\sffamily},
+    dn/.style={rectangle, draw=DEGray!60, fill=DEGray!8, rounded corners=3pt,
+               minimum width=1.6cm, minimum height=0.7cm, align=center,
+               font=\scriptsize\sffamily},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    darr/.style={{Stealth[length=4pt,width=4pt]}-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  %--- Active NameNode (left) ---
+  \node[ann] (ann) at (1.8, 7.5) {Active\\NameNode};
+  \node[zkfc] (zkfc1) at (1.8, 6.6) {ZKFC};
+
+  %--- Standby NameNode (right) ---
+  \node[snn] (snn) at (9.2, 7.5) {Standby\\NameNode};
+  \node[zkfc] (zkfc2) at (9.2, 6.6) {ZKFC};
+
+  %--- Journal Nodes (middle row) ---
+  \node[jn] (jn1) at (3.9, 7.5) {Journal\\Node 1};
+  \node[jn] (jn2) at (5.5, 7.5) {Journal\\Node 2};
+  \node[jn] (jn3) at (7.1, 7.5) {Journal\\Node 3};
+  \node[font=\tiny\sffamily\color{DEGreen!60!black}] at (5.5, 8.4)
+       {Journal Node Quorum (shared EditLog)};
+  \draw[draw=DEGreen!40, dashed, rounded corners=3pt]
+       (3.2, 7.1) rectangle (7.8, 8.2);
+
+  %--- ZooKeeper cluster (middle, lower) ---
+  \node[zk] (zk1) at (3.9, 5.5) {ZooKeeper\\Node 1};
+  \node[zk] (zk2) at (5.5, 5.5) {ZooKeeper\\Node 2};
+  \node[zk] (zk3) at (7.1, 5.5) {ZooKeeper\\Node 3};
+  \node[font=\tiny\sffamily\color{DEAccent!80}] at (5.5, 6.5)
+       {ZooKeeper Cluster (leader election)};
+  \draw[draw=DEAccent!35, dashed, rounded corners=3pt]
+       (3.1, 5.1) rectangle (7.9, 6.3);
+
+  %--- DataNodes (bottom row, report to BOTH NNs) ---
+  \node[dn] (dn1) at (2.2, 3.6) {DataNode 1};
+  \node[dn] (dn2) at (4.2, 3.6) {DataNode 2};
+  \node[dn] (dn3) at (6.2, 3.6) {DataNode 3};
+  \node[dn] (dn4) at (8.2, 3.6) {DataNode $N$};
+  \node[font=\tiny\sffamily\color{DEGray!60}] at (5.2, 3.1)
+       {DataNodes (heartbeat + block report to both NameNodes)};
+
+  %--- Active NN writes to Journal Nodes ---
+  \draw[arr, DEGreen!70!black, thick]
+    (ann.east) -- (jn1.west)
+    node[midway, above, lbl, text=DEGreen!70!black] {\tiny edits};
+
+  %--- Standby NN reads from Journal Nodes ---
+  \draw[arr, DEGreen!70!black, thick]
+    (jn3.east) -- (snn.west)
+    node[midway, above, lbl, text=DEGreen!70!black] {\tiny replay};
+
+  %--- ZKFC <-> ZooKeeper (both NNs) ---
+  \draw[darr, DEAccent!70]
+    (zkfc1.south) to[out=-60, in=135] (zk1.north west)
+    node[pos=0.4, left, lbl, text=DEAccent!80] {\tiny session};
+  \draw[darr, DEAccent!70]
+    (zkfc2.south) to[out=220, in=45] (zk3.north east)
+    node[pos=0.4, right, lbl, text=DEAccent!80] {\tiny session};
+
+  %--- DataNodes -> Active NN (heartbeat) ---
+  \draw[darr, DEGray!60]
+    (dn1.north) to[out=100, in=-130] (ann.south)
+    node[pos=0.3, left, lbl, text=DEGray!60] {\tiny HB};
+  %--- DataNodes -> Standby NN (heartbeat) ---
+  \draw[darr, DEGray!60]
+    (dn4.north) to[out=80, in=-50] (snn.south)
+    node[pos=0.3, right, lbl, text=DEGray!60] {\tiny HB};
+  \draw[darr, DEGray!55]
+    (dn2.north) to[out=120, in=-100] (ann.south);
+  \draw[darr, DEGray!55]
+    (dn3.north) to[out=60, in=-80] (snn.south);
+
+  %--- Fencing arrow (ZKFC1 fences Active before Standby promotes) ---
+  \draw[arr, DERed!70, very thick, dashed]
+    (zkfc2.north) to[out=90, in=-90] (zkfc1.south)
+    node[pos=0.5, left, lbl, text=DERed!70]
+         {\tiny fencing\\[-2pt]\tiny (on failover)};
+
+  %--- Legend ---
+  \node[font=\tiny\sffamily, align=left, text=DEGray] at (11.2, 6.8) {%
+    \textbf{Legend}\\[2pt]
+    \textcolor{DEGreen!70!black}{$\rightarrow$} EditLog flow\\
+    \textcolor{DEAccent!80}{$\leftrightarrow$} ZooKeeper session\\
+    \textcolor{DEGray!60}{$\leftrightarrow$} Heartbeat\\
+    \textcolor{DERed!70}{- -\!-\!>} Fencing signal};
+
+\end{tikzpicture}
+\caption{HDFS High Availability architecture. The Active NameNode writes every
+         namespace mutation to the Journal Node quorum (shared EditLog); the
+         Standby NameNode continuously replays those edits to maintain a
+         synchronised copy of the namespace. Both NameNodes run a
+         ZooKeeper Failover Controller (ZKFC) that monitors health and
+         maintains a ZooKeeper session. On Active failure, the ZKFC fences
+         the former Active (preventing split-brain), then promotes the Standby
+         to Active in seconds. DataNodes send heartbeats and block reports to
+         \emph{both} NameNodes, so the Standby has a live block map
+         ready for immediate service.}
+\label{fig:hdfs-ha}
+\end{figure}
+
+%%====================================================================
+\section{HDFS Design Characteristics and Limitations}
+\label{sec:hdfs-limits}
+%%====================================================================
+
+HDFS is a purpose-built system optimised for specific workloads. Like
+GFS, its strengths and weaknesses are two sides of the same coin: the
+design decisions that make it excellent for batch processing of large
+files make it unsuitable for other access patterns.
+
+%--------------------------------------------------------------------
+\subsection{What HDFS Is Optimised For}
+\label{subsec:hdfs-strengths}
+%--------------------------------------------------------------------
+
+HDFS excels at \textbf{high-throughput, sequential access to large
+files}. A well-tuned HDFS cluster can deliver aggregate read throughput
+of several GB/s per node: with 100 DataNodes each delivering 200 MB/s
+from local disk, the cluster sustains 20 GB/s of aggregate read
+bandwidth. For workloads that need to scan entire datasets---MapReduce
+jobs, Hive queries that process all records in a table, Spark jobs that
+re-partition a large dataset---this throughput is the critical metric,
+and HDFS is optimised for it.
+
+HDFS also provides \textbf{fault-tolerant write durability}. A write
+that returns a success acknowledgement to the client is guaranteed to
+have been committed to at least $r$ DataNodes (where $r$ is the
+replication factor). Hardware failure of any subset of up to $r-1$
+DataNodes simultaneously cannot cause data loss for any successfully
+written block.
+
+%--------------------------------------------------------------------
+\subsection{The Small File Problem}
+\label{subsec:small-file}
+%--------------------------------------------------------------------
+
+HDFS's single most significant operational limitation is its poor
+handling of large numbers of small files. Each file, regardless of
+size, consumes approximately 150 bytes of NameNode heap space for its
+metadata. A single large file split into ten 128\MB\ blocks consumes
+approximately 1.65\KB\ of NameNode memory. Ten million small files---
+each taking one block---consume 1.5\GB\ of NameNode heap, regardless
+of the files' total data volume. At 100 million small files, the
+NameNode requires 15\GB\ of heap and metadata operations begin to slow
+noticeably.
+
+This is a critical practical constraint. Web server log files,
+sensor telemetry archives, and social media ingestion pipelines
+naturally produce large numbers of small files if not carefully managed.
+The standard engineering response is to use \term{SequenceFiles}---
+container files that aggregate many small records into a single large
+HDFS file, providing a sequential index for record-level access---
+or to pre-aggregate small files before ingestion using tools such as
+HDFS \texttt{archive} (HAR files) or Apache CombineFileInputFormat
+in the MapReduce layer.
+
+%--------------------------------------------------------------------
+\subsection{No In-Place Random Writes}
+\label{subsec:no-random-write}
+%--------------------------------------------------------------------
+
+HDFS does not support random writes to existing files. Once a block
+has been written and acknowledged, its content cannot be modified
+in place. HDFS supports only sequential writes to new files and
+atomic appends to the end of existing files (the append semantics
+introduced in HDFS 0.21 and Hadoop 2.x). This is a deliberate
+architectural choice that greatly simplifies the consistency model and
+the replication protocol: if blocks are immutable after writing, the
+system never needs to coordinate writes across multiple replicas.
+
+For workloads that require in-place updates---a transactional database,
+an incremental index---HDFS is the wrong tool. Apache HBase (examined
+in Chapter~\ref{ch:mapreduce}) provides random read/write access on
+top of HDFS by using an LSM-tree (Log-Structured Merge-tree) structure
+that converts random writes into sequential HDFS writes.
+
+%--------------------------------------------------------------------
+\subsection{No Low-Latency Random Access}
+\label{subsec:no-random-read}
+%--------------------------------------------------------------------
+
+HDFS is tuned for throughput, not latency. Opening an HDFS file
+requires a round trip to the NameNode; reading a specific block
+requires a TCP connection setup to the appropriate DataNode. Total
+latency for a random read is typically in the range of 50--200 ms---
+acceptable for batch processing but wholly unacceptable for
+interactive queries (which require sub-millisecond storage access)
+or for OLTP workloads. This is why HDFS is used as the storage
+substrate for batch and near-batch systems (MapReduce, Spark, Hive),
+not as a replacement for relational databases or key-value stores.
+
+\begin{table}[ht]
+\centering
+\caption{HDFS strengths, limitations, and engineering mitigations}
+\label{tab:hdfs-limits}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{3.2cm} L{3.4cm} L{4.0cm}}
+\toprule
+\textbf{Characteristic} & \textbf{Impact} & \textbf{Mitigation / alternative} \\
+\midrule
+Optimised for sequential reads & Excellent batch throughput & Use for MapReduce, Spark, Hive \\
+Large block size (128 MB)      & Poor for small files      & SequenceFiles, HAR archives, CombineFileInputFormat \\
+No random writes               & Cannot update in place    & HBase (LSM-tree over HDFS) \\
+High read latency (50--200 ms) & No interactive queries    & Presto, Spark SQL with in-memory caching \\
+NameNode SPOF (pre-HA)         & Cluster-wide outage       & HDFS HA with ZooKeeper \\
+Namespace scalability          & 100M file ceiling         & HDFS Federation (multiple NameNodes) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%%====================================================================
+\section{Beyond HDFS: Cloud Object Storage}
+\label{sec:object-storage}
+%%====================================================================
+
+Starting around 2012 and accelerating through 2015--2018, the data
+engineering industry began a significant migration away from
+on-premises HDFS clusters toward cloud-based \term{object storage}:
+Amazon S3, Google Cloud Storage (GCS), and Azure Data Lake Storage
+(ADLS). By 2024, cloud object storage has largely supplanted HDFS as
+the primary storage layer for new data engineering deployments, though
+HDFS remains in use at organisations that operate their own data
+centres.
+
+Cloud object storage differs from HDFS in several important ways.
+Objects in S3 or GCS are identified by a key (essentially a path
+string) and stored as a flat namespace with no directory hierarchy
+(though object key prefixes mimic directory structure). Unlike HDFS
+blocks, objects can be up to 5 TB each. Object storage is practically
+unlimited in capacity and scales automatically with usage---there is
+no NameNode to run out of heap, no replication factor to configure
+manually, and no DataNodes to provision and maintain.
+
+From a pricing and operations standpoint, cloud object storage is
+dramatically simpler. Amazon S3 charges approximately \$0.023/GB/month
+for standard storage; there are no servers to operate, no replication
+factor to configure, and no NameNode HA to maintain. A data engineering
+team using S3 eliminates the entire operational burden of the HDFS
+cluster in exchange for a predictable per-GB-per-month cost.
+
+The principal trade-off is \textbf{decoupling storage from compute}.
+In a Hadoop cluster, DataNodes run both storage and compute (MapReduce
+or Spark tasks), exploiting data locality. Cloud object storage is
+physically separate from the compute cluster; every read requires a
+network hop. However, cloud data centre networks now deliver bandwidth
+of 25--100 Gbit/s between storage and compute instances, which is
+often higher than the inter-DataNode bandwidth in on-premises
+Hadoop clusters. Modern frameworks such as Apache Spark have been
+optimised to run effectively against object storage, and the loss of
+data locality has proven to be a minor performance penalty in most
+workloads compared to the operational simplicity of S3.
+
+\begin{keyinsight}{The Shift to Storage-Compute Separation}
+The move from HDFS to cloud object storage represents a fundamental
+architectural shift: from \emph{tightly coupled} storage-compute
+(where data lives next to the CPU that processes it) to \emph{loosely
+coupled} (where storage and compute scale independently). In a Hadoop
+cluster, you cannot add compute capacity without also adding storage,
+and vice versa. With S3 + cloud compute, you can scale a Spark cluster
+from 10 to 1,000 nodes and back to 10 without moving a single byte
+of data. This elasticity has proven to be the dominant engineering
+advantage, and it is the primary reason cloud object storage has
+displaced on-premises HDFS for new deployments.
+\end{keyinsight}
+
+%%====================================================================
+\section{Case Study: Yahoo!'s Hadoop Cluster (2006--2011)}
+\label{sec:yahoo-case}
+%%====================================================================
+
+\begin{casestudy}{Yahoo! --- The First Industrial-Scale Open-Source Distributed File System}
+
+\textbf{Background.}
+Yahoo!\ was the first organisation outside Google to operate a
+production Hadoop cluster at true industrial scale. The company had
+several workloads that required petabyte-scale batch processing: web
+ranking (recomputing the search index nightly from the full crawl),
+user behaviour analytics (processing billions of page views per day),
+and spam detection (scanning email metadata across hundreds of millions
+of user accounts). After evaluating alternatives, Yahoo!\ bet its
+entire search and analytics infrastructure on the open-source Hadoop
+ecosystem starting in 2006.
+
+\smallskip
+\textbf{Scale and growth.}
+Yahoo!'s Hadoop cluster grew from approximately 1,000 nodes in 2006
+to a peak of \textbf{42,000 nodes} in 2011---a 42-fold scale-up in
+five years. At its peak, the cluster stored approximately \textbf{100
+petabytes} of data in HDFS across two major data centres. The web
+index computation alone ran tens of thousands of MapReduce jobs per
+day. Yahoo!'s infrastructure team reported that the cluster
+experienced approximately \textbf{2--3 DataNode failures per day} on
+average---exactly the failure rate predicted by the GFS paper for
+commodity hardware at this scale.
+
+\smallskip
+\textbf{Operational challenges.}
+Managing a 42,000-node HDFS cluster required solving engineering
+problems that the original Hadoop design had not anticipated.
+
+The \emph{NameNode bottleneck} emerged as the cluster grew. By 2009,
+Yahoo!'s HDFS namespace contained over 50 billion blocks, consuming
+the full 64\GB\ of available NameNode heap. Startup time after a
+planned NameNode maintenance window exceeded 90 minutes---during
+which the entire cluster was inaccessible. Yahoo!'s engineering team
+developed several mitigations, including a distributed NameNode
+extension (\emph{HDFS Federation}) that partitioned the namespace
+across multiple NameNodes, reducing the per-NameNode block count and
+memory pressure.
+
+The \emph{small file problem} was acute in production. Yahoo!'s log
+ingestion pipelines initially wrote one file per server per minute,
+producing hundreds of millions of small files per day. The engineering
+team developed automated compaction pipelines that aggregated hourly
+log files into daily SequenceFiles, reducing the namespace size by a
+factor of roughly 1,000 while preserving query access.
+
+\smallskip
+\textbf{Contributions to open source.}
+Yahoo!\ was by far the largest contributor to the Apache Hadoop
+project during this period. Key features that originated from Yahoo!'s
+production experience include: HDFS Append (enabling streaming log
+ingestion), Hadoop Security (Kerberos-based authentication, developed
+after Yahoo!\ experienced data governance incidents with an unsecured
+cluster), HDFS High Availability (eliminating the NameNode SPOF after
+a NameNode failure caused a 45-minute cluster-wide outage in 2010),
+and YARN (the resource manager that replaced the original
+MapReduce-only scheduler, enabling non-MapReduce workloads such as
+Spark and Tez to share the cluster).
+
+\smallskip
+\textbf{Lessons for data engineering.}
+Yahoo!'s experience establishes several principles that remain
+relevant today:
+\begin{itemize}
+  \item HDFS is exceptionally robust for large-file, sequential-access
+        workloads at any scale---but it requires careful operational
+        management, particularly of the NameNode's memory and the
+        accumulation of small files.
+  \item Production distributed systems require active contributions
+        back to their upstream open-source projects: Yahoo!\ could not
+        have operated at 42,000 nodes without the HDFS improvements it
+        developed and contributed. This model of ``upstream dependency,
+        active contribution'' has been adopted by Facebook, LinkedIn,
+        Twitter (X), and most major technology companies.
+  \item Failure planning is not optional. Yahoo!'s decision to invest
+        in HDFS HA before a major outage occurred---rather than after---
+        is the textbook example of proactive operational engineering.
+\end{itemize}
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch3-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item Conventional file systems (NFS, SAN, POSIX) fail at petabyte
+        scale for three reasons: single-machine capacity limits,
+        insufficient sequential throughput, and an inability to tolerate
+        the continuous hardware failures that occur at cluster scale.
+
+  \item \textbf{GFS} (2003) solved these problems by: using large 64\MB\
+        chunks, maintaining all metadata in a single master's RAM,
+        separating control-plane (master) from data-plane (chunkservers),
+        supporting append-only semantics, and relying on replication
+        rather than RAID for fault tolerance.
+
+  \item \textbf{HDFS} is the open-source GFS implementation. Its key
+        components are the \textbf{NameNode} (namespace and block mapping
+        in RAM, EditLog + FsImage persistence) and \textbf{DataNodes}
+        (block storage, heartbeat, block report, checksum verification).
+
+  \item \textbf{Rack-aware replication} (factor 3, default) places one
+        replica locally, one on a different rack, one on a second node in
+        the same rack as replica 2. A single rack failure cannot cause
+        data loss.
+
+  \item The \textbf{write pipeline} flows client $\to$ DN1 $\to$ DN2
+        $\to$ DN3 with acknowledgements propagating in reverse. The
+        NameNode handles only control messages; data bypasses it entirely.
+
+  \item \textbf{HDFS HA} uses Active/Standby NameNodes, shared Journal
+        Nodes for the edit log, ZooKeeper for leader election, and
+        fencing to prevent split-brain.
+
+  \item HDFS limitations include the \textbf{small file problem}
+        (NameNode heap exhaustion), \textbf{no random writes}, and
+        \textbf{high read latency}. Mitigations include SequenceFiles,
+        HBase, and Presto.
+
+  \item \textbf{Cloud object storage} (S3, GCS, ADLS) has largely
+        replaced HDFS for new deployments by offering unlimited capacity,
+        no operational burden, and elastic compute-storage separation---at
+        the cost of data locality.
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch3-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq State three reasons why a conventional NFS-based file system cannot
+store and process a 500-petabyte dataset.
+
+\sq What is a GFS chunk? What is the default size and why was this size
+chosen instead of the 4-\KB\ blocks used by typical file systems?
+
+\sq Explain the GFS design decision to keep all metadata in the master's
+RAM. What is the practical ceiling on the number of chunks this imposes,
+and at what dataset size is that ceiling reached for 64-\MB\ chunks?
+
+\sq What is the HDFS NameNode? List its five responsibilities and
+explain what would happen to a running HDFS cluster if the NameNode
+process were killed.
+
+\sq What is the difference between the HDFS Secondary NameNode and a
+hot-standby NameNode? What problem does the Secondary NameNode actually
+solve?
+
+\sq Describe the rack-aware replication policy for replication factor 3.
+If a rack fails, how many replicas of each block remain? Does this
+satisfy the fault-tolerance goal?
+
+\sq Trace the HDFS write path step by step from \texttt{FileSystem.create()}
+to the final acknowledgement. At which step is the data actually sent
+to DataNodes, and how many network hops does it take before the client
+receives a write acknowledgement?
+
+\sq What is a DataNode heartbeat and what is a block report? How does the
+NameNode use each to manage the cluster?
+
+\sq Explain the HDFS small file problem. If a 100-node cluster holds
+200 million files, each occupying one 128-\MB\ block, estimate the
+minimum NameNode heap required (assume 300 bytes per file--block pair).
+
+\sq Why does HDFS not support random writes? What are the consistency
+advantages of the immutable-block design?
+
+\sq What is HDFS High Availability? List the three components beyond the
+standard HDFS setup that HA requires and explain the role of each.
+
+\sq What is a split-brain condition in an HA system? Why is fencing
+necessary, and what are two mechanisms by which HDFS HA can fence the
+former Active NameNode?
+
+\sq Compare HDFS and Amazon S3 on four dimensions: (a) data locality,
+(b) operational burden, (c) capacity ceiling, (d) cost model.
+
+\sq A data engineering team ingests one million web server log files per
+day, each 200\KB\ in size, directly into HDFS. After one year, the
+NameNode heap is full. Identify the root cause and propose two
+engineering solutions.
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Replication and Storage Overhead Analysis.}
+A genomics research institute stores 50 petabytes of raw sequencing
+data in HDFS with the default replication factor of 3 and a block
+size of 128\MB.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the total HDFS storage capacity required (including
+        replicas) in petabytes.
+  \item Calculate the number of 128-\MB\ blocks required to store
+        50\PB\ of data.
+  \item If each DataNode has 200\TB\ of usable disk capacity, how many
+        DataNodes are required to store the replicated dataset?
+  \item Estimate the NameNode heap required to hold metadata for all
+        blocks (assume 150 bytes per block). Is this within the 128\GB\
+        of RAM on a modern server?
+  \item If the institute reduces the replication factor to 2, what is
+        the storage saving in petabytes? What is the trade-off?
+\end{enumerate}
+
+\ap \textbf{HDFS Write Throughput Analysis.}
+A streaming ingestion pipeline writes data to HDFS at a sustained rate
+of 2\GB/s. Each DataNode has a 10 Gbit/s network interface (effective
+throughput 1.25\GB/s). The replication factor is 3.
+
+\begin{enumerate}[label=(\alph*)]
+  \item In the write pipeline (client $\to$ DN1 $\to$ DN2 $\to$ DN3),
+        how much network bandwidth does each hop consume at 2\GB/s
+        ingestion rate?
+  \item Is a single DataNode's network interface the bottleneck? If the
+        pipeline is the only network traffic, at what ingestion rate
+        would the first DataNode's network interface saturate?
+  \item How many simultaneous parallel write pipelines (each ingesting
+        a different block) can a 10 Gbit/s interface support at 2\GB/s
+        per pipeline? Why is it beneficial to parallelise writes?
+  \item At 2\GB/s ingestion rate and 128\MB\ blocks, how many blocks
+        per second does the system create? At what rate does the
+        NameNode receive \texttt{addBlock} RPC calls?
+\end{enumerate}
+
+\ap \textbf{NameNode HA Failover Timing.}
+An HDFS HA cluster has the following configuration:
+\begin{itemize}
+  \item ZooKeeper session timeout: 10 seconds
+  \item ZKFC health check interval: 5 seconds
+  \item Standby NameNode edit log replay lag: 200 milliseconds maximum
+  \item SSH fencing timeout: 30 seconds
+\end{itemize}
+
+\begin{enumerate}[label=(\alph*)]
+  \item What is the minimum time from Active NameNode failure to the
+        Standby becoming Active (assuming fencing via SSH succeeds)?
+  \item What is the maximum time in the worst case (ZooKeeper session
+        timeout has just reset, fencing takes the full 30 seconds)?
+  \item During the failover window, what happens to HDFS clients that
+        are actively reading? What happens to clients that are in the
+        middle of a write?
+  \item Explain why fencing must be completed before the Standby is
+        promoted. Describe the consequences of a successful promotion
+        without fencing, given that the former Active's write lease is
+        still valid.
+\end{enumerate}
+
+\ap \textbf{Cloud vs.\ On-Premises Storage Economics.}
+A media company stores 2\PB\ of video content in on-premises HDFS
+with replication factor 3 (requiring 6\PB\ raw disk capacity). The
+data grows at 500\TB/year. DataNode servers cost \$8,000 each with
+72\TB\ usable disk per server; server lifetime is 4 years (amortised
+\$2,000/server/year). Operations staff costs \$150,000/year to manage
+the cluster. Amazon S3 charges \$0.023/GB/month for standard storage.
+
+\begin{enumerate}[label=(\alph*)]
+  \item How many DataNode servers are needed today? What is the
+        annualised hardware cost (amortised over 4 years)?
+  \item What is the total annual on-premises cost (hardware + operations)?
+  \item What is the annual S3 cost for 2\PB\ of raw data (no
+        replication factor needed---S3 manages redundancy internally)?
+  \item After 5 years of 500\TB/year growth, compare the cumulative
+        5-year costs of both approaches (assume S3 pricing remains
+        constant; on-premises requires a hardware refresh at year 4).
+  \item What non-monetary factors should also influence this decision?
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{HDFS Cluster Design for a Video Streaming Platform.}
+A video streaming company archives 8\PB\ of source video files for
+transcoding and long-term retention. The files range from 500\MB\ to
+40\GB\ each (typical feature film at broadcast quality). The company
+also processes 2 TB/day of viewer analytics events (one JSON record
+per play event, approximately 512 bytes each, producing $\sim$4
+billion records per day). The system must sustain 10\GB/s sustained
+write throughput during peak ingestion.
+
+Design the HDFS cluster and ingestion pipeline. Your design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The appropriate replication factor for video files vs.\ analytics
+        events, and the justification for each choice.
+  \item The HDFS block size configuration for video files and for
+        analytics events (can differ per dataset).
+  \item The DataNode hardware specification (disk capacity, network
+        interface speed) and the number of DataNodes required.
+  \item How the 4-billion-record-per-day analytics stream should be
+        ingested without creating the small file problem (propose a
+        specific ingestion architecture using tools from this or
+        previous chapters).
+  \item The HA configuration for the NameNode, including the minimum
+        number of Journal Nodes and ZooKeeper nodes required for
+        quorum.
+  \item The monitoring metrics you would track in production and the
+        alerting thresholds that would trigger an on-call escalation.
+\end{enumerate}
+
+\dpr \textbf{HDFS Migration to Cloud Object Storage.}
+A financial services company operates a 500-node on-premises HDFS
+cluster storing 1.2\PB\ of trade data, customer records, and
+regulatory filings. The company is evaluating a migration to Amazon
+S3. The data has strict regulatory requirements: all data must be
+encrypted at rest and in transit, all access must be auditable (for
+SEC and FINRA compliance), and data must be retained for 7 years.
+Certain datasets must remain on-premises (customer PII, subject to
+contractual data residency obligations).
+
+Design the migration strategy. Your design must address:
+\begin{enumerate}[label=(\alph*)]
+  \item A data classification scheme that determines which datasets
+        can migrate to S3 and which must remain on-premises.
+  \item The migration mechanism: how to transfer 1.2\PB\ to S3 with
+        minimal disruption to running production pipelines.
+  \item How encryption at rest and in transit is enforced for S3-stored
+        data.
+  \item How access auditing (``who accessed which object, when'') is
+        implemented in S3.
+  \item The hybrid architecture that allows on-premises Spark jobs to
+        read data from both the remaining HDFS cluster and S3
+        transparently.
+  \item The rollback plan if the S3 migration reveals unacceptable
+        latency or data access pattern incompatibilities.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{HDFS Block Layout Simulator (Python).}
+Simulate the block layout for a set of files in HDFS: compute how many
+blocks each file occupies, how much space is wasted in the last block,
+and the total NameNode metadata overhead.
+
+\begin{lstlisting}[style=pyspark, caption={PE3.1: HDFS block layout simulator}]
+BLOCK_SIZE_MB = 128
+BYTES_PER_MB = 1024 * 1024
+METADATA_BYTES_PER_BLOCK = 150  # NameNode heap per block
+
+files = [
+    {"name": "web_crawl_2024_01.seq",       "size_gb": 312.0},
+    {"name": "user_events_2024_01_01.json",  "size_mb": 0.8},
+    {"name": "product_images.tar",           "size_gb": 1450.0},
+    {"name": "transaction_log_hourly.orc",   "size_gb": 48.5},
+    {"name": "genome_sample_001.fastq",      "size_gb": 220.0},
+]
+
+def analyse_file(name, size_bytes, block_size=BLOCK_SIZE_MB * BYTES_PER_MB,
+                 replication=3):
+    """
+    Return a dict with:
+      num_blocks       : number of HDFS blocks (ceil division)
+      last_block_bytes : size of the final (partial) block
+      wasted_bytes     : padding to fill the last block to block_size
+                         (HDFS does NOT pad, so wasted_bytes = 0 always;
+                          but report the theoretical waste if it did)
+      metadata_bytes   : NameNode heap for this file's blocks
+      replicated_bytes : total physical disk used (data * replication)
+    """
+    import math
+    num_blocks = math.ceil(size_bytes / block_size)
+    last_block_bytes = size_bytes % block_size or block_size
+    # HDFS does not pad the last block
+    wasted_bytes = 0
+    metadata_bytes = num_blocks * METADATA_BYTES_PER_BLOCK
+    replicated_bytes = size_bytes * replication
+    return {
+        "name": name,
+        "size_bytes": size_bytes,
+        "num_blocks": num_blocks,
+        "last_block_bytes": last_block_bytes,
+        "wasted_bytes": wasted_bytes,
+        "metadata_bytes": metadata_bytes,
+        "replicated_bytes": replicated_bytes,
+    }
+
+def summarise(files_spec):
+    results = []
+    for f in files_spec:
+        if "size_gb" in f:
+            size = int(f["size_gb"] * 1024 * BYTES_PER_MB)
+        else:
+            size = int(f["size_mb"] * BYTES_PER_MB)
+        results.append(analyse_file(f["name"], size))
+
+    total_blocks = sum(r["num_blocks"] for r in results)
+    total_nn_mb  = sum(r["metadata_bytes"] for r in results) / BYTES_PER_MB
+    total_rep_tb = sum(r["replicated_bytes"] for r in results) / (1024**4)
+
+    print(f"{'File':<38} {'Blocks':>7} {'Last block':>12} {'NN heap':>10}")
+    print("-" * 72)
+    for r in results:
+        lb_mb = r["last_block_bytes"] / BYTES_PER_MB
+        nn_kb = r["metadata_bytes"] / 1024
+        print(f"{r['name']:<38} {r['num_blocks']:>7,} "
+              f"{lb_mb:>10.1f} MB {nn_kb:>8.1f} KB")
+    print("-" * 72)
+    print(f"{'TOTAL':<38} {total_blocks:>7,} "
+          f"{'':>12} {total_nn_mb:>8.1f} MB")
+    print(f"\nTotal replicated storage (3x): {total_rep_tb:.2f} TB")
+
+summarise(files)
+\end{lstlisting}
+
+\pe \textbf{Rack-Aware Replica Placement Simulator (Python).}
+Simulate the HDFS rack-aware replica placement policy for a set of
+blocks being written to a cluster of DataNodes distributed across racks.
+
+\begin{lstlisting}[style=pyspark, caption={PE3.2: Rack-aware placement simulator}]
+import random
+
+# Cluster topology: rack -> list of DataNode IDs
+cluster = {
+    "rack-A": ["dn01", "dn02", "dn03", "dn04", "dn05"],
+    "rack-B": ["dn06", "dn07", "dn08", "dn09", "dn10"],
+    "rack-C": ["dn11", "dn12", "dn13", "dn14", "dn15"],
+}
+
+def get_rack(dn_id, cluster):
+    for rack, nodes in cluster.items():
+        if dn_id in nodes:
+            return rack
+    return None
+
+def place_replicas(writer_dn, cluster, replication=3):
+    """
+    Apply HDFS rack-aware placement for replication factor 3:
+      R1: same node as writer (or writer's rack if writer not in cluster)
+      R2: a node on a DIFFERENT rack from R1
+      R3: a DIFFERENT node on the SAME rack as R2
+
+    Returns list of (dn_id, rack) tuples, one per replica.
+    """
+    writer_rack = get_rack(writer_dn, cluster)
+    if writer_rack is None:
+        # Writer is not a DataNode; pick any node for R1
+        writer_rack = random.choice(list(cluster.keys()))
+        r1 = random.choice(cluster[writer_rack])
+    else:
+        r1 = writer_dn
+
+    # R2: different rack
+    other_racks = [r for r in cluster if r != writer_rack]
+    rack2 = random.choice(other_racks)
+    r2 = random.choice(cluster[rack2])
+
+    # R3: different node on same rack as R2
+    rack2_others = [n for n in cluster[rack2] if n != r2]
+    r3 = random.choice(rack2_others)
+
+    return [(r1, writer_rack), (r2, rack2), (r3, rack2)]
+
+def simulate_writes(num_blocks, writer_dn, cluster):
+    placements = []
+    for i in range(num_blocks):
+        replicas = place_replicas(writer_dn, cluster)
+        placements.append(replicas)
+
+    # Count blocks per DataNode
+    from collections import Counter
+    node_counts = Counter()
+    for rep_list in placements:
+        for dn, rack in rep_list:
+            node_counts[dn] += 1
+
+    print(f"Block placement for {num_blocks} blocks "
+          f"(writer: {writer_dn}, rack: {get_rack(writer_dn, cluster)})\n")
+    print(f"{'Block':>6}  R1              R2              R3")
+    print("-" * 55)
+    for i, rep in enumerate(placements[:10]):
+        cols = [f"{dn} ({rack})" for dn, rack in rep]
+        print(f"{i+1:>6}  {cols[0]:<16}{cols[1]:<16}{cols[2]}")
+    if num_blocks > 10:
+        print(f"  ... ({num_blocks - 10} more blocks)")
+
+    print(f"\nDataNode block distribution (top 5):")
+    for dn, count in node_counts.most_common(5):
+        rack = get_rack(dn, cluster)
+        print(f"  {dn} ({rack}): {count} blocks")
+
+simulate_writes(num_blocks=50, writer_dn="dn03", cluster=cluster)
+\end{lstlisting}
+
+\pe \textbf{Failure Simulation and Re-replication Scheduler (Python).}
+Simulate the NameNode's re-replication logic when DataNodes fail:
+identify under-replicated blocks and schedule re-replication from
+surviving replicas.
+
+\begin{lstlisting}[style=pyspark, caption={PE3.3: Re-replication scheduler}]
+# Initial block map: block_id -> list of DataNode IDs holding a replica
+block_map = {
+    "blk_001": ["dn01", "dn04", "dn07"],
+    "blk_002": ["dn02", "dn05", "dn09"],
+    "blk_003": ["dn01", "dn06", "dn11"],
+    "blk_004": ["dn03", "dn07", "dn12"],
+    "blk_005": ["dn01", "dn02", "dn13"],
+    "blk_006": ["dn04", "dn08", "dn14"],
+    "blk_007": ["dn02", "dn06", "dn10"],
+}
+
+REPLICATION_FACTOR = 3
+HEALTHY_NODES = {"dn01", "dn02", "dn03", "dn04",
+                 "dn05", "dn06", "dn07", "dn08",
+                 "dn09", "dn10", "dn11", "dn12", "dn13", "dn14"}
+
+def simulate_failure(failed_nodes, block_map, healthy_nodes,
+                     replication=REPLICATION_FACTOR):
+    """
+    Remove failed_nodes from block_map and healthy_nodes.
+    Return a list of re-replication tasks:
+      (block_id, source_dn, priority)
+    where priority = 'CRITICAL' (1 surviving replica),
+                     'HIGH'     (2 surviving replicas),
+                     'NORMAL'   (0 deficit, should not appear)
+    Tasks are sorted highest priority first.
+    """
+    live_nodes = healthy_nodes - set(failed_nodes)
+    tasks = []
+
+    for blk_id, replicas in block_map.items():
+        surviving = [r for r in replicas if r in live_nodes]
+        deficit = replication - len(surviving)
+        if deficit <= 0:
+            continue  # no re-replication needed
+        priority = "CRITICAL" if len(surviving) == 1 else "HIGH"
+        # Source: first surviving replica
+        source = surviving[0] if surviving else None
+        tasks.append((blk_id, source, priority, deficit, surviving))
+
+    # Sort: CRITICAL first, then HIGH
+    tasks.sort(key=lambda t: 0 if t[2] == "CRITICAL" else 1)
+    return tasks, live_nodes
+
+failed = {"dn01", "dn07"}
+tasks, live = simulate_failure(failed, block_map, HEALTHY_NODES)
+
+print(f"Failed nodes: {failed}")
+print(f"Surviving nodes ({len(live)}): {sorted(live)}\n")
+print(f"{'Block':<10} {'Source':<8} {'Priority':<10} "
+      f"{'Deficit':>8} {'Surviving replicas'}")
+print("-" * 60)
+for blk, src, pri, deficit, surviving in tasks:
+    print(f"{blk:<10} {str(src):<8} {pri:<10} "
+          f"{deficit:>8}  {surviving}")
+print(f"\n{len(tasks)} blocks require re-replication.")
+\end{lstlisting}

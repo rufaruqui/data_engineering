@@ -1,0 +1,1475 @@
+%% ch01.tex — Chapter 1: The Big Data Revolution: Scale, Velocity, and Variety
+%% Part of "Data Engineering" textbook
+
+\chapter{The Big Data Revolution: Scale, Velocity, and Variety}
+\label{ch:foundations}
+
+\epigraph{\textit{``The world's most valuable resource is no longer oil, but data.''}}{The Economist, 2017}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain why traditional relational database systems cannot handle
+        modern data workloads at scale, and identify the specific limits
+        that are exceeded.
+  \item Define the three original dimensions of big data (Volume,
+        Velocity, Variety) and the two additional dimensions (Veracity,
+        Value) that form the extended 5Vs framework.
+  \item Classify any given data source as structured, semi-structured,
+        or unstructured, and identify the appropriate storage and query
+        tool for each category.
+  \item Distinguish between vertical and horizontal scaling strategies,
+        and explain why distributed, horizontally scaled systems dominate
+        big data engineering.
+  \item State the CAP theorem, explain the meaning of each property, and
+        identify how real-world systems (HBase, Cassandra, PostgreSQL)
+        position themselves in the CAP triangle.
+  \item Compare batch and stream processing models and select the
+        appropriate model for a given engineering requirement.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Every 60 seconds in 2024, users upload 500 hours of video to YouTube,
+execute more than 5 million Google searches, send over one million
+WhatsApp messages, and publish approximately 6,000 posts on X (formerly
+Twitter). These figures are not curiosities; they represent a
+fundamental transformation in the scale, speed, and diversity of data
+that computing infrastructure is expected to handle. This chapter
+establishes the conceptual and technical foundation for the entire
+book. We begin by examining what makes data ``big,'' explore how that
+bigness is formally characterized, and introduce the core theoretical
+constraints---the CAP theorem in particular---that shape every
+architectural decision in data engineering.
+
+%%====================================================================
+\section{Why Data Engineering Matters}
+\label{sec:why-de}
+%%====================================================================
+
+In 2018, the International Data Corporation (IDC) projected that the
+global \term{datasphere}---the total volume of data generated, captured,
+copied, and consumed worldwide---would reach \textbf{175 zettabytes} by
+2025, representing a 23-fold increase over the 7.2 ZB that existed in
+2018 \parencite{IDC2018}. To appreciate this scale, consider that one
+zettabyte equals $10^{21}$ bytes, or roughly 250 billion standard 4\TB\
+hard drives---more drives than there are stars visible to the naked eye
+from any single point on Earth.
+
+\begin{table}[ht]
+\centering
+\caption{Data volume units and their relationship to everyday storage}
+\label{tab:volume-units}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{L{2.4cm} R{2.4cm} L{6.0cm}}
+\toprule
+\textbf{Unit} & \textbf{Bytes} & \textbf{Illustrative equivalent} \\
+\midrule
+Kilobyte (KB)   & $10^{3}$  & A short email (plain text) \\
+Megabyte (MB)   & $10^{6}$  & A 3-minute MP3 audio track \\
+Gigabyte (GB)   & $10^{9}$  & A feature-length HD film \\
+Terabyte (TB)   & $10^{12}$ & \textasciitilde310,000 photos from a 12 MP camera \\
+Petabyte (PB)   & $10^{15}$ & All US academic research libraries combined \\
+Exabyte (EB)    & $10^{18}$ & All words ever spoken by humans (estimated) \\
+\textbf{Zettabyte (ZB)}  & $\mathbf{10^{21}}$ & \textbf{2025 global datasphere} \\
+Yottabyte (YB)  & $10^{24}$ & Theoretical future scale \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Traditional \term{relational database management systems} (RDBMS)---the
+dominant paradigm since Edgar Codd's foundational work in 1970---are
+extraordinary tools for managing well-structured, bounded datasets. A
+modern relational database running on a well-provisioned server can
+comfortably manage tens of terabytes and sustain thousands of
+transactions per second with full ACID guarantees. For a bank's
+transaction ledger, a hospital's patient registry, or an airline's
+reservation system, a carefully tuned relational system remains the
+correct choice. The problem emerges when data characteristics exceed
+what any single machine can handle: when datasets are measured in
+petabytes rather than terabytes; when data arrives not from a single
+transactional application but from millions of concurrent event streams;
+and when the data itself is not neatly organized into rows and columns
+but exists as images, audio recordings, sensor telemetry, and free-form
+text. In these conditions, the fundamental assumptions of relational
+database design break down.
+
+\term{Data engineering} is the discipline concerned with the design,
+construction, and maintenance of systems that collect, store, transform,
+and serve large-scale data for downstream consumers---analysts, machine
+learning models, business intelligence dashboards, and operational
+applications. A data engineer builds the infrastructure that makes raw
+data useful. This field draws on distributed systems, software
+engineering, database theory, and applied computer science. The tools of
+modern data engineering---distributed file systems, parallel batch
+processors, in-memory computation engines, stream processing frameworks,
+and pipeline orchestrators---are the subjects of this book.
+
+\begin{keyinsight}{The Data Engineering Mandate}
+Data engineering is not about \emph{generating} insight---that is the
+domain of data science and analytics. Data engineering is about making
+data \emph{available, reliable, and efficiently accessible} at any
+scale. The data engineer builds the plumbing; analysts and scientists
+use the water.
+\end{keyinsight}
+
+%%====================================================================
+\section{Defining Big Data: The 3Vs Framework}
+\label{sec:three-vs}
+%%====================================================================
+
+The term ``big data'' gained formal structure in 2001 when Doug Laney,
+then a research analyst at the META Group, published a brief but
+enormously influential research note identifying three dimensions along
+which data management challenges had outpaced conventional tools
+\parencite{Laney2001}. He labeled these dimensions \emph{Volume},
+\emph{Velocity}, and \emph{Variety}---the \term{3Vs of big data}. Eleven
+years later, Gartner (which had acquired META Group) codified these
+dimensions into a formal definition:
+
+\begin{defbox}{Big Data (Gartner/Beyer \& Laney, 2012)}
+\textit{``Big data is high-volume, high-velocity and/or high-variety
+information assets that demand cost-effective, innovative forms of
+information processing that enable enhanced insight, decision making,
+and process automation.''}\\[4pt]
+\hfill --- Beyer \& Laney, Gartner Research, 2012 \parencite{GartnerBigData2012}
+\end{defbox}
+
+Each of the three dimensions corresponds to a distinct class of
+engineering challenge. The McKinsey Global Institute, in its landmark
+2011 study, reinforced this framing: big data refers to datasets
+``whose size is beyond the ability of typical database software tools to
+capture, store, manage and analyze'' \parencite{McKinsey2011}. Let us
+examine each dimension in turn.
+
+%--------------------------------------------------------------------
+\subsection{Volume: The Scale Dimension}
+\label{subsec:volume}
+%--------------------------------------------------------------------
+
+\term{Volume} refers to the sheer quantity of data that is generated,
+accumulated, and must be stored and processed. Volume is the most
+intuitively obvious characteristic of big data: a dataset is voluminous
+when it exceeds the capacity of conventional tools---typically, when a
+single machine cannot store and process it within an acceptable elapsed
+time. The following production examples illustrate current operational
+scales:
+
+\begin{table}[ht]
+\centering
+\caption{Volume at production scale (representative 2023--2024 estimates)}
+\label{tab:volume-examples}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{L{3.2cm} L{7.4cm}}
+\toprule
+\textbf{Organisation} & \textbf{Volume characteristic} \\
+\midrule
+Meta (Facebook)   & 500\TB\ of new data ingested per day across all platforms \\
+Google            & $>$100\PB\ of data processed internally per day (estimated) \\
+Walmart           & $>$2.5\PB\ of customer transaction data in analytical systems \\
+CERN (LHC)        & $\approx$15\PB\ of particle collision data generated per year \\
+Netflix           & $>$1\PB\ of user interaction events per day \\
+NYSE              & $\approx$1\TB\ of trading records generated on a peak day \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+From an engineering perspective, volume creates several concrete
+challenges. First, no single server---even the highest-specification
+available in 2024, with up to 64\TB\ of RAM---can hold a petabyte-scale
+dataset in memory. Second, sequential reads from a single high-speed
+SSD array proceed at approximately 7\GB/s; reading one petabyte at that
+speed requires roughly 41 hours. Third, ingesting 500\TB\ per day means
+sustained write throughput of approximately 5.8\GB/s, which no single
+storage device can sustain reliably. The engineering response is
+\emph{horizontal distribution}: partition data into blocks and spread
+those blocks across a cluster of hundreds or thousands of commodity
+machines---the approach formalized by the Google File System
+\parencite{GFS2003} and, in open-source form, by Hadoop's HDFS
+(discussed in Chapter~\ref{ch:hdfs}).
+
+%--------------------------------------------------------------------
+\subsection{Velocity: The Speed Dimension}
+\label{subsec:velocity}
+%--------------------------------------------------------------------
+
+\term{Velocity} refers to the speed at which data is generated, arrives
+at a system, and must be processed or acted upon. High-velocity data is
+not merely large; it arrives \emph{continuously} and often demands
+responses on timescales far shorter than batch processing can provide.
+
+Consider a few representative velocities:
+\begin{itemize}
+  \item The Visa payment network processes approximately 24,000
+        transactions per second at peak load.
+  \item Global IoT deployments generate over one billion device sensor
+        readings per hour across industrial, environmental, and consumer
+        applications.
+  \item A ride-sharing platform (such as Uber or Lyft) receives a GPS
+        ping every three seconds from millions of simultaneously active
+        drivers---at 5 million drivers, that is over 1.6 million
+        location records per second.
+  \item Modern stock exchanges publish quote updates for listed
+        securities at rates exceeding one million messages per second
+        during high-activity sessions.
+\end{itemize}
+
+The engineering challenge of velocity is distinct from that of volume:
+a system may need to respond to each event within milliseconds (fraud
+detection, payment authorization) or may tolerate latencies of seconds
+(real-time dashboards). The key constraint is that high-velocity data
+\emph{cannot wait} for a nightly batch process---by the time the batch
+runs, the window for action has closed. This distinction drives the
+separation between \emph{batch} and \emph{stream} processing
+architectures, explored in Section~\ref{sec:batch-stream} and in depth
+in Chapter~\ref{ch:pipelines}.
+
+\begin{table}[ht]
+\centering
+\caption{The data processing spectrum by velocity requirement}
+\label{tab:velocity-spectrum}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{L{2.2cm} L{1.6cm} L{3.2cm} L{3.4cm}}
+\toprule
+\textbf{Processing mode} & \textbf{Latency} & \textbf{Representative tools} & \textbf{Typical use case} \\
+\midrule
+Batch          & Hours      & Hadoop MapReduce, Hive & Nightly ETL, monthly billing \\
+Micro-batch    & Seconds    & Spark Streaming        & Near-real-time dashboards \\
+Stream         & Milliseconds & Apache Flink, Kafka Streams & Fraud detection, alerts \\
+Real-time      & Sub-ms     & In-memory + Kafka      & Payment authorization \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Variety: The Diversity Dimension}
+\label{subsec:variety}
+%--------------------------------------------------------------------
+
+\term{Variety} refers to the diversity of data formats, types, schemas,
+and sources that must be jointly ingested, stored, and analysed. Modern
+organisations do not operate a single data source with a uniform schema;
+they accumulate data from dozens of systems, each with its own format
+and semantics.
+
+Variety manifests along several axes. \emph{Format variety} arises when
+data arrives as CSV files, JSON documents, XML feeds, binary Avro
+records, columnar Parquet files, DICOM medical images, and MP4 video
+simultaneously---all of which must be stored and queried together.
+\emph{Source variety} arises when the same analytical question requires
+joining data from relational databases, REST APIs, IoT sensor streams,
+social media firehoses, and internal event logs. \emph{Semantic variety}
+arises when a field named \texttt{date} means the transaction date in
+one system, the record-entry date in another, and the customer birth
+date in a third.
+
+The foundational distinction among data types---structured,
+semi-structured, and unstructured---is the key conceptual framework for
+managing variety, and we explore it in detail in
+Section~\ref{sec:data-taxonomy}.
+
+\begin{researchspotlight}{Laney (2001) --- The Origin of the 3Vs}
+\textbf{Citation:} Laney, D. (2001). \textit{3D Data Management:
+Controlling Data Volume, Velocity and Variety}. META Group Research
+Note 949, February 2001. \parencite{Laney2001}
+
+\smallskip\noindent
+\textbf{Key insight:} Laney's one-page note, written in the context of
+e-commerce data challenges, framed data management as a three-dimensional
+problem---not merely a storage problem. He argued that organisations
+failing to address all three dimensions would face ``increasing
+management headaches.''
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Established the first formal vocabulary (\emph{3Vs}) for
+        characterising modern data management challenges, unifying what
+        had previously been treated as unrelated operational problems.
+  \item Distinguished \emph{velocity} as a management dimension
+        independent of volume---recognising that \emph{how fast} data
+        arrives is as important as \emph{how much} arrives.
+  \item Introduced \emph{variety} as the hardest dimension to manage,
+        predicting the rise of semi-structured and unstructured data as
+        dominant forms.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} The 3Vs framework is taught at every major
+computer science programme and has been cited in thousands of academic
+papers and industry reports. It remains the canonical definition of big
+data, even as the framework has been extended to 5Vs and beyond. Gartner
+officially adopted and extended the definition in 2012.
+\end{researchspotlight}
+
+%%====================================================================
+\section{The Extended 5Vs Framework}
+\label{sec:five-vs}
+%%====================================================================
+
+The 3Vs framework is powerful but incomplete. Two additional dimensions
+have gained wide acceptance, bringing the framework to five:
+
+\term{Veracity} refers to the trustworthiness and quality of data.
+High-veracity data is accurate, consistent, and free of critical errors;
+low-veracity data is noisy, inconsistent, or of uncertain provenance.
+Veracity challenges arise in practical systems for many reasons: GPS
+sensors drift by tens of metres in dense urban environments; optical
+character recognition (OCR) on historical documents introduces
+transcription errors; social media platforms contain significant volumes
+of bot-generated content; and sensor networks may experience intermittent
+failures that produce spurious or missing readings. The consequences of
+low veracity can be severe---a machine learning model trained on
+inaccurate data will make inaccurate predictions, regardless of how
+sophisticated the model or how large the training set.
+
+\term{Value} refers to the business or societal utility that can be
+extracted from data. It is the ultimate justification for the
+considerable engineering investment required to build big data systems.
+A dataset may score highly on all four other Vs---petabytes of
+high-velocity, highly varied, high-quality data---and still produce
+no actionable insight if the right analytical questions are never asked,
+or if the results are never operationalised. Value is the bridge between
+technical capability and organisational outcomes.
+
+\begin{table}[ht]
+\centering
+\caption{The 5Vs framework with engineering implications}
+\label{tab:five-vs}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{1.8cm} L{3.2cm} L{3.5cm} L{2.6cm}}
+\toprule
+\textbf{Dimension} & \textbf{Definition} & \textbf{Production example} &
+\textbf{Primary engineering challenge} \\
+\midrule
+Volume    & Scale of data generated and stored & Meta: 500\TB/day ingested &
+            Distributed storage (HDFS, S3) \\
+Velocity  & Speed of generation and processing & Visa: 24,000 tx/s &
+            Stream processing (Kafka, Flink) \\
+Variety   & Diversity of formats and sources & CSV + JSON + DICOM + MP4 &
+            Schema integration, ETL/ELT \\
+Veracity  & Trustworthiness of data quality & GPS drift, OCR errors, bot tweets &
+            Data quality pipelines, validation \\
+Value     & Business utility extracted from data & Fraud prevented, revenue gained &
+            Feature engineering, ML pipelines \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{researchspotlight}{McKinsey Global Institute (2011) --- Quantifying the Value Dimension}
+\textbf{Citation:} Manyika, J.\ et~al.\ (2011). \textit{Big Data: The
+Next Frontier for Innovation, Competition, and Productivity}. McKinsey
+Global Institute, May 2011. \parencite{McKinsey2011}
+
+\smallskip\noindent
+\textbf{Key insight:} The report argued that big data has become ``a new
+factor of production,'' alongside capital and labour---that is,
+organisations with superior data capabilities will, over time,
+systematically outperform those without them, in the same way that
+access to capital separates competitive enterprises from struggling ones.
+
+\smallskip\noindent
+\textbf{Technical and economic contributions:}
+\begin{itemize}
+  \item Quantified the value potential across five major sectors:
+        healthcare (\$300B+ annually in the US), public sector
+        (\$250B+ in Europe), retail ($>$60\% operating margin
+        improvement for early adopters), manufacturing, and personal
+        location data.
+  \item Identified the acute shortage of data-skilled talent as the
+        primary constraint on value realisation---the report projected
+        a shortfall of 140,000--190,000 professionals with deep
+        analytical expertise in the US alone by 2018.
+  \item Introduced the concept of ``data as infrastructure,'' arguing
+        that the economic benefits of big data investment are broadly
+        distributed across the economy, much like roads or electricity
+        grids.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} This report is one of the most cited documents
+in the history of data-driven business strategy. It directly influenced
+technology investment priorities at major corporations and governments
+worldwide, and it validated the creation of dedicated data engineering
+and data science functions within large organisations.
+\end{researchspotlight}
+
+%%====================================================================
+\section{A Taxonomy of Digital Data}
+\label{sec:data-taxonomy}
+%%====================================================================
+
+Managing the Variety dimension of big data requires a clear
+classification of data types. The field has converged on three primary
+categories---structured, semi-structured, and unstructured---distinguished
+principally by the presence, flexibility, and location of their schema.
+
+%--------------------------------------------------------------------
+\subsection{Structured Data}
+\label{subsec:structured}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Structured Data}
+Data organised according to a \textbf{predefined, rigid schema} in which
+every record contains the same fields in the same order, with each field
+having a specified data type. The schema is defined and enforced before
+data is written (\textbf{schema-on-write}). Structured data is typically
+stored in relational database management systems and queryable directly
+with standard SQL.
+\end{defbox}
+
+Structured data represents the most mature and well-understood category.
+Relational database theory, developed by Codd (1970) and refined over
+five decades, provides powerful tools for storing, querying, and
+maintaining the integrity of structured data. A bank's transaction ledger
+is a canonical example: every row has an account number, a timestamp, an
+amount, a currency code, and a transaction type. There are no optional
+fields, no embedded documents, no ambiguous formats. SQL can answer
+virtually any analytical question over such data with high efficiency.
+
+The primary limitation of structured data is its rigidity. Adding a new
+column to a table with hundreds of millions of rows requires a schema
+migration---a costly, time-consuming, and potentially disruptive
+operation. More fundamentally, many of the most valuable data types in
+modern organisations---customer reviews, support transcripts, medical
+images, sensor streams---cannot be naturally represented in rows and
+columns without destructive simplification. Despite this, structured data
+remains the bedrock of transactional systems, and big data engineering
+tools like \tool{Apache Sqoop} exist specifically to migrate structured
+data from RDBMS sources into distributed analytical systems (covered in
+Chapter~\ref{ch:pipelines}).
+
+In terms of global prevalence, structured data accounts for only
+approximately 20\% of all digital data---yet it represents the most
+well-governed, analysable slice of that data.
+
+%--------------------------------------------------------------------
+\subsection{Semi-Structured Data}
+\label{subsec:semi-structured}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Semi-Structured Data}
+Data with a \textbf{flexible, self-describing schema} embedded within
+the data itself. Fields are identified by keys or tags that travel with
+the record, not by position in a fixed row. New fields can be added
+without modifying a central schema registry. Semi-structured data is
+typically stored as files or in NoSQL databases and processed with a
+\textbf{schema-on-read} approach: the schema is imposed at query time,
+not at write time.
+\end{defbox}
+
+Semi-structured data dominates modern web and application architectures.
+The two most prevalent formats are \textbf{JSON} (JavaScript Object
+Notation) and \textbf{XML} (Extensible Markup Language):
+
+\begin{lstlisting}[style=pseudocode, caption={A JSON event record from a streaming API}]
+{
+  "event_id":   "e-928471",
+  "event_type": "page_view",
+  "timestamp":  "2024-03-15T14:22:31Z",
+  "user": {
+    "id":       "u-441982",
+    "tier":     "premium"
+  },
+  "page":       "/product/laptop-x500",
+  "session_ms": 4820,
+  "metadata": {
+    "user_agent": "Mozilla/5.0 ...",
+    "referrer":   "https://search.example.com"
+  }
+}
+\end{lstlisting}
+
+Notice that the JSON record carries its own field names (``event\_id'',
+``timestamp'', ``user'', etc.) directly within the data. A consumer
+reading this record does not need to consult an external schema
+definition to know what each field means. This \emph{self-description}
+property makes semi-structured data highly flexible: a downstream
+service that only cares about \texttt{event\_type} and
+\texttt{user.tier} can simply ignore all other fields. When a new field
+(e.g., \texttt{ab\_test\_variant}) must be added, it can be appended to
+future records without invalidating existing ones.
+
+The schema-on-read approach enabled by semi-structured formats is
+central to the \emph{data lake} architecture: data is ingested in its
+native format without transformation, and the schema is applied by the
+analytical tool at query time. This defers the cost of schema design
+but introduces the risk of schema drift---where the meaning or format
+of a field changes silently between producers, creating silent data
+quality failures. Managing this risk (through schema registries,
+contract testing, and data lineage tracking) is a significant part of
+production data engineering practice.
+
+Web server access logs, IoT device telemetry published via MQTT,
+REST API responses, email headers, configuration files in YAML or TOML,
+and Apache Avro records with embedded schemas all belong to the
+semi-structured category. This category accounts for roughly 10\% of
+global data by volume.
+
+%--------------------------------------------------------------------
+\subsection{Unstructured Data}
+\label{subsec:unstructured}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Unstructured Data}
+Data with \textbf{no predefined schema} and no embedded key-value
+structure that can be directly queried. The semantic content is encoded
+in the raw signal---pixels, audio samples, token sequences---and cannot
+be accessed by a relational or document query engine without substantial
+preprocessing (feature extraction, natural language processing, or
+computer vision).
+\end{defbox}
+
+Unstructured data is the dominant form of digital data, accounting for
+an estimated 70--80\% of the global datasphere. It encompasses text
+documents (news articles, legal contracts, clinical notes, social media
+posts), images (medical scans, satellite photography, product
+photographs), audio recordings (call-centre conversations, podcasts,
+speech-enabled device logs), video (surveillance footage, user-generated
+content, manufacturing inspection recordings), and raw sensor streams
+(seismic signals, EEG waveforms, raw GPS trajectories).
+
+The defining challenge of unstructured data is that extracting
+information requires \emph{interpretation}---a step that structured and
+semi-structured data largely skip. A relational database can compute the
+average transaction amount in a single SQL aggregation; answering the
+question ``what is the sentiment of customer reviews mentioning our new
+product?'' requires tokenising text, building or loading a language
+model, running inference, and aggregating the model's output. This
+computational chain is far more complex and resource-intensive, which is
+why the tools introduced in later chapters---Spark MLlib, distributed
+deep learning frameworks, and specialised feature stores---are essential
+components of modern data engineering systems.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of data type characteristics and engineering implications}
+\label{tab:data-type-comparison}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{2.0cm} L{2.6cm} L{2.6cm} L{2.8cm}}
+\toprule
+\textbf{Dimension}       & \textbf{Structured}     & \textbf{Semi-structured}  & \textbf{Unstructured} \\
+\midrule
+Schema                   & Predefined, rigid        & Self-describing, flexible & Absent \\
+Schema timing            & On write                 & On read                   & N/A \\
+Storage                  & RDBMS tables             & Files, NoSQL, APIs        & Object stores, HDFS \\
+Query tool               & SQL                      & JSONPath, Hive, Spark SQL & NLP, CV, Spark MLlib \\
+Global share             & $\sim$20\%               & $\sim$10\%                & $\sim$70--80\% \\
+Schema change cost       & High (migration)         & Low                       & N/A \\
+Typical ingestion tool   & Sqoop                    & Kafka, Flume              & Custom pipelines \\
+\textbf{Examples}        & Bank ledger, ERP records & REST API JSON, server logs & MRI scan, audio call \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{caution}{JSON is Semi-Structured, Not Unstructured}
+A frequent and consequential error: classifying JSON or XML as
+``unstructured'' because it does not look like a database table. JSON
+and XML carry an embedded schema in the form of key names and
+hierarchical nesting. A query engine can navigate this structure
+directly (using JSONPath, XPath, or Hive's schema-on-read). An MRI
+scan, a JPEG image, or an MP3 recording carries \emph{no} such
+navigable schema---its semantic content is encoded in the binary signal
+itself, requiring a domain-specific model (computer vision, speech
+recognition) to interpret. The distinction matters architecturally:
+semi-structured data can be stored and queried in a data lake with
+minimal transformation; unstructured data requires a preprocessing
+pipeline before it becomes analytically useful.
+\end{caution}
+
+%%====================================================================
+\section{The Engineering Response to Scale}
+\label{sec:engineering-response}
+%%====================================================================
+
+Given the 3Vs, the engineering question is: how do we build systems
+capable of storing petabytes, processing millions of events per second,
+and integrating dozens of heterogeneous data sources? The answer, which
+runs through every chapter of this book, reduces to a small set of
+foundational principles.
+
+%--------------------------------------------------------------------
+\subsection{Vertical vs.\ Horizontal Scaling}
+\label{subsec:scaling}
+%--------------------------------------------------------------------
+
+There are two ways to make a computing system more powerful.
+\term{Vertical scaling} (scaling up) means adding more resources to a
+single machine: a faster processor, more RAM, a larger or faster storage
+array. Vertical scaling is simple---it introduces no distributed-systems
+complexity---but it has a hard physical ceiling. The most powerful
+single-node servers available in 2024 top out at approximately 64\TB\
+of RAM and a handful of high-throughput storage controllers. Above this
+limit, no amount of money can buy a single machine large enough to hold
+the dataset. Vertical scaling is also exponentially expensive: a server
+with twice the RAM costs approximately eight times as much.
+
+\term{Horizontal scaling} (scaling out) means adding more machines to a
+cluster and distributing the data and computation across all of them.
+Each individual machine is a commodity server costing between three and
+eight thousand dollars. The power of the cluster grows nearly linearly
+with the number of nodes added: doubling the number of nodes
+approximately doubles the throughput. Failure of a single node---which
+is expected, not exceptional, in a large cluster---does not halt the
+system, because data is replicated across multiple nodes.
+
+\begin{table}[ht]
+\centering
+\caption{Vertical vs.\ horizontal scaling: a systematic comparison}
+\label{tab:scaling}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.8cm} L{3.3cm} L{3.9cm}}
+\toprule
+\textbf{Attribute}        & \textbf{Vertical (Scale Up)}  & \textbf{Horizontal (Scale Out)} \\
+\midrule
+Scalability ceiling       & Hard physical limit ($\sim$64\TB\ RAM) & Near-unlimited (add nodes) \\
+Cost scaling              & Superlinear (exponential)    & Near-linear per node \\
+Fault model               & Single point of failure      & Tolerates individual node failures \\
+Complexity                & Low (no distributed systems) & High (consistency, coordination) \\
+Latency for small queries & Low                          & Higher (network overhead) \\
+Typical cost example      & Oracle Exadata: $>$\$500K/yr & 1,000 nodes $\times$ \$5K = \$5M (one-time) \\
+\textbf{Used by}          & Traditional RDBMS, data warehouses & Hadoop, Spark, Cassandra, Kafka \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{The Commodity Hardware Insight}
+\label{subsec:commodity}
+%--------------------------------------------------------------------
+
+The observation that underpins all of distributed data engineering is
+deceptively simple: \emph{commodity hardware will fail, and systems must
+be designed with this expectation from the start}. In a cluster of 1,000
+commodity servers, with each server having a disk failure rate of 1\% per
+year, we expect approximately 10 disk failures per year---about one every
+five weeks. At 10,000 nodes (the scale of Yahoo!'s first production
+Hadoop cluster in 2008), this becomes roughly one disk failure per day.
+The solution is not to prevent failures---that is neither economically
+nor physically feasible---but to design for them. Every piece of data is
+stored in multiple copies on different nodes; if one node fails, the data
+remains available from the surviving copies, and the system automatically
+creates a new replica on a healthy node. This design principle, first
+articulated for distributed file systems by Google's engineers
+\parencite{GFS2003}, is the cornerstone of HDFS, Kafka, and Cassandra
+alike.
+
+%--------------------------------------------------------------------
+\subsection{Moving Computation to Data}
+\label{subsec:comp-to-data}
+%--------------------------------------------------------------------
+
+The second foundational principle of distributed data processing inverts
+the traditional computing model. In a conventional system, data is moved
+to the processor: a query is issued, data is fetched from storage into
+RAM, and the CPU processes it. This model fails at petabyte scale because
+the network bandwidth required to move large amounts of data to a central
+processor becomes the bottleneck---the network simply cannot move data
+fast enough to keep the processor busy.
+
+The solution, pioneered by Google's MapReduce system \parencite{MapReduce2004}
+and implemented in every major big data processing framework, is to
+\emph{move computation to the data}: send the processing logic (a
+function or query) to the node where the relevant data blocks reside,
+execute the computation locally, and collect only the (smaller) results.
+This principle---\textbf{data locality}---drastically reduces network
+traffic and enables the aggregate CPU capacity of an entire cluster to be
+applied in parallel to a large dataset.
+
+\begin{systemdesign}{Data Locality in Practice}
+In HDFS (Chapter~\ref{ch:hdfs}), a 128\MB\ data block is stored on three
+nodes. When a MapReduce or Spark job must process that block, the
+scheduler first attempts to assign the task to one of the three nodes
+already holding a replica (task-local scheduling). If those nodes are
+busy, it next tries a node on the same physical rack (rack-local
+scheduling). Only if no rack-local node is available does it resort to
+sending the data over the network. In production clusters, over 90\% of
+tasks execute with data locality, meaning almost all processing is local
+I/O rather than network transfer.
+\end{systemdesign}
+
+%%====================================================================
+\section{The CAP Theorem}
+\label{sec:cap}
+%%====================================================================
+
+Building a distributed system---one that spans multiple machines
+connected by a network---introduces a fundamental theoretical constraint
+that shapes every storage and database design decision in data
+engineering. This constraint is captured by the \term{CAP theorem}.
+
+%--------------------------------------------------------------------
+\subsection{Statement and Definitions}
+\label{subsec:cap-statement}
+%--------------------------------------------------------------------
+
+The CAP theorem was conjectured by Eric Brewer in his keynote address at
+the ACM Symposium on Principles of Distributed Computing in 2000
+\parencite{Brewer2000} and formally proved by Gilbert and Lynch two years
+later \parencite{GilbertLynch2002}. It states:
+
+\begin{defbox}{The CAP Theorem (Brewer, 2000; Gilbert \& Lynch, 2002)}
+A distributed data system can simultaneously guarantee \textbf{at most
+two} of the following three properties:
+\begin{enumerate}
+  \item \textbf{Consistency (C):} Every read operation returns the most
+        recent successfully written value, or an error. All nodes in the
+        system see the same data at the same time.
+  \item \textbf{Availability (A):} Every request to a non-failed node
+        receives a response---not guaranteed to be the most recent
+        write, but a response nonetheless.
+  \item \textbf{Partition Tolerance (P):} The system continues to
+        operate correctly even if an arbitrary number of messages
+        between nodes are lost or delayed (a \emph{network partition}).
+\end{enumerate}
+\end{defbox}
+
+Understanding what each property means in operational terms is essential
+for reasoning about system design. \emph{Consistency}, in the CAP sense,
+is not the same as the C in ACID transactions (which refers to
+maintaining database invariants); CAP consistency is \emph{linearisability}---
+the guarantee that every read sees the most recent write, as if all
+operations occurred on a single machine. \emph{Availability} means every
+request gets a response; it does not mean the response contains current
+data. \emph{Partition tolerance} means the system continues to function
+when the network splits into disconnected sub-clusters.
+
+%--------------------------------------------------------------------
+\subsection{The Practical Implication: Choosing C vs.\ A}
+\label{subsec:cap-practice}
+%--------------------------------------------------------------------
+
+The critical practical insight is that network partitions in distributed
+systems are not theoretical edge cases---they are \emph{inevitable}. Any
+system operating across multiple machines connected by a real network
+will, at some point, experience a partition: a switch failure, a
+misconfigured firewall rule, a miscabling in a data centre, or a brief
+network congestion event that causes messages to be delayed or dropped.
+Therefore, in any real distributed system, partition tolerance (P) is
+not optional. A system that cannot tolerate partitions is effectively a
+single-machine system.
+
+Given that P is always required, the CAP theorem reduces to a binary
+choice: when a partition occurs, should the system prioritise
+\textbf{consistency} (refuse requests that cannot be answered with
+current data, guaranteeing accuracy) or \textbf{availability} (answer
+every request with possibly stale data, guaranteeing responsiveness)?
+This choice is one of the most important architectural decisions in data
+engineering.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    node distance=0pt,
+    corner/.style={font=\small\bfseries\sffamily, text=DEBlue, align=center},
+    edge lbl/.style={font=\scriptsize\sffamily, align=center},
+    sys/.style={font=\scriptsize\ttfamily, align=center},
+    blob/.style={draw=none, rounded corners=3pt, inner sep=3pt, align=center,
+                 font=\scriptsize\sffamily}
+  ]
+  % Triangle vertices
+  \coordinate (C) at (0, 5.2);
+  \coordinate (A) at (-4.2, 0);
+  \coordinate (P) at (4.2, 0);
+
+  % Triangle
+  \draw[DEBlue, very thick] (C) -- (A) -- (P) -- cycle;
+
+  % Vertex labels
+  \node[corner] at (0, 5.7)    {Consistency (C)};
+  \node[corner] at (-4.9, -0.4) {Availability (A)};
+  \node[corner] at (4.9, -0.4)  {Partition Tolerance (P)};
+
+  % CA zone (top left edge)
+  \node[blob, fill=DELightBlue] at (-2.8, 3.2) {%
+    \textbf{CA} systems\\[2pt]
+    PostgreSQL, MySQL\\
+    (single-datacenter)
+  };
+
+  % CP zone (top right edge)
+  \node[blob, fill=DELightGreen] at (2.8, 3.2) {%
+    \textbf{CP} systems\\[2pt]
+    Apache HBase\\
+    ZooKeeper
+  };
+
+  % AP zone (bottom)
+  \node[blob, fill=DELightAccent] at (0, 0.9) {%
+    \textbf{AP} systems\\[2pt]
+    Apache Cassandra\\
+    Amazon DynamoDB
+  };
+
+  % Edge descriptors
+  \node[edge lbl, rotate=52, text=DEBlue!60] at (-1.8, 2.4)
+        {no partition\\tolerance};
+  \node[edge lbl, rotate=-52, text=DEBlue!60] at (1.8, 2.4)
+        {sacrifices\\availability};
+  \node[edge lbl, text=DEBlue!60] at (0, -0.4)
+        {sacrifices consistency};
+\end{tikzpicture}
+\caption{The CAP triangle: every distributed system chooses two of the three properties.
+         Because network partitions are unavoidable, real systems choose between CP and AP.}
+\label{fig:cap-triangle}
+\end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{CAP positioning of representative data systems}
+\label{tab:cap-systems}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.8cm} C{0.8cm} L{5.4cm}}
+\toprule
+\textbf{System} & \textbf{CAP} & \textbf{Design rationale} \\
+\midrule
+PostgreSQL, MySQL & CA & Designed for single-node or tightly coupled clusters;
+                         cannot tolerate true network partitions \\
+Apache HBase      & CP & Chooses consistency: if a partition occurs, HBase may
+                         become unavailable rather than serve stale data \\
+Apache ZooKeeper  & CP & Coordination service where serving stale configuration
+                         data would be catastrophic \\
+Apache Cassandra  & AP & Chooses availability: always responds, using
+                         tunable eventual consistency (read your own writes) \\
+Amazon DynamoDB   & AP & Optimised for always-on e-commerce workloads where
+                         availability is paramount \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{researchspotlight}{Brewer (2000) and Gilbert \& Lynch (2002) --- The CAP Theorem}
+\textbf{Citations:}
+\begin{itemize}
+  \item Brewer, E.A.\ (2000). \textit{Towards Robust Distributed Systems}.
+        Keynote, PODC 2000. \parencite{Brewer2000}
+  \item Gilbert, S.\ \& Lynch, N.A.\ (2002). Brewer's Conjecture and the
+        Feasibility of Consistent, Available, Partition-Tolerant Web
+        Services. \textit{ACM SIGACT News}, 33(2):51--59.
+        \parencite{GilbertLynch2002}
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Key insight:} Brewer's conjecture, presented as intuition in
+2000, was that three desirable properties of distributed systems could
+not all be simultaneously guaranteed. Gilbert and Lynch provided a
+formal proof two years later, elevating the observation from engineering
+folklore to a mathematically rigorous theorem.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Provided the formal definitions of consistency (linearisability),
+        availability, and partition tolerance used in distributed systems
+        theory.
+  \item Proved that no distributed system can achieve all three
+        properties simultaneously using an asynchronous network model.
+  \item Established the vocabulary (CA, CP, AP) that data architects use
+        to describe and compare distributed systems.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Nuance and evolution:} The CAP theorem is often oversimplified.
+Eric Brewer himself, in a 2012 retrospective, noted that the choice is
+not always a binary C-vs-A decision: systems like DynamoDB offer tunable
+consistency levels, allowing different operations to trade consistency
+for availability at the operation level. The PACELC model (Patterson
+et~al., 2012) extends CAP by noting that even without a partition,
+systems must trade latency for consistency---a trade-off CAP does not
+capture. Despite these refinements, the CAP theorem remains the most
+widely cited result in distributed systems theory.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Batch vs.\ Stream Processing}
+\label{sec:batch-stream}
+%%====================================================================
+
+The Velocity dimension of big data---the need to process data that
+arrives continuously and at high rates---has driven the development of
+two fundamentally different processing paradigms that data engineers must
+understand and choose between.
+
+%--------------------------------------------------------------------
+\subsection{Batch Processing}
+\label{subsec:batch}
+%--------------------------------------------------------------------
+
+\term{Batch processing} operates on a fixed, bounded dataset accumulated
+over a period of time. The data is first stored in full (on disk, in a
+distributed file system, or in a data warehouse), and then a
+computation---the \emph{batch job}---is run over the entire stored
+dataset. Classic examples include nightly financial reconciliation, end-of-month
+billing, weekly machine learning model retraining, and annual census
+analysis.
+
+Batch processing has several important properties. First, it achieves
+very high \emph{throughput}: because the entire dataset is available
+before processing begins, the job can be optimised for sequential I/O,
+sorted reads, and massive parallelism. Second, batch jobs are inherently
+\emph{reproducible}: re-running the same job on the same input data will
+always produce the same output---a property critical for auditing and
+debugging. Third, batch jobs can be \emph{fault-tolerant} in a simple
+way: if a task fails, it can be restarted from the last checkpoint
+without affecting the rest of the job. Fourth, and most importantly for
+our purposes, batch processing has \emph{latency measured in hours}: a
+nightly ETL job that begins at 02:00 and finishes at 06:00 delivers
+results four hours after the data cutoff. For applications that need to
+respond to data within seconds or milliseconds, this latency is
+unacceptable.
+
+%--------------------------------------------------------------------
+\subsection{Stream Processing}
+\label{subsec:stream}
+%--------------------------------------------------------------------
+
+\term{Stream processing} operates on an unbounded, continuously arriving
+sequence of data records. Rather than accumulating data and running a
+batch job, a stream processing engine processes each record (or a
+small micro-batch of records) as it arrives, maintaining running
+state across the stream. The key characteristic is \emph{low latency}:
+a stream processor can emit results within milliseconds to seconds of
+each event's arrival.
+
+Stream processing is the appropriate model for applications where the
+value of a response decays rapidly with time: real-time fraud detection
+(a stolen card must be blocked before the second transaction clears, not
+after nightly batch analysis); live stock market monitoring (an
+algorithmic trading system needs the current quote, not yesterday's
+close); operational dashboards (a call-centre manager needs to see
+current queue depth, not yesterday's average); and anomaly detection in
+industrial systems (a turbine failure signal is valuable in real time,
+not eight hours later).
+
+Stream processing introduces engineering challenges that batch processing
+avoids. Records may arrive \emph{out of order} (a mobile device's
+network connection may be intermittent, causing events to be delayed and
+arrive after later events). Events may carry an \emph{event time}
+(when something happened) that differs from \emph{processing time}
+(when the event arrived at the system). Stateful computations---for
+example, counting the number of page views per user in the past
+60 minutes---must be maintained across an infinite stream, requiring
+careful memory management and state backends. Fault recovery requires
+mechanisms like \emph{exactly-once processing} semantics, which add
+significant implementation complexity.
+
+\begin{table}[ht]
+\centering
+\caption{Batch vs.\ stream processing: a systematic comparison}
+\label{tab:batch-stream}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{2.6cm} L{3.1cm} L{3.9cm}}
+\toprule
+\textbf{Attribute}      & \textbf{Batch processing}    & \textbf{Stream processing} \\
+\midrule
+Data model              & Bounded, stored dataset      & Unbounded, continuously arriving events \\
+Latency                 & Minutes to hours             & Milliseconds to seconds \\
+Throughput              & Very high                    & Moderate (per-event overhead) \\
+Fault recovery          & Re-run from checkpoint       & Exactly-once semantics required \\
+State management        & Simple (no persistent state) & Complex (stateful operators, windows) \\
+Out-of-order data       & Not a concern                & Central challenge (watermarks) \\
+Debugging               & Easy (fixed inputs/outputs)  & Hard (live, non-reproducible) \\
+Typical tools           & Hadoop MapReduce, Hive, Spark Batch & Kafka, Apache Flink, Spark Streaming \\
+\textbf{Use cases}      & ETL, ML training, billing    & Fraud detection, monitoring, alerts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{keyinsight}{Lambda and Kappa Architectures}
+Many production systems need both low latency \emph{and} high
+accuracy---properties that are difficult to achieve simultaneously. The
+\textbf{Lambda architecture} (Nathan Marz, 2011) addresses this by
+running both a batch layer (for accurate, comprehensive historical
+analysis) and a speed layer (for low-latency approximate results) in
+parallel, merging their outputs in a serving layer. The cost is
+engineering complexity: every transformation must be implemented twice,
+in different frameworks. The \textbf{Kappa architecture} (Jay Kreps,
+2014) simplifies this by replacing the batch layer with a replay of the
+full event log through the stream processor---using Apache Kafka's
+message retention to make historical reprocessing possible through the
+streaming path. Both architectures are examined in depth in
+Chapter~\ref{ch:pipelines}.
+\end{keyinsight}
+
+%%====================================================================
+\section{Case Study: Walmart's Retail Analytics Platform}
+\label{sec:walmart-case}
+%%====================================================================
+
+\begin{casestudy}{Walmart --- Petabyte-Scale Retail Intelligence}
+
+\textbf{Background.}
+Walmart is the world's largest retailer by revenue, operating over
+10,000 stores across 27 countries and serving approximately 230 million
+customers per week. The scale of its data generation is correspondingly
+vast: every store transaction, supply chain event, website interaction,
+and third-party demand signal contributes to what is one of the largest
+private-sector data repositories in existence.
+
+\smallskip
+\textbf{Scale.}
+Walmart's internal data analytics environment holds over \textbf{2.5
+petabytes} of customer transaction data in its core analytics systems,
+with an additional multi-petabyte tier of raw, unstructured data in its
+data lake. The company processes roughly one million customer
+transactions \emph{per hour}---approximately 280 transactions per second
+on a typical day, with significant spikes during seasonal events
+(Thanksgiving weekend in the United States generates transaction volumes
+three to four times the average daily rate).
+
+\smallskip
+\textbf{Data variety.}
+Walmart's analytical systems must integrate across all three data
+categories described in this chapter:
+\begin{itemize}
+  \item \textbf{Structured:} Point-of-sale transaction records
+        (item, quantity, price, timestamp, store ID, payment method)
+        from 10,000+ stores, all originally stored in Oracle RDBMS systems.
+  \item \textbf{Semi-structured:} Web and mobile clickstream events in
+        JSON format (product views, search queries, cart additions,
+        checkout abandonment events) from Walmart.com.
+  \item \textbf{Unstructured:} Customer product reviews, call-centre
+        transcript audio, and supplier-submitted product imagery for
+        catalogue enrichment.
+\end{itemize}
+
+\smallskip
+\textbf{Engineering challenges and solutions.}
+The 3Vs framework maps directly onto Walmart's operational realities:
+
+\begin{itemize}
+  \item \textbf{Volume:} Transaction data accumulated over decades cannot
+        fit in any single RDBMS. Walmart migrated its analytical
+        workloads to a Hadoop-based data lake, using HDFS for distributed
+        storage and \tool{Apache Hive} for SQL-style querying over PB-scale
+        datasets.
+  \item \textbf{Velocity:} Supply chain decisions---whether to redistribute
+        inventory across distribution centres---must respond to real-time
+        demand signals, not yesterday's batch report. Walmart deployed
+        Apache Kafka for real-time event streaming and uses stream
+        processing for demand sensing.
+  \item \textbf{Variety:} Integrating transaction records, clickstream
+        events, weather data (a known driver of consumer behaviour), and
+        social media sentiment requires a data integration pipeline that
+        handles schema mismatches, different temporal granularities, and
+        inconsistent entity representations (the same product may have
+        different identifiers in the RDBMS and the web catalogue).
+\end{itemize}
+
+\smallskip
+\textbf{Business outcomes.}
+Walmart's investment in big data engineering has enabled demand
+forecasting accuracy that reduced food waste by 15--20\% in its grocery
+divisions (reducing spoilage by anticipating demand more precisely), and
+dynamic pricing algorithms that run across its full product catalogue
+multiple times per day. During the COVID-19 pandemic, real-time analytics
+over social media and purchase patterns allowed Walmart to anticipate
+demand surges for sanitisers, masks, and canned goods several days before
+they peaked---enabling pre-positioning of inventory that proved critical
+when supply chains became constrained.
+
+\smallskip
+\textbf{Lesson.}
+Walmart's evolution from single-RDBMS analytics to a multi-petabyte
+distributed data platform illustrates the core thesis of this book: the
+3Vs are not abstract concepts but concrete engineering constraints that
+force specific architectural choices. Every tool introduced in subsequent
+chapters exists because organisations like Walmart encountered these
+constraints and could not solve them with conventional technology.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch1-summary}
+%%====================================================================
+
+This chapter established the conceptual and theoretical foundations for
+the rest of the book. The key points are:
+
+\begin{itemize}
+  \item The global datasphere is projected to reach 175 ZB by 2025,
+        driven by social media, IoT, commerce, and scientific
+        instrumentation. Traditional RDBMS cannot manage data at this
+        scale.
+
+  \item \textbf{Data engineering} is the discipline of building
+        infrastructure that makes large-scale data available, reliable,
+        and efficiently queryable for downstream consumers.
+
+  \item The \textbf{3Vs framework} (Laney, 2001) characterises big data
+        along three dimensions: \emph{Volume} (scale), \emph{Velocity}
+        (speed), and \emph{Variety} (diversity). The extended \textbf{5Vs}
+        adds \emph{Veracity} (data quality) and \emph{Value} (business
+        utility).
+
+  \item Digital data falls into three categories: \textbf{structured}
+        (predefined schema, schema-on-write, $\sim$20\% of global data),
+        \textbf{semi-structured} (self-describing schema, schema-on-read,
+        $\sim$10\%), and \textbf{unstructured} (no schema, requires
+        ML/NLP/CV to interpret, $\sim$70--80\%).
+
+  \item \textbf{Horizontal scaling} (adding commodity nodes) is the
+        dominant strategy for big data infrastructure because it is
+        cost-effective, fault-tolerant, and has no hard ceiling.
+        Moving \textbf{computation to data} (data locality) is the
+        principle that makes distributed computation efficient.
+
+  \item The \textbf{CAP theorem} proves that any distributed system can
+        guarantee at most two of: Consistency, Availability, and Partition
+        Tolerance. Since partitions are unavoidable, the real design choice
+        is CP vs.\ AP.
+
+  \item \textbf{Batch processing} offers high throughput and simplicity
+        for bounded datasets but incurs high latency. \textbf{Stream
+        processing} offers low latency for continuously arriving data but
+        adds complexity. Production systems often combine both paradigms
+        (Lambda or Kappa architectures).
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch1-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq State the 3Vs of big data and give one production-scale numerical
+example for each dimension.
+
+\sq What is the CAP theorem? List the three properties and explain what
+each means in operational terms.
+
+\sq A single high-end server in 2024 has approximately 64\TB\ of RAM.
+Is a 100\PB\ dataset ``big data'' by the Volume definition? Justify your
+answer quantitatively.
+
+\sq Classify each of the following as structured, semi-structured, or
+unstructured. Justify each answer in one sentence.
+\begin{enumerate}[label=(\alph*)]
+  \item A table of stock prices in a PostgreSQL database.
+  \item A REST API response in JSON format from a weather service.
+  \item An MP3 recording of a customer service call.
+  \item An XML document containing a purchase order.
+  \item A satellite image of an agricultural field.
+\end{enumerate}
+
+\sq What is ``schema-on-read''? How does it differ from ``schema-on-write,''
+and in which type of data is each used?
+
+\sq Explain the concept of ``data locality'' in distributed processing.
+Why does moving computation to data (rather than data to computation)
+improve performance at petabyte scale?
+
+\sq An organisation's fraud detection system must decide whether to
+approve a payment within 300 milliseconds. Should it use batch or stream
+processing? Explain why.
+
+\sq Apache Cassandra is described as an AP system. What does this mean
+concretely? Give a scenario where choosing Cassandra over a CP system
+(like HBase) is the correct engineering decision, and a scenario where
+it is not.
+
+\sq What is the difference between \emph{event time} and
+\emph{processing time} in stream processing? Why does this distinction
+matter for computing aggregations over a stream?
+
+\sq Identify the primary V (Volume, Velocity, or Variety) that dominates
+each scenario:
+\begin{enumerate}[label=(\alph*)]
+  \item A genomics research lab accumulating 200 TB of whole-genome
+        sequencing data per month.
+  \item A payment network processing 24,000 card swipes per second.
+  \item An enterprise integrating data from 40 departments, each using
+        a different database vendor and schema.
+\end{enumerate}
+
+\sq What is the Veracity dimension of the 5Vs framework? Give two
+concrete examples of low-veracity data from different domains.
+
+\sq Compare the cost-scaling behaviour of vertical and horizontal scaling.
+Why is vertical scaling said to be ``superlinear'' in cost?
+
+\sq What is the Lambda architecture? What problem does it solve, and what
+is its primary drawback?
+
+\sq True or false, with a one-sentence justification: ``A relational
+database system can always be made to handle big data workloads by
+upgrading to a more powerful server.''
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Data Volume Estimation.}
+A financial services company ingests stock market quote updates at a rate
+of 1.2 million messages per second during trading hours (6.5 hours per
+day). Each message is 256 bytes on average, and HDFS stores three
+replicas of all data. Calculate:
+\begin{enumerate}[label=(\alph*)]
+  \item The raw volume of quote data generated per trading day (in GB).
+  \item The total HDFS storage consumed per trading day (with 3$\times$ replication).
+  \item The annual storage requirement (250 trading days per year), in TB.
+  \item If each HDFS DataNode has 48 TB of usable disk capacity, what is
+        the minimum number of DataNodes needed to store one year of data?
+\end{enumerate}
+
+\ap \textbf{CAP Theorem Analysis.}
+For each of the following systems, determine whether its designers should
+choose CP or AP, and explain the reasoning in terms of what happens when
+a network partition occurs and the system must choose between C and A.
+\begin{enumerate}[label=(\alph*)]
+  \item An inventory management system for an online retailer. Showing
+        a product as ``in stock'' when it is actually sold out results in
+        order cancellations and customer dissatisfaction; showing it as
+        ``out of stock'' when it is available causes lost sales.
+  \item A distributed configuration registry used by microservices to
+        discover the addresses of other services. Serving a stale
+        configuration might cause a service to connect to a
+        decommissioned endpoint.
+  \item A social media ``like'' counter. The precise count at any given
+        millisecond is not critical; users expect the counter to update
+        within a few seconds.
+\end{enumerate}
+
+\ap \textbf{Batch vs. Stream Latency Analysis.}
+A credit card company runs a fraud detection system. The fraudster's
+behaviour pattern (multiple small test transactions followed by a large
+transaction) is detectable within a 15-minute time window. The company
+currently runs a batch fraud detection job that starts at midnight and
+finishes by 05:00. Show, with a timeline analysis, why this batch job
+cannot prevent in-session fraud. Estimate the maximum percentage of daily
+fraud that could be caught by a streaming system with a 10-second
+detection latency, assuming fraud transactions are uniformly distributed
+throughout the day.
+
+\ap \textbf{Scaling Economics.}
+A company must build a system to store and query a 500\TB\ analytical
+dataset. Option A is a vertically scaled Oracle Exadata appliance
+(licensed at \$1.2M/year, maximum capacity 500\TB). Option B is a
+horizontally scaled HDFS cluster of commodity servers at \$6,000 per node
+(12\TB\ usable per node), with HDFS's 3$\times$ replication factor.
+\begin{enumerate}[label=(\alph*)]
+  \item How many DataNodes does Option B require?
+  \item What is the hardware capital cost of Option B?
+  \item If the dataset is expected to grow at 30\% per year, how many
+        years before Option A requires a hardware replacement (assume
+        it cannot be expanded beyond 500\TB), and what would Option B's
+        cost be to scale to the equivalent capacity?
+  \item What non-monetary factors also influence this architectural choice?
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr\textbf{Architecture Selection for a Global E-commerce Platform.}
+You are the lead data engineer at a mid-sized e-commerce company with
+operations in 12 countries. The company processes 85 million orders per
+year and must support the following data workloads:
+\begin{itemize}
+  \item Monthly financial reconciliation reports (all orders for the month).
+  \item Real-time fraud scoring for each checkout event (must respond
+        within 500 ms).
+  \item A product recommendation engine that retrains weekly on
+        full order and clickstream history.
+  \item Live operational dashboards showing current order throughput
+        and error rates by country.
+\end{itemize}
+For each workload, identify: (a) the dominant V dimension it stresses,
+(b) whether batch or stream processing is appropriate, and (c) which CAP
+trade-off the underlying storage must make. Then propose a single
+integrated architecture (a sketch is sufficient) that serves all four
+workloads, and identify the single component that is the highest
+engineering risk.
+
+\dpr\textbf{Data Classification and Integration Strategy.}
+A national weather service wants to build an analytics platform
+integrating the following data sources:
+\begin{itemize}
+  \item Hourly temperature and humidity readings from 12,000 automated
+        weather stations (CSV format, streamed via SFTP).
+  \item Real-time radar imagery in TIFF format, updated every 6 minutes.
+  \item Historical weather observations from 1950 to present, stored in
+        a legacy Oracle database with a proprietary schema.
+  \item Citizen-submitted weather reports via a mobile app (JSON, free-text
+        description field included).
+  \item Satellite cloud-cover imagery (binary NetCDF format).
+\end{itemize}
+For each source: (a) classify the data type (structured/semi-structured/
+unstructured), (b) identify the dominant V dimension, and (c) propose
+an ingestion mechanism. Then identify the two most difficult integration
+challenges when combining these sources into a unified query layer, and
+propose mitigations for each.
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Data Type Classifier (Python).}
+The following list of data source descriptions must be classified as
+\texttt{structured}, \texttt{semi\_structured}, or \texttt{unstructured}.
+Implement the \texttt{classify\_source()} function using keyword-based
+heuristics. Then extend your solution to print the recommended primary
+storage technology for each category.
+
+\begin{lstlisting}[style=pyspark, caption={PE1.1: Data type classifier}]
+sources = [
+    {"name": "Customer transaction records in PostgreSQL",
+     "format": "relational_table", "schema": "predefined"},
+    {"name": "HTTP server access log",
+     "format": "text",   "schema": "implicit"},
+    {"name": "Satellite multispectral imagery (GeoTIFF)",
+     "format": "binary", "schema": "none"},
+    {"name": "Product catalog (XML)",
+     "format": "xml",    "schema": "self_describing"},
+    {"name": "Customer service call recording (MP3)",
+     "format": "audio",  "schema": "none"},
+    {"name": "E-commerce clickstream events (JSON)",
+     "format": "json",   "schema": "self_describing"},
+    {"name": "Annual census data (CSV with fixed columns)",
+     "format": "csv",    "schema": "predefined"},
+]
+
+STORAGE_MAP = {
+    "structured":       "Relational RDBMS (PostgreSQL, MySQL) or columnar DW",
+    "semi_structured":  "Data lake (HDFS/S3) + Apache Hive / Spark SQL",
+    "unstructured":     "Object store (S3, Azure Blob) + ML feature pipeline",
+}
+
+def classify_source(source):
+    """
+    Returns 'structured', 'semi_structured', or 'unstructured'.
+    Hint: use source['format'] and source['schema'] fields.
+    """
+    # TODO: implement classification logic
+    pass
+
+for s in sources:
+    label = classify_source(s)
+    print(f"Source  : {s['name']}")
+    print(f"Category: {label}")
+    print(f"Storage : {STORAGE_MAP.get(label, 'Unknown')}")
+    print()
+\end{lstlisting}
+
+\pe \textbf{CAP Trade-off Decision Matrix (Python).}
+Given a set of system requirements, write a function that recommends the
+appropriate CAP trade-off and a supporting rationale. Then simulate what
+happens under a network partition for each choice.
+
+\begin{lstlisting}[style=pyspark, caption={PE1.2: CAP trade-off recommender}]
+requirements = [
+    {"system": "Banking ledger (account balances)",
+     "stale_read_acceptable": False,
+     "unavailability_acceptable": True,
+     "description": "Must never show incorrect balance"},
+    {"system": "Social media post counter (likes)",
+     "stale_read_acceptable": True,
+     "unavailability_acceptable": False,
+     "description": "Slight delay in count update is tolerable"},
+    {"system": "Distributed lock manager for microservices",
+     "stale_read_acceptable": False,
+     "unavailability_acceptable": True,
+     "description": "Two services must never acquire the same lock"},
+    {"system": "Product search index",
+     "stale_read_acceptable": True,
+     "unavailability_acceptable": False,
+     "description": "Returning yesterday's index is acceptable"},
+]
+
+def cap_recommendation(req):
+    """
+    Returns a tuple: (cap_choice, rationale_string)
+    where cap_choice is 'CP' or 'AP'.
+
+    Logic:
+    - If stale reads are NOT acceptable -> CP
+      (system must be consistent even if it becomes unavailable)
+    - If stale reads ARE acceptable    -> AP
+      (system must stay available even with possibly stale data)
+    """
+    # TODO: implement decision logic and rationale string
+    pass
+
+def simulate_partition(cap_choice, system_name):
+    """
+    Print what happens to the system during a network partition.
+    """
+    if cap_choice == "CP":
+        print(f"  Partition occurs in {system_name}:")
+        print(f"  -> System refuses requests on isolated nodes.")
+        print(f"  -> Availability drops; consistency maintained.")
+    elif cap_choice == "AP":
+        print(f"  Partition occurs in {system_name}:")
+        print(f"  -> System continues serving requests on isolated nodes.")
+        print(f"  -> Data may be stale; eventual consistency applies.")
+
+for req in requirements:
+    choice, rationale = cap_recommendation(req)
+    print(f"System : {req['system']}")
+    print(f"Choice : {choice}  |  Rationale: {rationale}")
+    simulate_partition(choice, req['system'])
+    print()
+\end{lstlisting}
+
+\pe \textbf{Storage Volume Estimator (Python).}
+Implement a function that estimates the raw and replicated HDFS storage
+requirements for a streaming data source, and classifies the result as
+``conventional'' (manageable with a single RDBMS), ``big data''
+(requiring distributed storage), or ``hyperscale'' (requiring cloud
+object storage tiers in addition to HDFS).
+
+\begin{lstlisting}[style=pyspark, caption={PE1.3: HDFS storage volume estimator}]
+def estimate_hdfs_storage(records_per_second, avg_record_bytes,
+                          retention_days, replication_factor=3):
+    """
+    Parameters
+    ----------
+    records_per_second  : float  -- sustained ingestion rate
+    avg_record_bytes    : int    -- average size of one record
+    retention_days      : int    -- how long to retain data
+    replication_factor  : int    -- HDFS replication (default 3)
+
+    Returns
+    -------
+    dict with keys:
+      raw_tb            : raw data in terabytes
+      replicated_tb     : total HDFS storage in terabytes (with replication)
+      replicated_pb     : total HDFS storage in petabytes
+      classification    : 'conventional' | 'big_data' | 'hyperscale'
+    """
+    BYTES_PER_TB = 1e12
+    BYTES_PER_PB = 1e15
+
+    # TODO: implement computation
+    # Steps:
+    # 1. Compute bytes per second = records_per_second * avg_record_bytes
+    # 2. Compute bytes per day = bytes_per_second * 86400
+    # 3. Compute raw_bytes = bytes_per_day * retention_days
+    # 4. Compute replicated_bytes = raw_bytes * replication_factor
+    # 5. Convert to TB and PB
+    # 6. Classify:
+    #    < 50 TB   -> 'conventional'
+    #    50 TB - 10 PB -> 'big_data'
+    #    > 10 PB   -> 'hyperscale'
+    pass
+
+scenarios = [
+    {"name": "IoT temperature sensors (500K devices, 1 reading/min)",
+     "rps": 500_000 / 60, "bytes": 64, "days": 365},
+    {"name": "E-commerce clickstream (peak 200K events/s, 90-day retention)",
+     "rps": 200_000,      "bytes": 512, "days": 90},
+    {"name": "Payment network (25K tx/s, 7-year regulatory retention)",
+     "rps": 25_000,       "bytes": 256, "days": 2555},
+    {"name": "Video streaming events (50K concurrent sessions, 1 event/s)",
+     "rps": 50_000,       "bytes": 1024, "days": 180},
+]
+
+for s in scenarios:
+    result = estimate_hdfs_storage(s["rps"], s["bytes"], s["days"])
+    if result:
+        print(f"Scenario     : {s['name']}")
+        print(f"Raw storage  : {result['raw_tb']:.1f} TB")
+        print(f"With 3x rep. : {result['replicated_pb']:.3f} PB")
+        print(f"Class        : {result['classification']}")
+        print()
+\end{lstlisting}

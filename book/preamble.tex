@@ -51,6 +51,8 @@
 %----------------------------------------------------------------------
 \usepackage{amsmath}
 \usepackage{amssymb}
+% newpxmath defines \openbox; amsthm also defines it — clear it first
+\let\openbox\relax
 \usepackage{amsthm}
 
 %----------------------------------------------------------------------
@@ -88,7 +90,7 @@
   shadows.blur
 }
 \usepackage{pgfplots}
-\pgfplotsset{compat=1.18}
+\pgfplotsset{compat=1.17}
 
 %----------------------------------------------------------------------
 % 7. CODE LISTINGS
@@ -470,7 +472,7 @@
 \newcommand{\ap}{\stepcounter{apctr}%
   \par\vspace{6pt}\noindent
   \textbf{AP\thechapter.\theapctr.}\enspace}
-\newcommand{\dp}{\stepcounter{dpctr}%
+\newcommand{\dpr}{\stepcounter{dpctr}%
   \par\vspace{6pt}\noindent
   \textbf{DP\thechapter.\thedpctr.}\enspace}
 \newcommand{\pe}{\stepcounter{pectr}%
@@ -479,9 +481,9 @@
 
 % Section heading shorthand for exercise sections
 \newcommand{\exercisesection}[1]{%
-  \vspace{10pt}
-  {\sffamily\large\bfseries\color{DEBlue} #1}
-  \vspace{4pt}
-  \color{DEBlue!25}\rule{\linewidth}{0.4pt}
-  \vspace{4pt}
+  \vspace{10pt}%
+  {\sffamily\large\bfseries\color{DEBlue} #1}%
+  \par\vspace{4pt}%
+  {\color{DEBlue!25}\rule{\linewidth}{0.4pt}}%
+  \vspace{4pt}%
 }

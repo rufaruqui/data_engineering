@@ -50,3 +50,5 @@ Title → Course Info → ToC → Section: Introduction → Section: Core Conten
 Title → Seminal Paper (citation block, key insight quote, 2–3 technical contribution slides, impact today) → Case Study (industry scenario, scale numbers, lessons learned, discussion questions) → References → Closing slide
 
 Textbook short codes used throughout: `[TW]`, `[SA]`, `[TE]`, `[LRU]`, `[MMS]`. Always tag CLO on every assessment question.
+
+pdflatex main.tex && biber main && pdflatex main.tex && pdflatex main.tex

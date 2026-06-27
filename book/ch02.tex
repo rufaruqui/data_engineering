@@ -1,0 +1,1498 @@
+%% ch02.tex — Chapter 2: Data Integration: Heterogeneity, Quality, and Provenance
+%% Part of "Data Engineering" textbook
+
+\chapter{Data Integration: Heterogeneity, Quality, and Provenance}
+\label{ch:integration}
+
+\epigraph{\textit{``The hardest part of data science isn't machine learning or statistics.
+It's getting data from different places to agree with each other.''}}{Anonymous data engineer}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain the data silo problem and articulate why integration
+        complexity---not storage cost---is the primary barrier to
+        enterprise analytics.
+  \item Define the three fundamental operations of data integration:
+        schema mapping, data exchange, and entity resolution.
+  \item Distinguish among the four dimensions of data heterogeneity---
+        structural, semantic, syntactic, and scale---and give a concrete
+        example of each.
+  \item Describe the six dimensions of data quality and identify
+        appropriate remediation strategies for each.
+  \item Explain what data provenance is, why it is required by regulations
+        such as GDPR and HIPAA, and how lineage tracking systems capture it.
+  \item Compare the ETL and ELT paradigms: their architectures, trade-offs,
+        and appropriate use cases.
+  \item Identify the right tool (Sqoop, Kafka, Airbyte, dbt) for each
+        stage of a modern integration pipeline.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:foundations} established the 3Vs as the defining
+characteristics of big data: Volume, Velocity, and Variety. Volume and
+Velocity receive the most attention in the popular press because they are
+easy to quantify---petabytes of storage, thousands of events per second.
+But \emph{Variety} is arguably the hardest engineering challenge. Data
+arrives from dozens of independent sources, each with its own schema,
+format, quality level, and update cadence. Before a single analytical
+query can be answered, all of this heterogeneous data must be identified,
+mapped, cleaned, and unified. This process is called \term{data
+integration}, and it is the subject of this chapter.
+
+A 2019 Forrester Research survey found that 73\% of enterprise data is
+never analysed. The primary reason is not a shortage of storage or
+processing power---it is integration complexity. Data that cannot be
+found, joined, or trusted cannot be analysed. Data engineering at
+production scale is, to a greater degree than is often acknowledged, the
+art of making heterogeneous data coherent.
+
+%%====================================================================
+\section{The Data Silo Problem}
+\label{sec:silos}
+%%====================================================================
+
+Large organisations accumulate data in \term{data silos}: independent
+systems built by separate teams, at different times, for different
+purposes, using different technology stacks. Each silo does its job
+well in isolation, but no silo has visibility into the others. The
+result is an organisation that is simultaneously data-rich and
+insight-poor.
+
+Consider a representative global retail bank. A customer who has held
+an account for five years may appear as a distinct record in at least
+seven separate systems: the core banking RDBMS (account balances,
+transactions), the mobile application database (session events,
+in-app behaviour), the loan origination system (credit applications,
+repayment history), the customer relationship management platform
+(support tickets, call transcripts), the anti-money-laundering engine
+(transaction flags, compliance cases), the marketing automation
+platform (campaign responses, email open rates), and the regulatory
+reporting database (filings with supervisory authorities). In each
+system, the customer may be identified by a different key---an internal
+account number, a mobile device identifier, a CRM contact ID, a
+government-issued reference number---and the same attribute (the
+customer's full name, for example) may be spelled differently, encoded
+differently, or stored at different granularities.
+
+The consequence is not merely an engineering inconvenience. It is a
+fundamental barrier to analytical insight: a data scientist wishing to
+understand the relationship between a customer's loan repayment
+behaviour and their mobile application engagement cannot combine
+these datasets without first resolving which records in the loan system
+correspond to which records in the mobile database---a non-trivial
+operation even for a single bank with thousands of customer
+records, let alone for a global institution with hundreds of millions.
+
+\begin{keyinsight}{Integration is the Critical Path}
+In most data engineering projects, the time spent on data integration---
+schema mapping, entity resolution, quality cleaning, and pipeline
+construction---exceeds the time spent on the analytical computation
+itself. Studies of data science workflows consistently find that
+engineers spend 60--80\% of project time on data preparation rather
+than on modelling or analysis. Integration quality directly determines
+analytical quality: a machine learning model trained on incorrectly
+joined data will encode the integration error into its predictions.
+\end{keyinsight}
+
+%%====================================================================
+\section{A Formal Framework for Data Integration}
+\label{sec:integration-framework}
+%%====================================================================
+
+The academic study of data integration has a rich history spanning
+decades of database research. Halevy, Rajaraman, and Ordille's landmark
+2006 survey---titled ``Data Integration: The Teenage Years''---synthesised
+thirty years of work and established the formal vocabulary that the
+field still uses today \parencite{Halevy2006}.
+
+\begin{defbox}{Data Integration}
+Given a set of heterogeneous, autonomous data sources
+$S_1, S_2, \ldots, S_n$, each with its own schema $\Sigma_i$ and
+content $D_i$, \textbf{data integration} is the problem of providing
+a unified query interface over a \textbf{mediated (global) schema}
+$\Sigma_G$ that gives users a single coherent view of all data,
+regardless of which source it originated from.
+\end{defbox}
+
+This definition makes three important properties explicit. First, data
+sources are \emph{heterogeneous}: they differ in schema, format,
+vocabulary, and update cadence. Second, they are \emph{autonomous}: the
+integration layer has no authority to modify the source systems---it can
+only read from them. Third, the goal is a \emph{unified query interface}:
+users should be able to ask a single query against the global schema
+without knowing which source holds the relevant data or in what format.
+
+Achieving this goal requires three core operations, each of which is a
+research area in its own right.
+
+\subsection{Schema Mapping}
+\label{subsec:schema-mapping}
+
+\term{Schema mapping} is the process of defining a formal correspondence
+between the schema of a source system and the global mediated schema.
+A schema mapping $\mathcal{M}_{i \to G}$ specifies, for each attribute
+in the global schema, which attribute in source $S_i$ provides the
+corresponding data, and what transformation (if any) is required to
+reconcile differences in naming, data type, units, or encoding.
+
+Schema mappings are expressed as rules. For example:
+\begin{equation}
+\texttt{GlobalSchema.customer\_id} \leftarrow \texttt{CRM.contact\_id}
+\quad [\text{identity}]
+\end{equation}
+\begin{equation}
+\texttt{GlobalSchema.full\_name} \leftarrow
+\texttt{uppercase}(\texttt{ATM.CUST\_FNAME}
++ \texttt{" "} + \texttt{ATM.CUST\_LNAME})
+\end{equation}
+
+In practice, deriving accurate schema mappings is one of the most
+labour-intensive tasks in data engineering. Automated \term{schema
+matching} tools---which use string similarity, structural similarity,
+and machine learning to propose candidate mappings---can reduce this
+effort significantly, but they always require human validation before
+production deployment.
+
+\subsection{Data Exchange}
+\label{subsec:data-exchange}
+
+\term{Data exchange} is the process of \emph{materialising} data from
+source schemas into the global schema. It is the implementation of a
+schema mapping: given source data $D_i$ and a mapping
+$\mathcal{M}_{i \to G}$, produce a dataset $D_G$ that conforms to the
+global schema $\Sigma_G$. Data exchange corresponds to the
+``Transform'' step in an ETL pipeline (discussed in
+Section~\ref{sec:etl-elt}).
+
+\subsection{Entity Resolution}
+\label{subsec:entity-resolution}
+
+\term{Entity resolution} (also called \term{record linkage},
+\term{deduplication}, or \term{identity resolution}) is the process of
+determining whether two records from different sources (or from the same
+source) refer to the same real-world entity. It is necessary when
+different systems use different identifiers for the same object and when
+direct key-based joins are therefore impossible.
+
+Entity resolution is examined in detail in Section~\ref{sec:er}.
+
+\begin{researchspotlight}{Halevy, Rajaraman \& Ordille (2006) --- Data Integration: The Teenage Years}
+\textbf{Citation:} Halevy, A., Rajaraman, A., \& Ordille, J.\ (2006).
+Data Integration: The Teenage Years. \textit{Proceedings of the 32nd
+VLDB Conference}, pp.\ 9--16. \parencite{Halevy2006}
+
+\smallskip\noindent
+\textbf{Key insight:} The paper's title is a pointed metaphor: after
+three decades of research, data integration remained ``in its teenage
+years''---having demonstrated proof of concept and produced fundamental
+theory, but not yet reaching the robust, deployable maturity that
+industry needed.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Provided a comprehensive taxonomy of the data integration
+        problem space, distinguishing virtual integration (query
+        rewriting over live sources) from materialised integration
+        (ETL into a data warehouse).
+  \item Formalised the distinction between \emph{local-as-view} (LAV)
+        and \emph{global-as-view} (GAV) approaches to schema mapping---
+        still the canonical framework for integration system design.
+  \item Identified entity resolution as the hardest open problem in
+        data integration, predicting (correctly) that it would require
+        probabilistic and machine learning approaches at scale.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} The paper is required reading in database
+courses at MIT, Stanford, and CMU. Its taxonomy of integration
+challenges directly influenced the design of modern enterprise data
+integration platforms, including MuleSoft, Informatica, and Apache
+Atlas. The LAV/GAV distinction remains the theoretical foundation of
+modern data virtualisation products.
+\end{researchspotlight}
+
+%%====================================================================
+\section{The Four Dimensions of Data Heterogeneity}
+\label{sec:heterogeneity}
+%%====================================================================
+
+Heterogeneity---the fundamental barrier to integration---manifests along
+four distinct dimensions. Understanding all four is essential because a
+pipeline that addresses only one or two will produce subtly incorrect
+results, often without any obvious indication of failure.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    quad/.style={rectangle, rounded corners=5pt,
+                 minimum width=4.8cm, minimum height=1.8cm,
+                 text width=4.5cm, align=center,
+                 font=\small\bfseries},
+    sub/.style={font=\scriptsize\normalfont},
+    arr/.style={-{Stealth[length=4pt]}, thick, DEBlue!40}
+  ]
+  \node[quad, fill=DEBlue,    text=white] (A) at (0,   2.2)
+        {Structural\\[3pt]{\small\normalfont Different table/column structures}};
+  \node[quad, fill=DEAccent,  text=white] (B) at (5.5, 2.2)
+        {Semantic\\[3pt]{\small\normalfont Same word, different meaning}};
+  \node[quad, fill=DEGreen,   text=white] (C) at (0,   0)
+        {Syntactic\\[3pt]{\small\normalfont Same data, different encoding}};
+  \node[quad, fill=DEPurple,  text=white] (D) at (5.5, 0)
+        {Scale \& Granularity\\[3pt]{\small\normalfont Different units or resolutions}};
+
+  % Centre hub
+  \node[circle, fill=DEGray!20, draw=DEGray!50, minimum size=1.1cm,
+        font=\footnotesize\bfseries\sffamily, align=center, text=DEBlue]
+        (hub) at (2.75, 1.1) {Data\\Hetero-\\geneity};
+
+  \draw[arr] (A.east |- hub) -- (hub);
+  \draw[arr] (B.west |- hub) -- (hub);
+  \draw[arr] (C.east |- hub) -- (hub);
+  \draw[arr] (D.west |- hub) -- (hub);
+\end{tikzpicture}
+\caption{The four dimensions of data heterogeneity. A production
+integration pipeline must address all four simultaneously.}
+\label{fig:heterogeneity-types}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Structural Heterogeneity}
+\label{subsec:structural-hetero}
+%--------------------------------------------------------------------
+
+\term{Structural heterogeneity} arises when two data sources represent
+the same real-world concept using different table organisations, column
+names, or normalisation levels. It is the most immediately obvious form
+of heterogeneity and the first that integration engineers typically
+address.
+
+\textbf{Naming conflicts} occur when the same attribute has different
+names in different systems. A customer identifier might be called
+\texttt{cust\_id} in the core banking system, \texttt{customer\_number}
+in the loan system, and \texttt{contact\_id} in the CRM. Without a
+mapping, a JOIN across these tables produces no results.
+
+\textbf{Structural conflicts} occur when the same data is stored at
+different levels of normalisation. One system may store a customer's
+address as a single string (\texttt{"14 Oxford Street, London, W1D 1AU"}),
+while another uses four separate columns (\texttt{street\_line\_1},
+\texttt{city}, \texttt{region}, \texttt{postcode}). Converting between
+these representations requires both parsing and composing---two
+operations that are error-prone when addresses do not conform to
+expected patterns.
+
+\begin{table}[ht]
+\centering
+\caption{Structural heterogeneity: a customer record in three systems}
+\label{tab:structural-hetero}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{L{3.0cm} L{2.8cm} L{2.6cm} L{2.4cm}}
+\toprule
+\textbf{Concept} & \textbf{Core Banking} & \textbf{CRM} & \textbf{ATM Logs} \\
+\midrule
+Customer ID      & \texttt{cust\_id}        & \texttt{contact\_id}  & \texttt{CARD\_HOLDER} \\
+First name       & \texttt{first\_name}     & \texttt{fname}        & \texttt{FN} \\
+Date of birth    & \texttt{dob} (DATE)      & \texttt{birth\_date} (VARCHAR) & absent \\
+Address          & 4-column normalised      & Single string         & absent \\
+Account open date & \texttt{open\_date}    & \texttt{create\_ts}   & absent \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Semantic Heterogeneity}
+\label{subsec:semantic-hetero}
+%--------------------------------------------------------------------
+
+\term{Semantic heterogeneity}---the most dangerous form---arises when
+two data sources use the same name to mean different things, or
+different names to mean the same thing. A schema mapping that resolves
+structural conflicts (renaming columns) will silently produce incorrect
+results if the underlying semantic conflict is not also resolved.
+
+Classic examples are pervasive:
+\begin{itemize}
+  \item The column \texttt{price} in the inventory system records the
+        wholesale cost; the same column in the e-commerce system
+        records the retail price. Joining these tables without
+        disambiguation produces a dataset where ``price'' has a
+        different meaning for every row.
+  \item The field \texttt{date} in an order management system could
+        mean the order date, the shipping date, or the invoice date,
+        depending on which team created the table. All three share
+        the same column name in different tables.
+  \item The concept of a ``customer'' means a natural person in the
+        retail banking system, but can also mean a legal entity
+        (company) in the corporate banking system. A JOIN on
+        \texttt{customer\_id} would mix individuals and corporations.
+\end{itemize}
+
+Semantic heterogeneity cannot be detected by examining schemas alone---
+it requires domain knowledge, documentation review, and often direct
+consultation with the teams that created each system. This is why data
+dictionaries and business glossaries are not administrative overhead but
+engineering necessities.
+
+%--------------------------------------------------------------------
+\subsection{Syntactic Heterogeneity}
+\label{subsec:syntactic-hetero}
+%--------------------------------------------------------------------
+
+\term{Syntactic heterogeneity} arises when the same data is encoded in
+different formats, character encodings, or data types across sources.
+The value and meaning are equivalent, but the byte-level representation
+differs. Syntactic heterogeneity must be resolved before any comparison
+or JOIN can succeed.
+
+Representative examples include:
+\begin{itemize}
+  \item Dates stored as \texttt{"2024-03-15"} (ISO 8601, universally
+        sortable) in one system and as \texttt{"15/03/2024"} (UK format)
+        or \texttt{"03-15-2024"} (US format) in another. A lexicographic
+        sort on the date column produces incorrect ordering when formats
+        are mixed.
+  \item Boolean values represented as \texttt{true/false} (JSON),
+        \texttt{1/0} (integer), \texttt{"Y"/"N"} (legacy COBOL systems),
+        or \texttt{"yes"/"no"} (human-entered data).
+  \item Currency amounts stored as 64-bit floating-point numbers in one
+        system and as decimal strings (e.g., \texttt{"1,234.56"} or
+        \texttt{"1.234,56"} for European locale) in another.
+  \item Character encodings: legacy mainframe systems frequently use
+        EBCDIC encoding; modern web applications use UTF-8; some regional
+        systems use Windows-1252 or ISO-8859 variants.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Scale and Granularity Heterogeneity}
+\label{subsec:scale-hetero}
+%--------------------------------------------------------------------
+
+\term{Scale and granularity heterogeneity} arises when different sources
+measure the same quantity at different units, resolutions, or temporal
+granularities. Even when structural, semantic, and syntactic conflicts
+have been resolved, a mismatch in granularity can invalidate
+comparisons.
+
+A revenue report that joins monthly aggregates from one system with
+daily transaction records from another must aggregate the latter before
+joining; failing to do so produces a systematic distortion where
+each monthly figure appears 30 times. Similarly, a climate analytics
+system integrating temperature readings from stations reporting in
+Celsius and others in Fahrenheit must apply a unit conversion before
+any cross-station analysis; a system integrating GPS coordinates at
+metre precision with satellite imagery at 10-metre resolution must
+account for the resolution mismatch when attributing imagery to
+ground-truth measurements.
+
+\begin{techdebt}{Integration Failures Are Silent}
+Of the four heterogeneity dimensions, structural and syntactic failures
+are the easiest to detect: they typically produce explicit errors
+(column not found, type mismatch, parse failure). Semantic and
+granularity failures are far more dangerous because they produce
+\emph{no error}---the pipeline succeeds, data flows, and the output
+looks superficially correct. A data warehouse that has silently mixed
+wholesale prices with retail prices will answer every price-related
+query without complaint, producing reports that are confidently and
+systematically wrong. Detecting semantic errors requires domain
+knowledge and statistical profiling of the integrated output, not
+just schema validation.
+\end{techdebt}
+
+%%====================================================================
+\section{Entity Resolution}
+\label{sec:er}
+%%====================================================================
+
+Even after schema mappings have been defined and all four heterogeneity
+dimensions addressed, a fundamental problem remains: how do we know that
+record $r_1$ from source $S_1$ and record $r_2$ from source $S_2$ refer
+to the same real-world entity? When a common key exists (both systems
+use a social security number or a product EAN barcode), the answer is
+trivial: join on the key. When no common key exists---the common
+case---the problem is \term{entity resolution}.
+
+\begin{defbox}{Entity Resolution}
+Given two sets of records $R_1$ and $R_2$ from sources $S_1$ and $S_2$
+respectively, \textbf{entity resolution} is the task of identifying all
+pairs $(r_1, r_2) \in R_1 \times R_2$ that refer to the same
+real-world entity, using only the attribute values of the records (and
+no common key).
+\end{defbox}
+
+The naive approach---comparing every record in $R_1$ against every
+record in $R_2$---has complexity $O(|R_1| \times |R_2|)$. For datasets
+with millions of records, this is computationally infeasible. A dataset
+of 10 million customer records from two sources would require 100
+trillion comparisons---at a rate of one billion comparisons per second,
+that is over 27 hours. At big data scale, the quadratic cost is
+prohibitive.
+
+%--------------------------------------------------------------------
+\subsection{Blocking: Reducing the Candidate Space}
+\label{subsec:blocking}
+%--------------------------------------------------------------------
+
+\term{Blocking} is the standard technique for making entity resolution
+computationally tractable. Rather than comparing all possible pairs,
+blocking partitions records into \term{blocks} based on a simple
+attribute (or combination of attributes) that is likely to match for
+true duplicates. Only pairs within the same block are compared. A common
+blocking key is the first three characters of the last name combined
+with the year of birth; two records can only be a match if they share
+the same block key.
+
+A well-designed blocking strategy must balance two competing
+objectives. \emph{Recall} requires that almost all true duplicates fall
+in the same block---if a blocking key is too aggressive, it splits true
+duplicates into different blocks and they are never compared.
+\emph{Efficiency} requires that blocks be small enough to make
+comparison tractable---if a blocking key is too lenient, blocks are
+large and the quadratic comparison cost returns. In practice, multiple
+blocking keys are used in parallel, and a pair is a candidate if it
+shares at least one blocking key.
+
+%--------------------------------------------------------------------
+\subsection{Similarity Functions}
+\label{subsec:similarity}
+%--------------------------------------------------------------------
+
+Within each block, records are compared using \term{similarity
+functions} that assign a score $\sigma(r_1, r_2) \in [0, 1]$ to each
+candidate pair. Two commonly used functions are:
+
+\textbf{Jaccard similarity} operates on sets of tokens. Given two
+strings $s_1$ and $s_2$ tokenised into sets of words or character
+n-grams $T_1$ and $T_2$:
+\begin{equation}
+J(T_1, T_2) = \frac{|T_1 \cap T_2|}{|T_1 \cup T_2|}
+\label{eq:jaccard}
+\end{equation}
+Jaccard similarity is robust to word reordering and partial matches,
+making it well-suited for company names and addresses.
+
+\textbf{Levenshtein (edit) distance} measures the minimum number of
+single-character insertions, deletions, or substitutions needed to
+transform one string into another. Normalised edit similarity is:
+\begin{equation}
+\sigma_\text{edit}(s_1, s_2) = 1 -
+  \frac{d_\text{edit}(s_1, s_2)}{\max(|s_1|, |s_2|)}
+\label{eq:edit-sim}
+\end{equation}
+Edit distance handles typos, transpositions, and abbreviated names
+(``Corp.'' vs ``Corporation'').
+
+A \term{composite similarity score} combines multiple attribute
+similarities with weights reflecting their discriminative power:
+\begin{equation}
+\sigma_\text{composite}(r_1, r_2) =
+  w_\text{name} \cdot \sigma(r_1.\text{name},\, r_2.\text{name})
+  + w_\text{addr} \cdot \sigma(r_1.\text{addr},\, r_2.\text{addr})
+  + w_\text{dob}  \cdot \sigma(r_1.\text{dob},\, r_2.\text{dob})
+\label{eq:composite-sim}
+\end{equation}
+where $w_\text{name} + w_\text{addr} + w_\text{dob} = 1$.
+
+A pair $(r_1, r_2)$ is declared a match if
+$\sigma_\text{composite}(r_1, r_2) \geq \theta$ for a threshold $\theta$
+chosen to balance precision and recall for the specific application.
+
+%%====================================================================
+\section{Data Quality: Dimensions and Challenges}
+\label{sec:data-quality}
+%%====================================================================
+
+Data integration can perfectly resolve structural, semantic, syntactic,
+and granularity heterogeneity, correctly link every entity, and still
+produce a dataset that is analytically worthless---if the underlying
+data is of poor quality. The \term{Veracity} dimension of the 5Vs
+framework (Chapter~\ref{ch:foundations}) captures this concern. Data
+quality problems are not exceptions; they are ubiquitous in production
+systems, and big data engineering requires systematic processes for
+detecting, quantifying, and remediating them.
+
+The field has converged on six dimensions of data quality, originally
+formalised by Wang and Strong (1996) in their empirical study of
+information consumers' quality requirements.
+
+\begin{table}[ht]
+\centering
+\caption{The six dimensions of data quality with engineering implications}
+\label{tab:dq-dimensions}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{2.2cm} L{3.6cm} L{4.6cm}}
+\toprule
+\textbf{Dimension} & \textbf{Definition} & \textbf{Detection and remediation} \\
+\midrule
+Accuracy      & Values correctly represent the real-world entity or event &
+                Statistical profiling; external reference datasets; domain
+                range constraints \\
+Completeness  & All required values are present; no critical nulls &
+                NULL ratio checks; conditional completeness rules
+                (\texttt{if type=``corporate'' then tax\_id must be non-null}) \\
+Consistency   & Values are not contradictory within or across sources &
+                Cross-source join validation; referential integrity checks;
+                temporal monotonicity checks \\
+Timeliness    & Data is current enough for its intended use &
+                Staleness metrics; data freshness SLAs; arrival-time audits \\
+Validity      & Values conform to defined formats, ranges, and vocabularies &
+                Regular expression validation; enumeration checks;
+                numeric range constraints \\
+Uniqueness    & Records are not duplicated (within a source or across sources) &
+                Duplicate detection; entity resolution (Section~\ref{sec:er}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Missing Values}
+\label{subsec:missing-values}
+%--------------------------------------------------------------------
+
+Missing values are among the most common data quality problems in large
+datasets. They arise from several distinct mechanisms, each with
+different analytical implications.
+
+\textbf{Missing Completely at Random} (MCAR): the probability that a
+value is missing is independent of both the observed and missing values.
+A sensor that fails with a fixed, context-independent probability
+produces MCAR missingness. Data imputation strategies---such as mean or
+median imputation---are statistically valid under MCAR.
+
+\textbf{Missing at Random} (MAR): the probability that a value is
+missing depends on observed values but not on the missing value itself.
+For example, older customers may be less likely to provide an email
+address, so the \texttt{email} field is missing more often for older
+cohorts. This is MAR because age (observed) predicts missingness, but
+the missing value itself (specific email) does not.
+
+\textbf{Missing Not at Random} (MNAR): the most problematic case. The
+probability that a value is missing depends on the value itself.
+Survey data where respondents with very low incomes decline to answer
+the income question is MNAR---the missingness is informative about
+the missing value. Imputing MNAR data with mean imputation introduces
+systematic bias.
+
+In big data engineering, the immediate engineering response to missing
+values is typically a combination of: (1) quantifying the NULL rate
+per column in the data quality dashboard, (2) identifying whether
+the missing values are upstream (the source system never had the
+value) or midstream (the ETL pipeline dropped them), and (3) applying
+domain-appropriate imputation, filtering, or flagging. Feeding a machine
+learning model records with missing feature values without appropriate
+handling is one of the most common sources of production ML failure.
+
+%--------------------------------------------------------------------
+\subsection{Noise, Outliers, and Inconsistency}
+\label{subsec:noise-outliers}
+%--------------------------------------------------------------------
+
+\textbf{Noise} refers to random errors in data values---measurement
+errors, transmission errors, or OCR mistakes. A temperature sensor that
+occasionally reads --999.0$^{\circ}$C due to a firmware bug introduces
+noise; a mobile payment amount that loses a decimal point and appears
+as 10,000 times the correct value is noise. At scale, even a 0.01\%
+noise rate in a 10-billion-row dataset produces one million corrupted
+records---enough to systematically distort any aggregate computed over
+that column.
+
+\textbf{Outliers} may be noise, or they may be genuine rare events.
+A single transaction of \$50 million in a retail payment network is
+an outlier; it might represent fraud (noise), or it might represent a
+legitimate large commercial payment. In data engineering, the
+distinction between noise and genuine outliers must be resolved using
+domain knowledge and external validation, not purely statistical
+criteria.
+
+\textbf{Inconsistency} arises when the same real-world fact is
+represented differently at different points in time or in different
+parts of the same system. A customer record that shows the customer's
+home city as ``New York'' in the CRM but ``NYC'' in the billing system
+is inconsistent. A product price that changes in the catalogue but is
+not updated in the recommendation engine creates a temporal
+inconsistency. Inconsistency is particularly dangerous in slowly
+changing dimension tables (a concept explored in the data warehousing
+literature) where historical accuracy must be maintained alongside
+current values.
+
+%%====================================================================
+\section{Data Provenance and Lineage}
+\label{sec:provenance}
+%%====================================================================
+
+\term{Data provenance} refers to the documented record of a data
+artifact's origin, transformation history, and movement through a
+system---the complete answer to the question: ``Where did this value
+come from, and what was done to it?'' \term{Data lineage} is the
+operationalised form of provenance: the graph of dependencies linking
+each output dataset to its input datasets and the transformations
+applied to produce it.
+
+Provenance is not merely a technical nicety; it is increasingly a
+legal requirement. The European Union's General Data Protection
+Regulation (GDPR, 2018) requires organisations to be able to demonstrate
+the legal basis for processing personal data, trace where personal data
+flows within and across systems, and respond to subject access requests
+that require identifying all locations where an individual's data is
+held. The United States' Health Insurance Portability and
+Accountability Act (HIPAA) requires healthcare organisations to maintain
+audit trails documenting every access to and movement of protected
+health information (PHI). Failure to demonstrate adequate provenance
+tracking has resulted in regulatory fines exceeding \$10 million in
+individual GDPR enforcement actions.
+
+Beyond regulatory compliance, provenance serves crucial operational
+purposes. When an analytical model produces an unexpected result, data
+lineage allows engineers to trace the result back to the exact source
+records and transformations that produced it---identifying whether the
+anomaly originates in a source system, an ETL transformation, or the
+analytical model itself. In production data pipelines, this capability
+can reduce the mean time to detect and resolve data quality incidents
+from days to hours.
+
+\begin{keyinsight}{Lineage as a First-Class Engineering Artifact}
+Modern data engineering treats lineage as a first-class artifact, not
+an afterthought. Tools such as Apache Atlas (metadata management),
+OpenLineage (open specification for lineage events), and dbt's built-in
+lineage graph capture transformations automatically as pipelines run.
+A comprehensive lineage graph answers: which tables feed this model,
+which source records produced this output row, which transformation
+version was active when this job ran, and who approved the pipeline
+change that introduced this transformation. Without this capability,
+debugging a corrupted KPI dashboard may require days of manual source
+tracing across dozens of systems.
+\end{keyinsight}
+
+%%====================================================================
+\section{ETL vs.\ ELT: Two Philosophies of Integration}
+\label{sec:etl-elt}
+%%====================================================================
+
+The practical execution of data integration---moving, transforming, and
+loading data from source systems into analytical targets---is governed
+by two contrasting paradigms. The choice between them is one of the most
+consequential architectural decisions in data engineering, because it
+determines where and when data is transformed, how flexible the system
+is to evolving requirements, and what trade-offs are made between data
+freshness, quality, and engineering complexity.
+
+%--------------------------------------------------------------------
+\subsection{ETL: Extract, Transform, Load}
+\label{subsec:etl}
+%--------------------------------------------------------------------
+
+\term{ETL} is the traditional paradigm, dominant in data warehousing
+from the 1980s through the 2010s. It operates in three sequential
+phases:
+
+\textbf{Extract}: Data is read from source systems---typically RDBMS
+tables, file exports, or API responses---and written to a staging area.
+The extraction is designed to be minimally invasive, typically using
+incremental extraction (change data capture, CDC) rather than full table
+scans, to avoid overloading source systems.
+
+\textbf{Transform}: In the staging area, the extracted data is
+subjected to all required cleaning, mapping, enrichment, and
+aggregation operations before it is written to the target. The target
+(typically a data warehouse) enforces a strict schema; data that does
+not conform to the schema is rejected. This means that the transformation
+step must be comprehensive and correct before any data reaches the
+warehouse.
+
+\textbf{Load}: The transformed, validated data is loaded into the
+target data warehouse in bulk. Only data that passes all quality and
+schema checks is written to the target.
+
+The primary advantage of ETL is data quality at the target: by the time
+data reaches the warehouse, it has been fully validated and conforms
+precisely to the intended schema. The primary disadvantage is
+rigidity: adding a new source or changing a transformation requires
+modifying the ETL pipeline, which may require schema changes in the
+warehouse, regression testing of all downstream queries, and potentially
+a full historical reload.
+
+%--------------------------------------------------------------------
+\subsection{ELT: Extract, Load, Transform}
+\label{subsec:elt}
+%--------------------------------------------------------------------
+
+\term{ELT} inverts the order: raw data is extracted from sources and
+loaded immediately into a data lake (typically cloud object storage such
+as Amazon S3, Google Cloud Storage, or Azure Data Lake Storage) in its
+native format, without transformation. Transformation is deferred until
+analytical consumption time, when a compute engine such as Apache Spark
+or a transformation tool such as dbt applies the necessary logic
+on-demand.
+
+ELT has become the dominant paradigm for modern data engineering for
+several reasons. First, cloud object storage is extraordinarily
+inexpensive (approximately \$0.023 per GB per month for S3 Standard as
+of 2024), making it economically feasible to store raw, untransformed
+data at any scale. Second, decoupling extraction from transformation
+enables \emph{schema evolution}: when a source system changes its schema,
+the raw data in the lake is unaffected, and only the transformation
+logic needs to be updated. Third, deferred transformation supports
+multiple downstream use cases with different transformation requirements
+without requiring the ETL pipeline to anticipate every future analytical
+need.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, rounded corners=3pt, minimum width=2.4cm,
+                minimum height=0.8cm, font=\small\bfseries\sffamily,
+                align=center},
+    pipe/.style={-{Stealth[length=5pt]}, very thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+  %--- ETL (top row) ---
+  \node[font=\small\bfseries\sffamily\color{DEBlue}] at (0.0, 3.8) {ETL};
+  \node[box, fill=DEBlue!20,   draw=DEBlue!60]  (e1) at (0.0, 3.0) {Sources};
+  \node[box, fill=DEAccent!30, draw=DEAccent!70](t1) at (3.0, 3.0) {Staging \&\\Transform};
+  \node[box, fill=DEGreen!30,  draw=DEGreen!70] (l1) at (6.0, 3.0) {Data\\Warehouse};
+  \draw[pipe, DEBlue!70]   (e1) -- (t1) node[midway,above,lbl]{Extract};
+  \draw[pipe, DEAccent!80] (t1) -- (l1) node[midway,above,lbl]{Load clean};
+
+  %--- ELT (bottom row) ---
+  \node[font=\small\bfseries\sffamily\color{DEBlue}] at (0.0, 1.8) {ELT};
+  \node[box, fill=DEBlue!20,   draw=DEBlue!60]  (e2) at (0.0, 1.0) {Sources};
+  \node[box, fill=DEGreen!30,  draw=DEGreen!70] (l2) at (3.0, 1.0) {Data Lake\\(raw)};
+  \node[box, fill=DEAccent!30, draw=DEAccent!70](t2) at (6.0, 1.0) {Transform\\on query};
+  \draw[pipe, DEBlue!70]   (e2) -- (l2) node[midway,above,lbl]{Extract + Load};
+  \draw[pipe, DEGreen!80]  (l2) -- (t2) node[midway,above,lbl]{Transform};
+
+  % Quality indicator
+  \node[lbl, text=DEGreen!70!black] at (6.0, 2.4) {High quality\\strict schema};
+  \node[lbl, text=DEAccent!80!black] at (6.0, 0.2) {Flexible\\schema-on-read};
+\end{tikzpicture}
+\caption{ETL vs.\ ELT: the order of operations determines where
+and when data quality constraints are enforced.}
+\label{fig:etl-elt}
+\end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{ETL vs.\ ELT: a systematic comparison}
+\label{tab:etl-elt}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.6cm} L{3.4cm} L{4.0cm}}
+\toprule
+\textbf{Attribute}         & \textbf{ETL}                    & \textbf{ELT} \\
+\midrule
+Transformation timing      & Before loading (staging area)   & After loading (at query time) \\
+Target schema              & Predefined, strict (schema-on-write) & Flexible (schema-on-read) \\
+Data quality at target     & High (validated before load)    & Variable (raw data preserved) \\
+Historical replay          & Expensive (re-run ETL jobs)     & Easy (re-transform from raw) \\
+Schema evolution           & Difficult (pipeline rebuild)    & Easy (update transformation only) \\
+Raw data preservation      & No (transformed data only)      & Yes (raw always available) \\
+Storage cost               & Lower (transformed, compressed) & Higher (raw data at full volume) \\
+Latency                    & Higher (transform-then-load)    & Lower (load immediately) \\
+Tooling                    & Informatica, Talend, SSIS       & Spark, dbt, Airbyte, Fivetran \\
+\textbf{Best suited for}   & Regulated industries, strict SLAs & Data lakes, ML feature stores, exploratory analytics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{caution}{ELT Does Not Mean Skip Transformation}
+A common misunderstanding is that ELT eliminates the need for data
+transformation. It does not---it defers transformation. The raw data in
+a data lake is typically not directly queryable or usable for analytics;
+it requires the same cleaning, normalisation, and enrichment that ETL
+performs, just applied at query time rather than ingestion time. The
+\emph{dbt} (data build tool) framework has become the standard for
+managing this deferred transformation layer, implementing transformation
+logic as versioned, tested SQL models with lineage tracking. ELT without
+a robust transformation and testing layer produces a ``data swamp''---
+a lake of raw data that nobody trusts or can efficiently query.
+\end{caution}
+
+%%====================================================================
+\section{The Modern Data Integration Stack}
+\label{sec:integration-stack}
+%%====================================================================
+
+Modern data integration pipelines combine tools that address different
+stages and dimensions of the integration problem. Understanding the
+ecosystem---which tool solves which problem---is essential for designing
+production systems.
+
+\begin{table}[ht]
+\centering
+\caption{The modern data integration tool ecosystem}
+\label{tab:integration-tools}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{2.2cm} L{2.0cm} L{2.0cm} L{4.8cm}}
+\toprule
+\textbf{Tool}          & \textbf{Direction}   & \textbf{Pattern} & \textbf{Primary use case} \\
+\midrule
+Apache Sqoop           & RDBMS $\leftrightarrow$ HDFS & Batch    & Bulk migration of relational tables into Hadoop \\
+Apache Flume           & Log sources $\to$ HDFS & Batch/micro-batch & Web server log aggregation \\
+Apache Kafka           & Any $\to$ Any         & Stream    & Real-time event bus; decoupled source-to-sink \\
+Airbyte / Fivetran     & SaaS APIs $\to$ Data lake & Batch/incremental & No-code connector platform for 200+ sources \\
+Apache Spark           & Data lake $\to$ Any   & Batch/stream & Large-scale transformation and enrichment \\
+dbt                    & Data lake/DW internal & Batch    & SQL-based transformation, testing, lineage \\
+Apache Atlas           & Any                   & Metadata  & Data governance, lineage graph, cataloguing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A typical production ELT stack for a modern data-driven organisation
+operates as follows. Source systems (RDBMS, SaaS applications, IoT
+devices) emit data either via batch exports or real-time event streams.
+Batch sources are ingested using Sqoop (for RDBMS-to-HDFS transfer) or
+a managed connector platform (Airbyte, Fivetran) that handles
+incremental extraction and schema change detection. Real-time sources
+are ingested via \tool{Apache Kafka}, which acts as a durable, ordered
+event bus with configurable retention---allowing consumers to replay
+the full event history at any time. Kafka is examined in depth in
+Chapter~\ref{ch:pipelines}.
+
+Once raw data lands in the data lake (HDFS or cloud object storage),
+transformation is managed by dbt (for SQL-based transformations in a
+data warehouse engine) or Apache Spark (for large-scale Python/Scala
+transformations over raw files). The transformation layer produces
+\term{data marts}---curated, domain-specific views of the integrated
+data designed for specific analytical workloads. A metadata and lineage
+platform such as Apache Atlas automatically captures the transformation
+history, maintaining the provenance graph required for regulatory
+compliance.
+
+\term{Schema evolution}---the challenge of handling changes in source
+schemas without breaking downstream consumers---is managed by a
+\term{schema registry}. Confluent Schema Registry (for Kafka-based
+pipelines) maintains versioned schemas for each topic, allowing
+producers and consumers to negotiate schema compatibility at runtime.
+When a source system adds a new field, the registry enforces
+\emph{backward compatibility}: consumers using the old schema can still
+read new records by treating the new field as null; producers using the
+new schema can still write records that old consumers can parse.
+
+%%====================================================================
+\section{Case Study: US Healthcare Interoperability and HL7 FHIR}
+\label{sec:healthcare-case}
+%%====================================================================
+
+\begin{casestudy}{Healthcare Interoperability and HL7 FHIR --- Integration at National Scale}
+
+\textbf{Background.}
+The United States healthcare system is one of the world's most data-rich
+and most data-fragmented. A typical US hospital uses between 20 and 50
+different software systems: an electronic health record (EHR) platform,
+a laboratory information system, a radiology picture-archiving system,
+a pharmacy management system, a billing and insurance system, a
+clinical decision support system, and dozens of others. These systems
+were built by different vendors, at different times, using different
+data models, and have historically been unable to exchange patient data
+without significant manual effort.
+
+\smallskip
+\textbf{The integration cost.}
+A 2019 analysis by the Center for Health Information and Decision
+Systems (University of Maryland) estimated that integration failures
+cost US hospitals \textbf{\$8.3 billion annually} in duplicated tests,
+delayed care, medication errors attributable to incomplete records, and
+manual reconciliation labour. A patient transferred between two hospitals
+using different EHR vendors may have their medication list, allergy
+history, and recent lab results effectively unavailable to the receiving
+physician---an information gap that directly affects clinical decisions.
+
+\smallskip
+\textbf{The technical challenge as a heterogeneity problem.}
+Healthcare data integration exhibits all four dimensions of
+heterogeneity simultaneously. \emph{Structural}: patient identifiers
+vary by hospital (medical record number, patient account number,
+national identifier). \emph{Semantic}: the same diagnosis code may mean
+different things under different coding systems (ICD-9 vs.\ ICD-10 vs.\
+SNOMED CT). \emph{Syntactic}: dates, dosages, and units of measurement
+are encoded differently across vendors. \emph{Granularity}: laboratory
+reference ranges vary by testing equipment and laboratory protocol.
+
+\smallskip
+\textbf{The HL7 FHIR standard.}
+Health Level 7 (HL7) is the standards organisation that developed the
+Fast Healthcare Interoperability Resources (FHIR) standard to address
+these challenges. FHIR defines a RESTful API and a set of standardised
+data resources (Patient, Observation, Medication, DiagnosticReport,
+etc.) that any EHR system can implement. By exposing patient data
+through a FHIR API, a hospital allows any authorised consumer---a mobile
+app, a referral system, a population health analytics platform---to
+query standardised patient records without knowing the internal database
+schema of the EHR.
+
+FHIR resources are represented in JSON or XML. A standardised patient
+resource looks like:
+
+\begin{lstlisting}[style=pseudocode, caption={A partial HL7 FHIR Patient resource (JSON)}]
+{
+  "resourceType": "Patient",
+  "id":          "pat-001",
+  "name": [{"family": "Smith", "given": ["John"]}],
+  "birthDate":   "1978-04-22",
+  "gender":      "male",
+  "identifier": [
+    {"system": "urn:oid:2.16.840.1.113883.4.1",
+     "value": "123-45-6789"}
+  ],
+  "address": [
+    {"line": ["123 Main Street"],
+     "city": "Boston", "state": "MA",
+     "postalCode": "02101"}
+  ]
+}
+\end{lstlisting}
+
+\textbf{Integration architecture.}
+A national health information exchange built on FHIR operates as
+follows. Each participating hospital implements a FHIR server that
+exposes its EHR data through the standard API. A health information
+exchange (HIE) platform federates queries across multiple FHIR servers,
+performing entity resolution (matching the same patient across hospitals
+using demographic attributes) and aggregating standardised data into a
+unified longitudinal patient record. The transformation from each
+hospital's internal schema to FHIR is handled by a vendor-specific
+FHIR adapter---essentially an ETL pipeline that runs inside or alongside
+the EHR system.
+
+\smallskip
+\textbf{Data quality and entity resolution challenges.}
+Even with FHIR standardisation, entity resolution across hospitals
+remains the hardest technical challenge. The US has no universal patient
+identifier (comparable to a national insurance number in many other
+countries); matching patients across hospitals relies on probabilistic
+matching on name, date of birth, address, and partial social security
+number---exactly the similarity-function approach described in
+Section~\ref{sec:er}. Typical production matching systems achieve 95--98\%
+recall at 98--99\% precision, meaning that 1--5\% of true patient matches
+are missed and 1--2\% of declared matches are incorrect---a significant
+error rate in clinical contexts.
+
+\smallskip
+\textbf{Lessons for data engineering.}
+The healthcare interoperability challenge illustrates three principles
+that apply across all large-scale data integration projects. First,
+technical standards alone (FHIR) are necessary but not sufficient;
+data quality, entity resolution, and governance must be addressed
+alongside standardisation. Second, the cost of integration failure is
+not abstract---it manifests in clinical outcomes, regulatory penalties,
+and operational waste. Third, integrating data from autonomous,
+heterogeneous systems at scale requires exactly the distributed tools---
+Kafka, Spark, schema registries, and lineage tracking---that constitute
+modern data engineering practice.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch2-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{The data silo problem} is the primary barrier to
+        enterprise analytics: data spread across independent, autonomous
+        systems with incompatible schemas, identifiers, and formats
+        cannot be jointly queried without integration.
+
+  \item \textbf{Data integration} provides a unified query interface
+        over heterogeneous, autonomous sources via three core operations:
+        schema mapping (defining field correspondences), data exchange
+        (materialising transformed data), and entity resolution
+        (linking records representing the same real-world entity).
+
+  \item \textbf{Four dimensions of heterogeneity} must all be addressed:
+        structural (different schemas), semantic (different meanings),
+        syntactic (different encodings), and scale/granularity (different
+        units and resolutions). Structural and syntactic failures are
+        loud; semantic and granularity failures are silent and
+        dangerous.
+
+  \item \textbf{Entity resolution} identifies matching records across
+        sources with no common key. Blocking reduces the $O(n^2)$
+        comparison problem; similarity functions (Jaccard, edit distance)
+        score candidate pairs; a composite threshold determines matches.
+
+  \item \textbf{Data quality} has six dimensions: accuracy, completeness,
+        consistency, timeliness, validity, and uniqueness. Missing values
+        may be MCAR, MAR, or MNAR; the appropriate imputation strategy
+        depends on the missingness mechanism.
+
+  \item \textbf{Data provenance} records the origin and transformation
+        history of all data artifacts. It is required by GDPR and HIPAA
+        and is operationally critical for debugging data pipelines.
+        OpenLineage, Apache Atlas, and dbt provide lineage tracking.
+
+  \item \textbf{ETL} transforms data before loading (high quality at
+        the target, rigid schema). \textbf{ELT} loads raw data first
+        and transforms on demand (flexible, supports schema evolution,
+        requires a separate transformation layer such as dbt).
+
+  \item The \textbf{modern integration stack} combines Kafka
+        (streaming ingestion), Sqoop/Airbyte (batch ingestion),
+        Spark/dbt (transformation), and Atlas (lineage). Schema
+        registries manage schema evolution across producers and consumers.
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch2-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq Define data integration. What three operations does it require, and
+what does each operation accomplish?
+
+\sq Explain the difference between structural and semantic
+heterogeneity. Give one example of each from the domain of retail
+e-commerce.
+
+\sq A source system stores dates as the string \texttt{"15/03/2024"}
+and a target system expects dates as \texttt{DATE} values in ISO 8601
+format (\texttt{"2024-03-15"}). Which dimension of heterogeneity does
+this represent? What operation resolves it?
+
+\sq What is entity resolution? Why is the naive $O(n^2)$ approach
+infeasible at big data scale, and how does blocking address this?
+
+\sq Define the six dimensions of data quality and give one concrete
+example for each from a financial services context.
+
+\sq What is the difference between MCAR, MAR, and MNAR missingness?
+Why does the distinction matter when choosing an imputation strategy?
+
+\sq What is data provenance? Name two regulatory frameworks that
+require it and explain what each framework demands.
+
+\sq Compare ETL and ELT: (a) in which order are the transform and load
+steps applied, (b) where is the data quality enforcement point, and (c)
+which is better suited for schema evolution?
+
+\sq True or false, with one-sentence justification: ``The ELT paradigm
+eliminates the need for data transformation.''
+
+\sq What is a schema registry? What problem does it solve in a
+Kafka-based integration pipeline?
+
+\sq A retail company finds that 15\% of rows in its integrated customer
+table have \texttt{NULL} in the \texttt{email} column. List three
+possible reasons for this missingness and explain how you would
+distinguish between them.
+
+\sq What is ``schema drift''? Give a concrete example of how schema
+drift can cause a downstream machine learning model to fail silently.
+
+\sq What is the GAV (global-as-view) approach to schema mapping? How
+does it differ from LAV (local-as-view), and what is the practical
+trade-off between them?
+
+\sq A data engineer says: ``Our ETL pipeline runs nightly; by morning
+we have yesterday's data.'' Identify the data quality dimension being
+compromised and explain what architecture change would address it.
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Entity Resolution Complexity Analysis.}
+A hospital system wants to resolve patient identities across two EHR
+databases: Hospital A has 2.8 million patient records; Hospital B has
+1.4 million patient records. A blocking strategy based on birth-year
+and first three characters of the last name produces blocks of average
+size 350 pairs (350 A-records times the B-records in the same block).
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the number of candidate pairs under naive $O(n^2)$
+        comparison (all A against all B). At a rate of 5 million
+        comparisons per second, how long would naive comparison take?
+  \item Estimate the total number of candidate pairs after blocking,
+        assuming each blocking key creates blocks of average size 350.
+        (Hint: how many blocks are there if each A-record falls in
+        exactly one block?)
+  \item What is the speedup factor from blocking?
+  \item A composite similarity score requires 12 floating-point
+        operations per pair comparison. Estimate the total computation
+        cost (in FLOPs) for the post-blocking comparisons, and determine
+        whether it is feasible on a single server with 100 GFLOPS of
+        sustained throughput.
+\end{enumerate}
+
+\ap \textbf{ETL vs.\ ELT Storage and Latency Trade-off.}
+A financial services company ingests 5 TB of raw trading data per day
+from 40 source systems. In the current ETL architecture, data is
+transformed and compressed before loading, resulting in a 4:1
+compression ratio at the warehouse. The company is evaluating
+migrating to an ELT architecture with raw data stored in S3 at
+\$0.023/GB/month, and transformation via Spark on demand.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the current warehouse storage cost after 12 months
+        (assume warehouse storage at \$0.20/GB/month, and that the
+        compression ratio applies to all stored data). Compare with the
+        raw data storage cost in S3 over the same period.
+  \item The ETL pipeline requires 4 hours of processing before data is
+        available for queries. The ELT approach makes raw data available
+        immediately but requires 45 minutes of Spark transformation
+        before a specific analytical view is ready. For a use case that
+        needs data refreshed every 6 hours, which approach provides
+        better effective freshness?
+  \item In the ELT system, 12 months of raw data are retained in S3.
+        A new analytical requirement arrives, requiring a transformation
+        that was not anticipated. Estimate the Spark compute cost to
+        retroactively apply this transformation to 12 months of 5 TB/day
+        data at \$0.10 per Spark CPU-hour (assume 10 TB/hour processing
+        throughput per 10 CPUs).
+\end{enumerate}
+
+\ap \textbf{Data Quality Profiling.}
+An e-commerce company's data engineering team profiles a 50-million-row
+product catalogue table and finds the following:
+\begin{itemize}
+  \item 12\% of rows have \texttt{NULL} in \texttt{product\_weight}.
+  \item 3.2\% of rows have \texttt{price} $= 0$.
+  \item 0.8\% of rows have \texttt{price} $> \$10{,}000$ (the 99.9th
+        percentile is \$950).
+  \item 4\% of rows appear to be duplicates (same product, same vendor,
+        inserted on different dates).
+  \item 7\% of rows have \texttt{category\_id} values that do not exist
+        in the \texttt{categories} reference table.
+\end{itemize}
+For each issue: (a) identify the data quality dimension it violates,
+(b) classify it as noise, missing data, inconsistency, or validity
+violation, and (c) propose a specific remediation and the operational
+procedure to apply it without breaking downstream pipelines.
+
+\ap \textbf{Similarity Scoring for Entity Resolution.}
+Two records from different source systems are candidates for entity
+resolution. Using the composite similarity formula with weights
+$w_\text{name} = 0.5$, $w_\text{dob} = 0.3$, $w_\text{city} = 0.2$:
+
+\medskip
+\noindent
+\begin{tabular}{lll}
+\toprule
+\textbf{Attribute} & \textbf{Source A} & \textbf{Source B} \\
+\midrule
+Name      & \texttt{Johnson Michael R.} & \texttt{Michael R Johnson} \\
+Date of birth & \texttt{1985-07-14} & \texttt{07/14/1985} \\
+City      & \texttt{Los Angeles} & \texttt{LA} \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent
+(a) Parse both date representations and confirm they are the same date
+($\sigma_\text{dob} = 1.0$). (b) Compute the Jaccard similarity on
+name tokens (split on space and punctuation); let
+$\sigma_\text{name} = J(T_A, T_B)$. (c) Assign
+$\sigma_\text{city} = 0.4$ (``Los Angeles'' and ``LA'' are the same
+city but share no token; domain knowledge is required). (d) Compute
+$\sigma_\text{composite}$ and determine whether these records are a
+match at thresholds $\theta = 0.7$ and $\theta = 0.8$. (e) Discuss
+whether the threshold choice here is an engineering or a business
+decision.
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{Integration Architecture for a Global Logistics Company.}
+A global freight logistics company operates in 60 countries. Each
+country office uses a locally deployed ERP system (Oracle in North
+America, SAP in Europe, a custom-built system in Southeast Asia). The
+company needs a unified analytics platform that answers questions such
+as: ``Which shipment routes had the highest delay rates last quarter?''
+and ``What is the total revenue per customer across all regions?''
+
+The three ERP systems use different customer identifiers, different
+currency representations (some systems store amounts in local currency
+only; others in USD), different status code vocabularies for shipment
+states, and different date formats. Real-time track-and-trace data
+(GPS position of shipments) arrives from 8,000 vehicles at 30-second
+intervals.
+
+Design the integration architecture. Your design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The integration paradigm (ETL or ELT) and justification.
+  \item How each of the four heterogeneity dimensions is addressed.
+  \item The entity resolution strategy for customers (who may appear
+        in multiple regional ERP systems with different identifiers).
+  \item How the real-time GPS stream is ingested and at what latency
+        it becomes available for analytics.
+  \item How data lineage and provenance are maintained across the pipeline.
+  \item Which specific tools you would use at each stage and why.
+\end{enumerate}
+
+\dpr \textbf{Healthcare Data Quality Framework.}
+A national health analytics agency receives patient-level data files
+from 200 hospitals every month. The files arrive as CSV exports from
+each hospital's EHR system. The agency uses this data to compute
+national statistics on chronic disease prevalence, hospital readmission
+rates, and treatment outcome metrics.
+
+A preliminary audit reveals: (1) 18 different date formats across the
+200 hospitals; (2) ICD-10 codes mixed with ICD-9 codes in the same
+diagnosis field; (3) patient ages ranging from --3 to 247 (clearly
+erroneous); (4) 22\% of records missing at least one of: gender,
+ethnicity, or primary diagnosis; and (5) duplicate patient records at
+rates between 0.5\% and 8\% depending on the hospital.
+
+Design a data quality pipeline that the agency can apply to incoming
+files before they are used in national statistics. Your design must:
+\begin{enumerate}[label=(\alph*)]
+  \item Specify a quality gate for each of the five issues identified,
+        including the rule, the action for records that fail (reject,
+        flag, impute), and the threshold at which an entire hospital's
+        submission is quarantined.
+  \item Describe how MCAR vs.\ MAR vs.\ MNAR missingness would be
+        diagnosed for the 22\% missing records, and what imputation
+        strategy is appropriate for each case.
+  \item Explain how you would maintain provenance to satisfy HIPAA
+        audit requirements while working with de-identified patient data.
+  \item Propose a data quality SLA (e.g., ``we require $>$98\%
+        completeness on primary diagnosis before publishing national
+        statistics'') and explain how it would be monitored in
+        production.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Entity Resolution with Jaccard Similarity (Python).}
+Implement the Jaccard similarity function for string tokenisation and
+apply it to resolve company names across two source datasets.
+
+\begin{lstlisting}[style=pyspark, caption={PE2.1: Company name entity resolution}]
+import re
+
+source_a = [
+    {"id": "A001", "name": "Google LLC",       "city": "Mountain View"},
+    {"id": "A002", "name": "Apple Inc.",        "city": "Cupertino"},
+    {"id": "A003", "name": "Microsoft Corp",    "city": "Redmond"},
+    {"id": "A004", "name": "Meta Platforms Inc","city": "Menlo Park"},
+    {"id": "A005", "name": "Amazon.com Inc",    "city": "Seattle"},
+]
+
+source_b = [
+    {"id": "B001", "name": "GOOGLE LLC",          "city": "Mountain View"},
+    {"id": "B002", "name": "Apple Incorporated",  "city": "Cupertino"},
+    {"id": "B003", "name": "Microsoft Corporation","city": "Redmond"},
+    {"id": "B004", "name": "Facebook (Meta)",      "city": "Menlo Park"},
+    {"id": "B005", "name": "Amazon Web Services",  "city": "Seattle"},
+]
+
+def tokenise(text):
+    """Lowercase, remove punctuation, split into tokens."""
+    text = re.sub(r"[.,\-()']", " ", text.lower())
+    return set(text.split())
+
+def jaccard(tokens_a, tokens_b):
+    """
+    Return Jaccard similarity between two token sets.
+    J(A, B) = |A intersection B| / |A union B|
+    Return 0.0 if the union is empty.
+    """
+    # TODO: implement
+    pass
+
+def blocking_key(record):
+    """
+    Return a blocking key: first token of name + first 3 chars of city.
+    Records only compared within the same blocking key.
+    """
+    first_token = tokenise(record["name"])
+    city_prefix = record["city"][:3].lower()
+    # TODO: return key string
+    pass
+
+def resolve_entities(source_a, source_b, threshold=0.5):
+    """
+    Return list of (a_id, b_id, score) tuples where score >= threshold.
+    Use blocking to reduce comparisons.
+    """
+    matches = []
+    # TODO:
+    # 1. Build index of source_b records by blocking key
+    # 2. For each record in source_a, compute its blocking key
+    # 3. Compare only against source_b records with the same key
+    # 4. Compute Jaccard on name tokens; append match if >= threshold
+    return matches
+
+matches = resolve_entities(source_a, source_b, threshold=0.4)
+print("Resolved entity pairs:")
+for a_id, b_id, score in matches:
+    a_rec = next(r for r in source_a if r["id"] == a_id)
+    b_rec = next(r for r in source_b if r["id"] == b_id)
+    print(f"  {a_id} ({a_rec['name']}) <-> {b_id} ({b_rec['name']})  "
+          f"score={score:.3f}")
+\end{lstlisting}
+
+\pe \textbf{Data Quality Audit (Python).}
+Implement a data quality profiler that checks a list of records against
+defined quality rules and produces a summary report.
+
+\begin{lstlisting}[style=pyspark, caption={PE2.2: Data quality profiler}]
+import datetime
+
+records = [
+    {"id": "R001", "name": "Alice Chen",
+     "dob": "1990-05-14", "email": "alice@example.com", "amount": 1250.00},
+    {"id": "R002", "name": "Bob Smith",
+     "dob": "1985-13-01",  # invalid month
+     "email": None, "amount": 0.0},
+    {"id": "R003", "name": "",            # empty name
+     "dob": "2035-01-01",  # future date
+     "email": "carol@example.com", "amount": -50.0},
+    {"id": "R004", "name": "Diana Kumar",
+     "dob": "1978-03-22", "email": "diana@example.com", "amount": 980.50},
+    {"id": "R005", "name": "Eve Johnson",
+     "dob": "1978-03-22",  # duplicate dob+name (same as R004 roughly)
+     "email": None, "amount": 99999.0},
+]
+
+def check_completeness(record, required_fields):
+    """Return list of field names that are None or empty string."""
+    missing = []
+    for f in required_fields:
+        v = record.get(f)
+        if v is None or v == "":
+            missing.append(f)
+    return missing
+
+def check_dob_validity(dob_str):
+    """
+    Return True if dob_str is a valid date in ISO format (YYYY-MM-DD)
+    and not in the future.
+    """
+    try:
+        dob = datetime.date.fromisoformat(dob_str)
+        return dob <= datetime.date.today()
+    except (ValueError, TypeError):
+        return False
+
+def check_amount_validity(amount):
+    """Return True if amount is a positive number."""
+    try:
+        return float(amount) > 0
+    except (ValueError, TypeError):
+        return False
+
+def profile_records(records):
+    """
+    Run all quality checks and print a summary report.
+    Dimensions checked: Completeness, Validity, Accuracy (range).
+    """
+    required = ["name", "dob", "email", "amount"]
+    issues = []
+
+    for rec in records:
+        rec_issues = {"id": rec["id"], "problems": []}
+
+        # Completeness
+        missing = check_completeness(rec, required)
+        if missing:
+            rec_issues["problems"].append(
+                f"Missing fields: {missing}")
+
+        # Validity: dob
+        if rec.get("dob") and not check_dob_validity(rec["dob"]):
+            rec_issues["problems"].append(
+                f"Invalid or future dob: {rec['dob']}")
+
+        # Validity: amount
+        if rec.get("amount") is not None:
+            if not check_amount_validity(rec["amount"]):
+                rec_issues["problems"].append(
+                    f"Non-positive amount: {rec['amount']}")
+
+        if rec_issues["problems"]:
+            issues.append(rec_issues)
+
+    # Summary
+    total = len(records)
+    clean = total - len(issues)
+    print(f"Quality Report: {clean}/{total} records passed all checks\n")
+    for issue in issues:
+        print(f"  Record {issue['id']}:")
+        for p in issue["problems"]:
+            print(f"    - {p}")
+    return issues
+
+profile_records(records)
+\end{lstlisting}
+
+\pe \textbf{ETL Pipeline Simulation (Python).}
+Simulate a three-stage ETL pipeline that extracts records from two
+heterogeneous sources, applies transformations to resolve structural
+and syntactic heterogeneity, and loads unified records into a target
+schema.
+
+\begin{lstlisting}[style=pyspark, caption={PE2.3: ETL pipeline simulation}]
+import datetime
+
+# Source A: CRM system (European date format, price in EUR)
+source_a = [
+    {"contact_id": "C001", "fname": "Emma",  "lname": "Weber",
+     "birth": "22.09.1988", "eur_value": 1400.0},
+    {"contact_id": "C002", "fname": "Luca",  "lname": "Rossi",
+     "birth": "05.03.1975", "eur_value": 2200.0},
+]
+
+# Source B: ERP system (US date format, price in USD, full name column)
+source_b = [
+    {"customer_no": "E045", "full_name": "Chen, Wei",
+     "date_of_birth": "07/18/1992", "usd_value": 3100.0},
+    {"customer_no": "E046", "full_name": "Park, Ji-Young",
+     "date_of_birth": "12/04/1983", "usd_value": 870.0},
+]
+
+EUR_TO_USD = 1.09  # approximate exchange rate
+
+# Target schema:
+# { "id", "first_name", "last_name", "dob" (ISO), "value_usd" }
+
+def transform_source_a(record):
+    """
+    Map CRM record to target schema.
+    - contact_id -> id
+    - fname/lname -> first_name/last_name
+    - birth (DD.MM.YYYY) -> dob (YYYY-MM-DD)
+    - eur_value * EUR_TO_USD -> value_usd
+    """
+    # TODO: implement transformation
+    pass
+
+def transform_source_b(record):
+    """
+    Map ERP record to target schema.
+    - customer_no -> id
+    - full_name ("Last, First") -> first_name, last_name
+    - date_of_birth (MM/DD/YYYY) -> dob (YYYY-MM-DD)
+    - usd_value -> value_usd (already USD)
+    """
+    # TODO: implement transformation
+    pass
+
+def run_etl(source_a, source_b):
+    """Extract, transform both sources, and load into unified target."""
+    target = []
+
+    # Transform source A
+    for rec in source_a:
+        transformed = transform_source_a(rec)
+        if transformed:
+            target.append(transformed)
+
+    # Transform source B
+    for rec in source_b:
+        transformed = transform_source_b(rec)
+        if transformed:
+            target.append(transformed)
+
+    return target
+
+unified = run_etl(source_a, source_b)
+print("Unified target records:")
+for r in unified:
+    print(f"  {r}")
+\end{lstlisting}

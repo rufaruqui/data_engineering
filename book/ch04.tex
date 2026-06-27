@@ -1,0 +1,1533 @@
+%% ch04.tex — Chapter 4: The MapReduce Paradigm and the Hadoop Processing Stack
+%% Part of "Data Engineering" textbook
+
+\chapter{The MapReduce Paradigm and the Hadoop Processing Stack}
+\label{ch:mapreduce}
+
+\epigraph{\textit{``Our abstraction is inspired by the map and reduce primitives present
+in Lisp and many other functional languages. We realized that most of our
+computations involved applying a map operation to each logical record in
+our input in order to compute a set of intermediate key/value pairs, and
+then applying a reduce operation to all the values that shared the same key.''}}{Dean \& Ghemawat, OSDI 2004}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain why a new computation model was required for petabyte-scale
+        data on distributed file systems, and identify the specific
+        limitations of SQL and MPI that MapReduce addresses.
+  \item Write a MapReduce program by defining the Map and Reduce functions,
+        and trace the complete execution through Map $\to$ Shuffle/Sort
+        $\to$ Reduce using a concrete example.
+  \item Explain the roles of the Combiner (local optimisation) and the
+        Partitioner (reducer assignment) and quantify the network savings
+        a Combiner provides.
+  \item Describe the full MapReduce execution pipeline: input splits,
+        task scheduling with data locality, speculative execution, and
+        output materialisation.
+  \item Explain how MapReduce achieves fault tolerance through
+        deterministic task re-execution.
+  \item Write Pig Latin scripts using LOAD, FILTER, FOREACH, GROUP,
+        JOIN, and STORE, and explain how Pig Latin is compiled to
+        MapReduce.
+  \item Write HiveQL queries using CREATE TABLE, partitioning,
+        bucketing, and SELECT with GROUP BY, and explain the role of
+        the Hive Metastore.
+  \item Describe the HBase data model (row key, column families,
+        column qualifiers, timestamps) and the HBase architecture
+        (HMaster, RegionServers, WAL, MemStore, HFile).
+  \item Select the appropriate tool from the Hadoop stack---raw
+        MapReduce, Pig, Hive, or HBase---for a given data engineering
+        problem.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:hdfs} established how petabytes of data are stored
+reliably across a cluster of commodity servers. Storage, however, is
+only half the challenge. The data must be processed: indexed, aggregated,
+joined, filtered, and analysed. In 2003, Google's engineers faced
+precisely this problem. Their GFS cluster held hundreds of terabytes of
+web crawl data; building the search index required processing every
+document, aggregating term frequencies, and computing PageRank---
+computations that would take thousands of hours on a single machine.
+
+The solution they published in 2004 is the subject of this chapter:
+\term{MapReduce}, a programming model that allows a programmer to express
+a large-scale computation as two simple functions---\emph{map} and
+\emph{reduce}---and have the framework automatically parallelise the
+execution across hundreds or thousands of machines, handling data
+partitioning, scheduling, fault tolerance, and inter-machine
+communication transparently \parencite{MapReduce2004}. Over the following
+decade, MapReduce became the computational backbone of an entire
+ecosystem of data processing tools: Apache Pig, Apache Hive, and Apache
+HBase, all of which this chapter also covers.
+
+%%====================================================================
+\section{Why a New Computation Model?}
+\label{sec:mr-motivation}
+%%====================================================================
+
+The data processing challenges of petabyte-scale distributed storage
+do not yield to the tools that work well for smaller datasets. Two
+dominant paradigms---relational SQL and MPI-style parallel
+programming---both fail in this environment for distinct reasons.
+
+\textbf{SQL on a single server} requires data to be loaded into a
+relational schema, supports random access via indexes, and executes on
+a single instance (or a tightly coupled SMP cluster). None of these
+properties hold for unstructured petabyte data stored on thousands
+of commodity DataNodes. Sequential full-table scans of a petabyte
+dataset at 200\MB/s on a single server would take over 57 days.
+SQL's assumption of a schema-on-write data model is incompatible with
+semi-structured and unstructured data (web pages, log files, binary
+media). SQL-on-Hadoop tools such as Hive (discussed in
+Section~\ref{sec:hive}) resolve these issues by compiling SQL into
+MapReduce jobs.
+
+\textbf{MPI (Message Passing Interface)} is the standard for
+scientific high-performance computing. MPI programmes explicitly manage
+inter-process communication, data partitioning, and synchronisation.
+This gives the programmer maximum flexibility but at enormous cost: the
+programmer must manually handle every aspect of distribution. More
+critically, MPI does not handle fault tolerance: if any MPI process
+fails, the entire job must typically be restarted from scratch. In a
+cluster of thousands of commodity machines where failures occur daily,
+a long-running MPI job that restarts on every node failure is
+effectively unusable.
+
+MapReduce resolves both limitations. It enforces a structured
+programming model (Map and Reduce functions) that is restrictive
+enough for the framework to automate parallelisation, scheduling, and
+fault recovery---but expressive enough to implement a broad class of
+large-scale data transformations. The framework, not the programmer,
+decides how many tasks to spawn, which machine runs each task, how
+to partition intermediate data, and what to do when a machine fails.
+
+\begin{keyinsight}{The Expressiveness of Map + Reduce}
+The surprising result of Dean and Ghemawat's paper is that an
+enormous variety of large-scale computations---word frequency,
+inverted index construction, PageRank, distributed sort, join
+operations, machine learning feature extraction---can be expressed
+as a single Map phase followed by a single Reduce phase (or a
+sequence of MapReduce stages). The restrictive two-function interface
+is a \emph{feature}, not a limitation: its uniformity is exactly what
+allows the framework to manage all distribution and fault tolerance
+automatically.
+\end{keyinsight}
+
+%%====================================================================
+\section{The MapReduce Programming Model}
+\label{sec:mr-model}
+%%====================================================================
+
+MapReduce adopts the functional programming concepts of \emph{map} and
+\emph{reduce} from Lisp and ML, applied to distributed key-value pairs
+at petabyte scale. The programmer provides two pure functions---with no
+shared mutable state and no side effects---and the framework handles
+everything else.
+
+\begin{defbox}{The MapReduce Functions}
+Given input data represented as a set of key-value pairs $(k_1, v_1)$:
+
+\medskip
+\noindent\textbf{Map:}
+\[
+\text{map} : (k_1,\, v_1) \;\longrightarrow\; \text{list}\bigl((k_2,\, v_2)\bigr)
+\]
+The Map function processes each input record independently and emits
+zero or more intermediate key-value pairs.
+
+\medskip
+\noindent\textbf{Reduce:}
+\[
+\text{reduce} : (k_2,\, \text{list}(v_2)) \;\longrightarrow\; \text{list}\bigl((k_3,\, v_3)\bigr)
+\]
+The Reduce function receives all intermediate values associated with
+a single key $k_2$ and aggregates them into the final output.
+\end{defbox}
+
+Between the Map and Reduce phases, the framework executes the
+\term{shuffle and sort}: it collects all intermediate $(k_2, v_2)$
+pairs emitted by all Map tasks, groups them by key, and sorts each
+group, delivering to each Reduce task an iterator over all values
+$\text{list}(v_2)$ for a single key $k_2$. The programmer never
+writes shuffle-and-sort logic; it is the framework's responsibility.
+
+%--------------------------------------------------------------------
+\subsection{The Canonical Example: Word Count}
+\label{subsec:word-count}
+%--------------------------------------------------------------------
+
+The canonical MapReduce example is word count: given a collection of
+text documents, compute the frequency of every distinct word across
+the entire collection. This example is simple enough to follow in
+detail, yet it illustrates every essential phase of MapReduce execution.
+
+\begin{lstlisting}[style=pseudocode, caption={MapReduce word count: Map and Reduce functions}]
+# ----- Map function -----
+# Input:  (docid, document_text)
+# Output: (word, 1) for every word in the document
+
+def map(docid, text):
+    for word in text.split():
+        emit(word.lower(), 1)
+
+# Example: map("doc1", "To be or not to be") emits:
+#   ("to", 1), ("be", 1), ("or", 1), ("not", 1), ("to", 1), ("be", 1)
+
+# ----- Shuffle and Sort (framework-managed) -----
+# Groups all emitted pairs by key, sorts alphabetically:
+#   ("be",  [1, 1, 1, ...])    <- all 1s from every document
+#   ("not", [1, 1, ...])
+#   ("or",  [1, ...])
+#   ("to",  [1, 1, 1, ...])
+
+# ----- Reduce function -----
+# Input:  (word, iterator_of_counts)
+# Output: (word, total_count)
+
+def reduce(word, counts):
+    total = sum(counts)
+    emit(word, total)
+
+# Example: reduce("be", [1,1,1,1,1]) emits: ("be", 5)
+\end{lstlisting}
+
+Each document in the collection is assigned to an independent Map
+task; if there are 10 million documents, 10 million Map tasks run in
+parallel (subject to cluster capacity). Each Map task processes only
+its own documents and emits word counts for that subset. The framework
+then collects all $(word, 1)$ pairs from all Map tasks, groups them
+by word, and routes each group to a single Reduce task, which sums
+the counts. The output is the complete word frequency table for the
+entire collection.
+
+%--------------------------------------------------------------------
+\subsection{Additional MapReduce Examples}
+\label{subsec:mr-examples}
+%--------------------------------------------------------------------
+
+Word count is illustrative, but the MapReduce model extends to a much
+wider class of computations. Two further examples demonstrate its
+generality.
+
+\textbf{Inverted index construction.} A search engine's inverted index
+maps each term to the list of documents containing it. The Map
+function emits $(\text{term}, \text{docid})$ for each term in each
+document. After shuffle and sort, each Reduce task receives
+$(\text{term}, [\text{docid}_1, \text{docid}_2, \ldots])$ and
+concatenates the list into the posting list for that term.
+
+\textbf{Distributed sort.} To sort a petabyte dataset, the Map
+function emits each record as $(\text{sort\_key},\, \text{record})$.
+The shuffle and sort phase sorts all intermediate keys globally (using
+a Partitioner that distributes key ranges uniformly across Reducers).
+Each Reducer receives records in sorted order for its key range; the
+concatenation of all Reducer outputs is globally sorted. This pattern---
+TeraSort---is the standard benchmark for distributed sorting, and
+Hadoop clusters have set world records for sorting 1 TB in minutes.
+
+%%====================================================================
+\section{The Combiner and the Partitioner}
+\label{sec:combiner-partitioner}
+%%====================================================================
+
+Two optional but important components sit between the Map and Reduce
+phases: the Combiner and the Partitioner. Both are performance
+optimisations that the programmer can provide without changing the
+correctness of the computation.
+
+%--------------------------------------------------------------------
+\subsection{The Combiner: Local Aggregation}
+\label{subsec:combiner}
+%--------------------------------------------------------------------
+
+In the word count example, each Map task might process a 128\MB\ input
+split containing hundreds of thousands of words. If the word ``the''
+appears 50,000 times in that split, the Map task emits 50,000
+\texttt{("the", 1)} pairs, all of which must be transferred over the
+network to the Reducer responsible for ``the''. This is wasteful: the
+network cost is proportional to the number of word occurrences, not
+the number of distinct words.
+
+The \term{Combiner} is a locally executed mini-Reducer that runs
+immediately after the Map phase \emph{on the same node}. It receives
+the Map task's output and aggregates values for each key before they
+are shuffled across the network. For word count, the Combiner
+would reduce the 50,000 \texttt{("the", 1)} pairs to a single
+\texttt{("the", 50000)}, reducing the shuffle volume for this key
+by a factor of 50,000.
+
+Combiners can be applied whenever the Reduce function is
+\emph{commutative} and \emph{associative}: if $f(a, f(b, c)) = f(f(a, b), c)$
+and $f(a, b) = f(b, a)$, then partial application of $f$ is always
+safe. Sum, count, min, and max all satisfy this property. Average does
+not---the Combiner cannot compute a local average because it does not
+know how many records the Reducer will receive from other Map tasks.
+
+In practice, enabling a Combiner can reduce shuffle network traffic
+by 80--95\% for aggregation workloads, dramatically reducing job
+completion time on bandwidth-constrained clusters.
+
+%--------------------------------------------------------------------
+\subsection{The Partitioner: Directing Keys to Reducers}
+\label{subsec:partitioner}
+%--------------------------------------------------------------------
+
+The \term{Partitioner} determines which Reducer receives each
+intermediate key. Given a key $k$ and the number of Reduce tasks $R$,
+the default HashPartitioner computes:
+\begin{equation}
+\text{reducer\_id}(k) = h(k) \bmod R
+\label{eq:hash-partitioner}
+\end{equation}
+where $h(k)$ is the hash of key $k$. This distributes keys uniformly
+across all Reduce tasks in expectation---the fundamental requirement
+for preventing \term{reducer skew} (one reducer receiving far more
+data than others and becoming the job's bottleneck).
+
+For workloads where the hash distribution is insufficient---for
+example, when sorting requires that all keys in a range go to a
+specific Reducer---the programmer provides a custom Partitioner.
+The TeraSort example uses a \term{TotalOrderPartitioner} that
+divides the keyspace into $R$ equal-sized ranges based on a sample
+of the input, ensuring that each Reducer receives a balanced
+partition of the sorted key space.
+
+%%====================================================================
+\section{The Full MapReduce Execution Pipeline}
+\label{sec:mr-execution}
+%%====================================================================
+
+Having defined the programming model, we can now trace the complete
+execution of a MapReduce job from input files on HDFS to output files
+on HDFS, through the framework's scheduling, data-locality optimisation,
+and fault recovery mechanisms.
+
+%--------------------------------------------------------------------
+\subsection{Input Splits and the InputFormat}
+\label{subsec:input-splits}
+%--------------------------------------------------------------------
+
+A MapReduce job begins with the client submitting a job to the cluster.
+The framework reads the input files from HDFS and divides them into
+\term{input splits}---logical chunks of input data, typically aligned
+to HDFS block boundaries (128\MB\ by default). One Map task is
+instantiated per input split; the number of Map tasks is therefore
+approximately $\lceil \text{total input size} / \text{block size}
+\rceil$, matching the number of HDFS blocks that contain the input.
+
+The \term{InputFormat} is the abstraction that translates raw HDFS
+bytes into $(k_1, v_1)$ pairs that the Map function consumes. The
+standard \texttt{TextInputFormat} produces \texttt{(byte\_offset, line)}
+pairs---one per line of text. \texttt{SequenceFileInputFormat} reads
+Hadoop SequenceFile format. \texttt{CombineFileInputFormat} merges
+many small files into a single split, mitigating the small file
+problem in the context of MapReduce job scheduling.
+
+%--------------------------------------------------------------------
+\subsection{Task Scheduling and Data Locality}
+\label{subsec:scheduling}
+%--------------------------------------------------------------------
+
+The cluster \term{JobTracker} (in Hadoop 1.x) or YARN
+\term{ResourceManager} (Hadoop 2.x and later, covered in
+Chapter~\ref{ch:yarn}) accepts the submitted job and begins scheduling
+Map tasks. For each input split, the framework attempts to schedule the
+Map task on one of the three DataNodes that hold a replica of the
+corresponding HDFS block---applying the data locality principle
+introduced in Chapter~\ref{ch:foundations}. If a data-local slot is
+unavailable, the framework falls back to rack-local, then to
+off-rack scheduling.
+
+Data locality is critical for MapReduce performance. A Map task reading
+its input from a local disk can sustain 100--300\MB/s of throughput;
+the same task reading from a remote rack over a 1 Gbit/s network
+connection is limited to approximately 125\MB/s, and in a congested
+cluster may receive less. For a job with thousands of Map tasks all
+reading simultaneously, the difference between local and off-rack
+I/O can mean the difference between a one-hour job and a three-hour
+job.
+
+Reduce tasks have no concept of data locality with respect to the
+original input---their input comes from the network (the shuffle
+phase). Reduce tasks are scheduled on any available node with
+sufficient memory and CPU capacity.
+
+%--------------------------------------------------------------------
+\subsection{The Shuffle and Sort in Detail}
+\label{subsec:shuffle-sort}
+%--------------------------------------------------------------------
+
+The shuffle is the most network-intensive phase of MapReduce. As each
+Map task produces output, it does not write it directly to HDFS
+(which would incur expensive replication); instead, it writes
+intermediate data to a local \term{spill buffer} in RAM (default
+100\MB). When the buffer is 80\% full, a background thread
+\term{spills} the buffer content to disk after sorting by key within
+the spill and applying the Combiner (if present). Multiple spills
+from a single Map task are merged into a single sorted file before the
+task completes.
+
+Each Reduce task then actively \term{fetches} its portion of the
+intermediate data from each Map task's output file via HTTP (a process
+called the \term{copy phase}). As data arrives from different Map
+tasks, the Reduce side merges the multiple sorted streams (using a
+merge-sort) to produce a single sorted sequence of $(k_2, v_2)$ pairs
+for each key. This merge-sort is the ``sort'' in shuffle-and-sort, and
+it is what guarantees that the Reduce function sees values for a single
+key in a well-defined, contiguous iterator.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    phase/.style={rectangle, rounded corners=4pt, minimum width=2.5cm,
+                  minimum height=1.0cm, font=\small\bfseries\sffamily,
+                  align=center},
+    arr/.style={-{Stealth[length=5pt]}, very thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+  % Input
+  \node[phase, fill=DEGray!20, draw=DEGray!50] (input) at (0, 2.0) {HDFS Input\\Blocks};
+
+  % Map tasks
+  \node[phase, fill=DELightBlue,  draw=DEBlue!50]  (m1) at (3.2, 3.5) {Map Task 1};
+  \node[phase, fill=DELightBlue,  draw=DEBlue!50]  (m2) at (3.2, 2.0) {Map Task 2};
+  \node[phase, fill=DELightBlue,  draw=DEBlue!50]  (m3) at (3.2, 0.5) {Map Task 3};
+
+  % Combiner (optional)
+  \node[phase, fill=DELightAccent, draw=DEAccent!60, minimum width=2.0cm,
+        minimum height=0.6cm, font=\scriptsize\bfseries\sffamily]
+       (comb) at (5.4, 2.0) {Combine\\(local)};
+
+  % Shuffle / Sort
+  \node[phase, fill=DELightGreen, draw=DEGreen!60] (shuf) at (7.8, 2.0)
+        {Shuffle\\+ Sort};
+
+  % Reduce tasks
+  \node[phase, fill=DELightPurple, draw=DEPurple!50] (r1) at (10.4, 3.0) {Reduce\\Task A};
+  \node[phase, fill=DELightPurple, draw=DEPurple!50] (r2) at (10.4, 1.0) {Reduce\\Task B};
+
+  % Output
+  \node[phase, fill=DEGray!20, draw=DEGray!50] (out) at (13.0, 2.0) {HDFS Output};
+
+  % Arrows
+  \draw[arr, DEGray!60] (input) -- (m1);
+  \draw[arr, DEGray!60] (input) -- (m2);
+  \draw[arr, DEGray!60] (input) -- (m3);
+  \draw[arr, DEBlue!60] (m1) -- (comb);
+  \draw[arr, DEBlue!60] (m2) -- (comb);
+  \draw[arr, DEBlue!60] (m3) -- (comb);
+  \draw[arr, DEAccent!70] (comb) -- (shuf)
+        node[midway, above, lbl] {network\\transfer};
+  \draw[arr, DEGreen!70] (shuf) -- (r1);
+  \draw[arr, DEGreen!70] (shuf) -- (r2);
+  \draw[arr, DEPurple!60] (r1) -- (out);
+  \draw[arr, DEPurple!60] (r2) -- (out);
+
+  % Phase labels
+  \node[lbl, text=DEBlue]   at (3.2, -0.4) {Map phase};
+  \node[lbl, text=DEAccent] at (5.4, -0.4) {Combine};
+  \node[lbl, text=DEGreen]  at (7.8, -0.4) {Shuffle \& Sort};
+  \node[lbl, text=DEPurple] at (10.4,-0.4) {Reduce phase};
+\end{tikzpicture}
+\caption{The full MapReduce execution pipeline. Map tasks run in
+         parallel, each processing one input split. The optional
+         Combiner reduces shuffle traffic. The framework-managed
+         shuffle groups and sorts all intermediate data by key before
+         delivering it to Reduce tasks.}
+\label{fig:mr-pipeline}
+\end{figure}
+
+%%====================================================================
+\section{Fault Tolerance in MapReduce}
+\label{sec:mr-fault}
+%%====================================================================
+
+MapReduce's fault tolerance model is both simple and elegant: all
+Map and Reduce tasks are \term{deterministic} and \term{idempotent}.
+A Map task that processes the same input split will always produce
+the same output; a Reduce task that processes the same sorted key-value
+sequence will always produce the same output. This determinism is the
+foundation of fault recovery.
+
+The \term{JobTracker} (or YARN ResourceManager) monitors the progress
+of every running task through periodic \term{heartbeats}. If a task
+has not reported progress within a configurable timeout (default
+10 minutes), it is considered failed. The framework re-schedules the
+failed task on a different node, which re-reads the input split from
+HDFS and re-executes the Map function from scratch. Because HDFS
+provides three replicas of every input block, the task can always
+find its input on a surviving DataNode.
+
+For Reduce tasks, re-execution is more expensive because the Reduce
+task may have already fetched a significant portion of its shuffle
+data. When a Reduce task fails, the framework restarts it from the
+beginning of the copy phase; all already-fetched intermediate data
+is discarded and re-fetched from Map task outputs.
+
+\term{Speculative execution} addresses a different failure mode: the
+slow task (\term{straggler}). In a large cluster, statistical
+variation in hardware performance means that some tasks will always
+run significantly slower than average, even without a hard failure.
+A single slow Map task on a degraded disk or a hot machine can
+delay the entire job, because the Reduce phase cannot begin until
+all Map tasks complete. MapReduce mitigates this by detecting tasks
+that are running slower than expected and launching \term{backup
+tasks}---duplicate executions of the same task on different nodes.
+Whichever task---original or backup---completes first writes its
+output; the other is killed. This has no correctness impact because
+both produce identical outputs (determinism), but can reduce job
+completion time by 40\% in practice.
+
+\begin{table}[ht]
+\centering
+\caption{MapReduce fault tolerance mechanisms}
+\label{tab:mr-fault}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{L{3.0cm} L{3.4cm} L{4.0cm}}
+\toprule
+\textbf{Failure type} & \textbf{Detection} & \textbf{Recovery mechanism} \\
+\midrule
+Map task failure   & Heartbeat timeout       & Re-schedule on another node; re-read HDFS block \\
+Reduce task failure & Heartbeat timeout       & Re-schedule; re-fetch all shuffle data \\
+TaskTracker failure & Heartbeat timeout       & Re-schedule all tasks that were running on that node \\
+Slow task (straggler) & Progress rate below mean & Launch speculative backup task; keep first to complete \\
+JobTracker failure  & Not auto-recovered (Hadoop 1.x) & Manual restart; job history lost unless YARN HA used \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%%====================================================================
+\section{Apache Pig: Dataflow Scripting}
+\label{sec:pig}
+%%====================================================================
+
+Raw MapReduce is powerful but verbose. A simple join of two datasets
+requires writing multiple Java classes: an InputFormat for each source,
+a custom Mapper that tags records with their source, a custom Partitioner,
+and a Reducer that handles the merge logic---hundreds of lines of
+boilerplate code. Apache Pig addresses this by providing a high-level
+dataflow scripting language called \term{Pig Latin}, which compiles
+to one or more MapReduce jobs automatically.
+
+\begin{defbox}{Apache Pig}
+Apache Pig is a dataflow platform for analysing large datasets on
+Hadoop. Pig Latin programs describe a \textbf{directed acyclic graph
+(DAG) of data transformations}: each statement loads, filters,
+transforms, groups, joins, or stores a relation. The Pig compiler
+translates the DAG into a sequence of MapReduce jobs, optimising
+the plan by combining compatible operations into single jobs where
+possible.
+\end{defbox}
+
+A Pig Latin script operates on \term{relations}---bag-like collections
+of tuples, similar to relational tables but without requiring a
+predefined schema. The key operators are:
+
+\begin{itemize}
+  \item \texttt{LOAD}: read data from HDFS into a named relation.
+  \item \texttt{FILTER}: select tuples matching a predicate.
+  \item \texttt{FOREACH ... GENERATE}: project or transform fields
+        (analogous to SQL's \texttt{SELECT}).
+  \item \texttt{GROUP}: group tuples by a key (generates a relation
+        of (key, bag) pairs).
+  \item \texttt{JOIN}: equi-join two relations on a key.
+  \item \texttt{ORDER BY}: sort a relation by a key.
+  \item \texttt{STORE}: write a relation to HDFS.
+\end{itemize}
+
+The following Pig Latin script analyses a web server access log to
+find the most-requested URLs that returned HTTP 404 errors:
+
+\begin{lstlisting}[style=pseudocode, caption={Pig Latin: 404 error frequency analysis}]
+-- Load the access log (tab-delimited)
+logs = LOAD 'hdfs:///data/access_log'
+       USING PigStorage('\t')
+       AS (host:chararray, ts:chararray, method:chararray,
+           url:chararray, status:int, bytes:long);
+
+-- Keep only 404 responses
+errors = FILTER logs BY status == 404;
+
+-- Group by URL
+grouped = GROUP errors BY url;
+
+-- Count 404s per URL
+counts = FOREACH grouped GENERATE
+             group        AS url,
+             COUNT(errors) AS num_errors;
+
+-- Sort descending
+ranked = ORDER counts BY num_errors DESC;
+
+-- Keep top 20
+top20 = LIMIT ranked 20;
+
+-- Write output to HDFS
+STORE top20 INTO 'hdfs:///output/top404' USING PigStorage(',');
+\end{lstlisting}
+
+The Pig compiler translates this seven-statement script into
+typically two MapReduce jobs: one for the FILTER + GROUP + FOREACH
+(a shuffle-intensive aggregate), and one for the ORDER BY + LIMIT
+(a second sort phase). The programmer writes dataflow logic; the
+framework decides how many MapReduce stages are needed and how to
+parallelise each one.
+
+Pig is particularly well-suited for ad hoc exploratory analysis on
+HDFS data, for ETL pipelines that require complex multi-step
+transformations, and for data scientists who are comfortable with
+a scripting language but do not want to write Java MapReduce code.
+Its primary limitation---shared with raw MapReduce---is high latency:
+even simple queries require at least one MapReduce job, with startup
+overhead of 30--60 seconds before computation begins. For interactive
+analytical queries, Hive with a modern execution engine (Tez or Spark)
+or Presto (Chapter~\ref{ch:sql-scale}) is more appropriate.
+
+%%====================================================================
+\section{Apache Hive: SQL-on-Hadoop}
+\label{sec:hive}
+%%====================================================================
+
+Apache Hive, developed at Facebook and open-sourced in 2008, takes a
+different approach to Hadoop usability: instead of a new scripting
+language, it provides a SQL-like query language called \term{HiveQL}
+(or simply ``Hive SQL'') that compiles to MapReduce (and, since Hive
+0.13, to Apache Tez or Apache Spark). Hive allows data analysts
+comfortable with SQL to query petabyte-scale datasets on HDFS without
+learning MapReduce or Pig Latin.
+
+%--------------------------------------------------------------------
+\subsection{The Hive Metastore}
+\label{subsec:metastore}
+%--------------------------------------------------------------------
+
+For SQL queries to work over HDFS files, Hive needs a way to map
+SQL table names and column names to HDFS paths and file formats. This
+mapping is managed by the \term{Hive Metastore}: a relational database
+(typically MySQL or PostgreSQL) that stores table definitions, schema
+information, partition metadata, and storage descriptors.
+
+When a user creates a Hive table:
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: creating a partitioned ORC table}]
+CREATE TABLE web_events (
+    user_id     BIGINT,
+    event_type  STRING,
+    url         STRING,
+    session_id  STRING,
+    duration_ms INT
+)
+PARTITIONED BY (dt STRING)
+STORED AS ORC
+LOCATION 'hdfs:///data/web_events';
+\end{lstlisting}
+
+Hive records in the Metastore that the table \texttt{web\_events}
+maps to the HDFS directory \texttt{/data/web\_events}, is stored
+in ORC format, and is partitioned by the column \texttt{dt}
+(date string). Data for 2024-01-15 lives in the subdirectory
+\texttt{/data/web\_events/dt=2024-01-15/}. The Metastore is the
+source of truth that the HiveQL compiler consults to generate the
+correct HDFS path for each query.
+
+%--------------------------------------------------------------------
+\subsection{Partitioning and Bucketing}
+\label{subsec:partitioning-bucketing}
+%--------------------------------------------------------------------
+
+\term{Partitioning} is one of the most important performance techniques
+in Hive. A partitioned table stores its data in separate HDFS
+subdirectories, one per partition value. A query that filters on the
+partition column can skip reading all irrelevant partitions entirely---
+a technique called \term{partition pruning}. For a table with 365
+date partitions and 1\TB\ per partition (365\TB\ total), a query
+filtering on a single day reads only 1\TB\ rather than 365\TB:
+
+\begin{lstlisting}[style=hiveql, caption={HiveQL: partition pruning in a query}]
+-- Only reads /data/web_events/dt=2024-01-15/
+-- Hive's query planner prunes all other 364 partitions
+SELECT  event_type,
+        COUNT(*)        AS event_count,
+        AVG(duration_ms) AS avg_duration_ms
+FROM    web_events
+WHERE   dt = '2024-01-15'         -- partition filter
+  AND   event_type IN ('purchase', 'add_to_cart')
+GROUP BY event_type
+ORDER BY event_count DESC;
+\end{lstlisting}
+
+\term{Bucketing} provides a second level of data organisation within
+a partition. Rows are assigned to a fixed number of \term{buckets}
+(files) based on the hash of a designated column. Bucketing improves
+the efficiency of equi-joins (two tables bucketed on the join key and
+with the same number of buckets can be joined without a full shuffle)
+and enables efficient sampling (read only one bucket for a 1/$N$
+sample).
+
+%--------------------------------------------------------------------
+\subsection{HiveQL to MapReduce Compilation}
+\label{subsec:hiveql-compilation}
+%--------------------------------------------------------------------
+
+When a user submits a HiveQL query, the Hive driver executes the
+following steps:
+\begin{enumerate}
+  \item \textbf{Parse}: convert the SQL string into an abstract syntax
+        tree (AST).
+  \item \textbf{Semantic analysis}: resolve table and column names
+        against the Metastore; validate types and permissions.
+  \item \textbf{Logical plan}: convert the AST into a logical query
+        plan (a DAG of relational operators: scan, filter, project,
+        aggregate, join).
+  \item \textbf{Optimisation}: apply rule-based optimisations
+        (predicate push-down, column pruning, partition pruning) to
+        reduce data read volume.
+  \item \textbf{Physical plan}: translate the logical plan into a
+        sequence of MapReduce (or Tez, or Spark) jobs.
+  \item \textbf{Execution}: submit the jobs to the cluster and monitor
+        their progress.
+\end{enumerate}
+
+A \texttt{SELECT ... GROUP BY} query maps straightforwardly to a
+single MapReduce job: the Map function applies the predicate and
+projects the required columns; the Reduce function aggregates by
+the GROUP BY key. A multi-table \texttt{JOIN} may generate two or
+more MapReduce jobs depending on the join strategy (common-join,
+map-join, or bucket-map-join).
+
+\begin{researchspotlight}{Thusoo et al. (2009) --- Hive: A Warehousing Solution over a Map-Reduce Framework}
+\textbf{Citation:} Thusoo, A., et~al.\ (2009). Hive -- A Warehousing
+Solution over a Map-Reduce Framework. \textit{Proceedings of the
+VLDB Endowment}, 2(2):1626--1629. \parencite{Hive2009}
+
+\smallskip\noindent
+\textbf{Key insight:} The paper's central argument is that SQL is the
+right interface for large-scale data analysis---not because SQL is
+technically superior to MapReduce, but because SQL is what hundreds
+of millions of analysts already know. Hive's contribution is a
+translation layer, not a new programming model.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Defined the Hive data model: tables, partitions, buckets,
+        and complex data types (arrays, maps, structs) as SQL
+        extensions compatible with semi-structured data.
+  \item Introduced the \emph{Metastore} architecture for mapping
+        SQL schemas to HDFS directory structures, enabling schema-on-read
+        while providing schema-on-write semantics for the SQL layer.
+  \item Demonstrated that a HiveQL-to-MapReduce compiler could express
+        all SQL-92 analytics workloads (aggregation, joins,
+        subqueries, user-defined functions) on petabyte datasets.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} Hive is the most-used large-scale SQL
+engine in the history of open-source data engineering. Its Metastore
+is now an independent component used by Spark SQL, Presto/Trino,
+and Amazon Athena as their shared table catalog. The HiveQL dialect
+has become the \emph{de facto} standard for analytical SQL over
+big data platforms, influencing the syntax of SparkSQL, BigQuery,
+and Snowflake.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Apache HBase: Column-Family NoSQL on Hadoop}
+\label{sec:hbase}
+%%====================================================================
+
+MapReduce, Pig, and Hive are all batch processing tools: they read
+from HDFS, process data, and write back to HDFS, with latencies
+measured in minutes to hours. There is a class of workload for which
+this latency is unacceptable: applications that need to read or write
+individual records by key in milliseconds---user profile lookups,
+messaging systems, real-time recommendation updates, and fraud
+scoring.
+
+Conventional HDFS provides no such capability: its read path requires
+a NameNode round trip and a DataNode TCP connection per block,
+delivering 50--200 ms latency per operation. Apache HBase, modelled
+directly on Google's Bigtable \parencite{Bigtable2006}, provides
+\emph{random read/write access} at sub-10 ms latency on data stored
+on HDFS---bridging the gap between the Hadoop ecosystem and the
+performance requirements of operational applications.
+
+%--------------------------------------------------------------------
+\subsection{The HBase Data Model}
+\label{subsec:hbase-model}
+%--------------------------------------------------------------------
+
+HBase stores data in a model that differs fundamentally from both the
+relational model and the key-value model.
+
+\begin{defbox}{The HBase Data Model}
+An HBase table is a sorted map of:
+\[
+(\text{row\_key},\; \text{column\_family}:\text{qualifier},\; \text{timestamp}) \;\longrightarrow\; \text{value}
+\]
+\begin{itemize}
+  \item \textbf{Row key:} an arbitrary byte array, lexicographically
+        sorted. Row key design is the central HBase schema design
+        decision; the entire table is physically sorted by row key,
+        enabling efficient range scans.
+  \item \textbf{Column family:} a named group of columns, defined at
+        table creation time. All columns in a family are stored
+        together on disk.
+  \item \textbf{Column qualifier:} a dynamic column name within a
+        family, created on the fly without altering the table schema.
+        A single row can have zero or thousands of qualifiers within
+        a family.
+  \item \textbf{Timestamp:} each cell stores multiple versions,
+        indexed by timestamp. The most recent version is returned by
+        default; older versions are accessible by specifying a
+        timestamp.
+\end{itemize}
+\end{defbox}
+
+Consider a social network's user activity table:
+
+\begin{lstlisting}[style=pseudocode, caption={HBase data model: user activity table}]
+# Row structure: (row_key, column_family:qualifier, timestamp) -> value
+
+# User u-10042's profile
+("u-10042", "profile:name",     T3) -> "Ada Lovelace"
+("u-10042", "profile:country",  T3) -> "GB"
+("u-10042", "profile:join_date",T1) -> "2019-03-14"
+
+# User u-10042's activity (sparse: not every qualifier exists for every user)
+("u-10042", "activity:last_login",  T5) -> "2024-01-15T14:22:31Z"
+("u-10042", "activity:post_count",  T4) -> "847"
+("u-10042", "activity:follower_ct", T4) -> "12941"
+
+# Multiple versions: profile:name was updated
+("u-10042", "profile:name", T1) -> "Ada Byron"
+("u-10042", "profile:name", T3) -> "Ada Lovelace"  <- default (latest)
+\end{lstlisting}
+
+The row key design \texttt{u-10042} is intentional: all rows for a
+user's profile and activity are co-located in the same row, enabling
+an atomic, single-row fetch of the complete user record without a
+join. This \term{denormalisation by design} is characteristic of
+column-family databases and reflects the NoSQL principle that schema
+design should optimise for the read access pattern, not for
+normalisation.
+
+%--------------------------------------------------------------------
+\subsection{HBase Architecture}
+\label{subsec:hbase-arch}
+%--------------------------------------------------------------------
+
+HBase's architecture closely mirrors the GFS/HDFS master-worker
+pattern, adapted for random access.
+
+The \term{HMaster} is the cluster coordinator. It handles table
+creation, deletion, and schema changes; assigns \term{regions}
+(contiguous ranges of row keys) to \term{RegionServers}; and
+monitors RegionServer health via ZooKeeper. The HMaster is not in
+the read/write data path---all client I/O goes directly to
+RegionServers after the initial routing lookup.
+
+\term{RegionServers} are the worker processes that handle all
+read and write operations. Each RegionServer manages between 10 and
+1,000 regions. When a client writes a record, the RegionServer:
+\begin{enumerate}
+  \item Appends the write to the \term{Write-Ahead Log} (WAL)---an
+        append-only HDFS file that ensures durability even if the
+        RegionServer crashes before flushing to disk.
+  \item Writes the record into the \term{MemStore}: an in-memory
+        sorted map (implemented as a Red-Black tree). All reads
+        first check the MemStore.
+  \item Returns success to the client.
+\end{enumerate}
+
+When the MemStore grows beyond a threshold (default 128\MB), it is
+\term{flushed} to HDFS as an immutable \term{HFile} (a sorted,
+block-compressed file in the HDFS namespace). Reads are served from
+a combination of the MemStore (for recent writes) and HFiles (for
+older data), with a Bloom filter on each HFile to avoid unnecessary
+disk reads for absent keys.
+
+Over time, many small HFiles accumulate for a region. \term{Compaction}
+periodically merges HFiles into larger, consolidated files, eliminating
+deleted records and expired versions. This is the LSM-tree (Log-Structured
+Merge-tree) storage model: by converting all writes into sequential
+appends (WAL and HFile flushes), HBase achieves write throughput
+competitive with hash-based databases while maintaining sorted order
+for efficient range scans.
+
+\begin{researchspotlight}{Chang et al. (2006) --- Bigtable: A Distributed Storage System for Structured Data}
+\textbf{Citation:} Chang, F., et~al.\ (2006). Bigtable: A Distributed
+Storage System for Structured Data. \textit{Proceedings of the 7th
+USENIX OSDI Conference}, pp.\ 205--218. \parencite{Bigtable2006}
+
+\smallskip\noindent
+\textbf{Key insight:} Bigtable demonstrates that a single, flexible
+data model---the sorted, multi-dimensional map---can efficiently
+support workloads as diverse as web indexing (sparse, write-heavy),
+Google Earth (large values, read-heavy), and Google Finance
+(time-series with many versions). The same model that serves all
+of Google's internal applications is now accessible to any developer
+through HBase and Google Cloud Bigtable.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Introduced the \emph{column family} abstraction---grouping
+        related columns for co-location on disk---which enables
+        efficient access to subsets of columns without reading
+        entire rows.
+  \item Described the \emph{Tablet} architecture (equivalent to
+        HBase's Region): range-partitioned, sorted data units
+        managed by a Tablet Server, with the master handling
+        only assignment and load balancing.
+  \item Demonstrated the LSM-tree storage model in a production
+        distributed system, establishing the architectural pattern
+        that HBase, Cassandra, RocksDB, and LevelDB all follow.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} Bigtable is cited in over 13,000 papers.
+HBase (the open-source implementation) serves as the storage backend
+for Apache Phoenix (SQL on HBase), Facebook's internal messaging
+infrastructure (1 billion messages per day at peak), and numerous
+real-time recommendation systems. Google Cloud Bigtable (the managed
+service version) is used by companies including Spotify, Dow Jones,
+and T-Mobile.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Ecosystem Tool Selection}
+\label{sec:tool-selection}
+%%====================================================================
+
+With four tools in the Hadoop processing stack---raw MapReduce, Pig,
+Hive, and HBase---the practical question for a data engineer is which
+tool to use for a given problem. The selection matrix below provides
+a decision framework based on access pattern, latency requirement,
+user skill set, and data structure.
+
+\begin{table}[ht]
+\centering
+\caption{Hadoop processing stack tool selection matrix}
+\label{tab:tool-selection}
+\renewcommand{\arraystretch}{1.55}
+\begin{tabular}{L{2.2cm} L{2.6cm} L{1.6cm} L{1.4cm} L{3.0cm}}
+\toprule
+\textbf{Tool} & \textbf{Best use case} & \textbf{Latency} & \textbf{Interface} & \textbf{Not suited for} \\
+\midrule
+Raw MapReduce & Custom iterative algorithms; tight performance control & Hours & Java & Interactive queries; rapid development \\
+Apache Pig    & Multi-step ETL; ad hoc data exploration; complex transforms & Hours & Pig Latin (script) & Interactive queries; SQL-familiar analysts \\
+Apache Hive   & Reporting \& BI; data warehouse queries; SQL analysts & Minutes (batch) & HiveQL (SQL) & Sub-second queries; random reads \\
+Apache HBase  & Random read/write; operational data; real-time lookups & $<$10 ms & Java API / REST & Full table scans; complex analytics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A practical guideline: use \textbf{Hive} as the default for SQL-capable
+analysts running reporting and BI workloads over HDFS data;
+use \textbf{Pig} when a pipeline requires complex multi-step ETL
+that would be awkward to express in SQL; use \textbf{raw MapReduce}
+when performance tuning or an algorithm that does not map cleanly to
+Map/Reduce (such as iterative graph algorithms) is required; use
+\textbf{HBase} when the application requires sub-millisecond random
+access to individual records by key. In practice, Hive over Apache
+Tez (which avoids materialising intermediate results to HDFS) or
+Hive over Spark (Chapter~\ref{ch:spark}) replaces much of the original
+Hive-on-MapReduce workload, delivering 10--100$\times$ lower latency.
+
+%%====================================================================
+\section{Case Study: Facebook Data Infrastructure (2008--2012)}
+\label{sec:facebook-case}
+%%====================================================================
+
+\begin{casestudy}{Facebook --- Hive and HBase at the Petabyte Frontier}
+
+\textbf{Background.}
+By 2008, Facebook had accumulated more than 2.5 petabytes of user data
+and was generating approximately 15 terabytes of new compressed data
+per day. The company needed to provide its data analytics team---several
+hundred analysts---with the ability to query this data interactively
+in SQL, without requiring them to write MapReduce jobs. Simultaneously,
+Facebook Messenger was processing over one billion messages per day and
+required sub-millisecond random access to individual message threads
+for retrieval.
+
+\smallskip
+\textbf{The Hive deployment.}
+Facebook's data infrastructure team developed Hive internally and
+open-sourced it to Apache in 2008. By 2010, Facebook's Hadoop cluster
+had grown to over 2,400 nodes with 30\PB\ of storage, running over
+7,500 Hive queries per day submitted by analysts across the company.
+The Hive Metastore tracked more than 5,000 registered tables, the
+largest of which---Facebook's ``events'' table---exceeded 1\PB\ of
+compressed ORC data.
+
+A key engineering challenge was query latency. Early Hive-on-MapReduce
+queries over large tables took 20--60 minutes due to MapReduce job
+startup overhead and the requirement to materialise all intermediate
+results to HDFS. Facebook's team introduced several optimisations
+that were later contributed to open source: predicate push-down
+(filter early), partition pruning (read only relevant date partitions),
+and index-based skip-scan. These reduced the median analyst query
+time from 35 minutes to under 5 minutes.
+
+\smallskip
+\textbf{The HBase deployment.}
+Facebook used HBase as the storage backend for Facebook Messenger
+and Inbox. Each user's message thread was stored as an HBase row,
+with individual messages as column qualifier-value pairs. The row
+key design was critical: Facebook chose a reversed-timestamp prefix
+to ensure that the most recent messages for a thread were
+lexicographically adjacent on disk, enabling efficient range scans
+for loading a conversation inbox.
+
+At peak, Facebook's HBase cluster served over \textbf{one billion
+messages per day} across a cluster of several hundred RegionServers.
+The P99 read latency for fetching a user's 20 most recent messages
+was approximately 8 milliseconds---competitive with purpose-built
+NoSQL databases and far below the latency achievable with
+HDFS-native batch access.
+
+\smallskip
+\textbf{The architectural lesson.}
+Facebook's use of both Hive and HBase simultaneously---on the same
+underlying HDFS cluster---illustrates a key principle of data
+engineering: different workloads require different tools, but those
+tools can share the same storage layer. Hive queries and HBase
+operations both read from and write to HDFS DataNodes; the
+NameNode manages the unified namespace. This shared storage model
+avoids data duplication and simplifies the operational burden of
+managing two separate storage systems.
+
+By 2012, Facebook's Hadoop cluster had grown to over 100 petabytes,
+making it the largest known Hadoop deployment in the world at that
+time. The infrastructure team published a series of papers and blog
+posts documenting their engineering decisions, which directly
+influenced the design of subsequent generations of distributed
+analytics tools---particularly the development of Apache Spark, which
+addressed the primary limitation of the Hive-on-MapReduce stack:
+latency.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch4-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{MapReduce} resolves two limitations of prior parallel
+        computing paradigms: unlike SQL, it requires no predefined
+        schema and handles unstructured data on HDFS; unlike MPI, it
+        handles fault tolerance automatically through deterministic
+        task re-execution.
+
+  \item The MapReduce model requires the programmer to provide two
+        functions: \textbf{map} $(k_1, v_1) \to \text{list}(k_2, v_2)$
+        and \textbf{reduce} $(k_2, \text{list}(v_2)) \to \text{list}(k_3, v_3)$.
+        The framework handles parallelisation, shuffle-and-sort, and
+        fault recovery.
+
+  \item The \textbf{Combiner} (local mini-reducer) reduces shuffle
+        network traffic for commutative-associative operations. The
+        \textbf{Partitioner} controls key-to-reducer assignment via
+        hash or custom range logic.
+
+  \item \textbf{Fault tolerance} is achieved through deterministic task
+        re-execution on failure; \textbf{speculative execution} launches
+        backup tasks for slow stragglers.
+
+  \item \textbf{Apache Pig} compiles a dataflow scripting language
+        (Pig Latin) to MapReduce, enabling multi-step ETL without
+        Java programming.
+
+  \item \textbf{Apache Hive} compiles HiveQL (SQL dialect) to
+        MapReduce. The \textbf{Metastore} maps SQL tables to HDFS paths.
+        \textbf{Partitioning} enables partition pruning; \textbf{bucketing}
+        accelerates equi-joins and sampling.
+
+  \item \textbf{Apache HBase} provides random read/write access at
+        $<$10 ms latency on HDFS, using the LSM-tree model: WAL for
+        durability, MemStore for recent writes, HFiles for historical
+        data, compaction to merge HFiles.
+
+  \item Tool selection: Hive for SQL analytics; Pig for scripted ETL;
+        raw MapReduce for custom algorithms; HBase for random-access
+        operational data.
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch4-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq Why does SQL on a single server fail for petabyte-scale data on HDFS?
+Name three specific assumptions SQL makes that do not hold in the HDFS
+environment.
+
+\sq Write the type signatures of the Map and Reduce functions in the
+MapReduce model. What is the framework's responsibility between the Map
+and Reduce phases?
+
+\sq Trace the word count MapReduce computation for the input string
+``the cat sat on the mat the cat''. List every $(k, v)$ pair emitted
+by the Map function, the grouped shuffle output, and the final
+$(k, v)$ output of the Reduce function.
+
+\sq What is the Combiner? For what class of Reduce functions can a
+Combiner be applied safely? Give an example of a Reduce function for
+which a Combiner would give incorrect results.
+
+\sq What is speculative execution in MapReduce? Under what circumstances
+does the framework launch a backup task, and why does it not affect
+the correctness of the computation?
+
+\sq A MapReduce job has 1,000 Map tasks and 50 Reduce tasks. Describe
+what happens when one Map task fails partway through execution.
+Describe what happens when one Reduce task fails after it has already
+fetched 80\% of its shuffle data.
+
+\sq What is the Hive Metastore? What information does it store, and what
+would happen to a HiveQL query if the Metastore database were
+unavailable?
+
+\sq Explain partition pruning in Hive. A table has 365 daily partitions
+each containing 500\GB\ of ORC data (total 182\TB). A query filters
+on a single day. How much data does Hive read, and what is the speedup
+factor compared to a full-table scan?
+
+\sq What is the HBase data model? Describe the four coordinates that
+uniquely identify a cell in an HBase table.
+
+\sq Explain the LSM-tree write path in HBase: what happens to a client
+write at each of the WAL, MemStore, and HFile stages?
+
+\sq What is HBase compaction? Explain the difference between minor
+and major compaction, and why compaction is necessary for read
+performance.
+
+\sq Compare Apache Pig and Apache Hive on three dimensions: target
+user, language paradigm, and primary use case.
+
+\sq A data engineer needs to find the top 10 most active users in a
+1-petabyte social media activity dataset (schema: user\_id, event\_type,
+ts). Which Hadoop tool would you recommend, and why?
+
+\sq True or false, with justification: ``HBase stores data in HDFS,
+so its read latency is determined by HDFS block access latency
+(50--200 ms).''\quad\textit{(Hint: consider the MemStore and the
+block cache.)}
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{MapReduce Shuffle Volume Analysis.}
+A MapReduce word count job processes a 1\TB\ corpus of English text.
+The average word length is 5 characters, and the average word
+frequency is 100 occurrences per 128-\MB\ input split. There are
+100,000 distinct words in the corpus. The cluster has 500 Map tasks.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Estimate the total number of $(word, 1)$ pairs emitted by all
+        Map tasks (assume 128\MB\ per split, and that the text has an
+        average word density of 150 words per KB).
+  \item Estimate the total shuffle data volume in GB without a
+        Combiner (each pair requires approximately $|word| + 8$ bytes
+        for the key-value pair overhead).
+  \item With a Combiner enabled, each Map task emits at most one
+        pair per distinct word. Estimate the new shuffle volume and
+        the reduction factor.
+  \item If the cluster's inter-node network bandwidth is 10 Gbit/s
+        per node, and the shuffle phase transfers all data through the
+        network simultaneously, estimate the minimum time for the
+        shuffle to complete (a) without and (b) with the Combiner.
+\end{enumerate}
+
+\ap \textbf{Hive Partitioning Strategy.}
+An e-commerce company has a \texttt{transactions} table (500\TB\
+total, 5 years of data) with columns: \texttt{transaction\_id},
+\texttt{customer\_id}, \texttt{product\_id}, \texttt{amount},
+\texttt{country}, \texttt{ts} (timestamp).
+
+\begin{enumerate}[label=(\alph*)]
+  \item The company's most frequent query pattern is:
+        ``What was the total revenue per product in Germany in Q1 2024?''
+        Propose a partitioning scheme. Which column(s) should be the
+        partition key(s), and how much data does the optimised query read?
+  \item A second query pattern is: ``For a given customer, list all
+        their transactions across all time.'' Evaluate whether your
+        partitioning scheme from (a) also optimises this query.
+        If not, propose how to handle both query patterns (hint:
+        consider secondary indexes or a separate HBase table).
+  \item If the data is additionally bucketed on \texttt{customer\_id}
+        into 256 buckets, and a join query joins this table with a
+        30-GB \texttt{customers} dimension table on \texttt{customer\_id},
+        explain what bucket-map-join does and estimate the speedup
+        over a common join.
+\end{enumerate}
+
+\ap \textbf{HBase Row Key Design Analysis.}
+A healthcare analytics system stores patient vital signs readings in
+HBase. Each reading has: \texttt{patient\_id} (8-char string),
+\texttt{metric} (heart\_rate, SpO2, temperature, blood\_pressure),
+and \texttt{timestamp} (epoch milliseconds).
+
+The following three row key designs are proposed:
+
+\begin{itemize}
+  \item \textbf{Design A:} \texttt{patient\_id + timestamp}
+        (e.g., \texttt{P-000042|1705315200000})
+  \item \textbf{Design B:} \texttt{timestamp + patient\_id}
+        (e.g., \texttt{1705315200000|P-000042})
+  \item \textbf{Design C:} \texttt{patient\_id + reverse\_timestamp}
+        (e.g., \texttt{P-000042|9994684799999})
+\end{itemize}
+
+\begin{enumerate}[label=(\alph*)]
+  \item For Design B, describe the write hotspot problem: if all
+        writes have approximately the same timestamp, what happens to
+        the distribution of writes across RegionServers?
+  \item For Design A, explain how a range scan for ``all vitals for
+        patient P-000042 in the last 24 hours'' would be executed.
+  \item For Design C (reverse timestamp), explain what a scan for
+        ``most recent 10 readings for patient P-000042'' looks like.
+        Why does this design outperform Design A for this access pattern?
+  \item Propose a salting strategy for Design A that eliminates the
+        write hotspot for high-frequency patients.
+\end{enumerate}
+
+\ap \textbf{MapReduce vs. Pig vs. Hive Performance Comparison.}
+A financial services firm must compute the total trading volume per
+stock symbol per day for one year of trade records (1.5\TB\, 150
+DataNodes, 10 Gbit/s network). Estimate completion time for each tool:
+
+\begin{enumerate}[label=(\alph*)]
+  \item \textbf{Raw MapReduce} (Java): Map emits \texttt{(symbol+date, amount)};
+        Reduce sums. Assume 80\% data locality, 200\MB/s local read.
+        50 Reduce tasks. Estimate total Map I/O time, shuffle time
+        (assume 20\% of input volume is shuffled), and Reduce time.
+  \item \textbf{Apache Pig}: same logical plan as MapReduce, compiled
+        to one MapReduce job with 30 seconds additional startup overhead
+        per job. Estimate total elapsed time.
+  \item \textbf{Apache Hive on MapReduce}: same as Pig with 60 seconds
+        additional startup overhead (Metastore lookup + plan compilation).
+        But if the table is partitioned by \texttt{date}, and the query
+        selects a 30-day period, how much data is read, and what is the
+        new estimated time?
+  \item Which tool minimises calendar time? Which minimises engineering
+        effort? Which minimises query latency for an analyst who runs
+        this query daily?
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{MapReduce Pipeline for a Search Engine Inverted Index.}
+Design a MapReduce pipeline that builds a compressed inverted index
+from a 500-terabyte web crawl stored in HDFS. Each crawl record is
+a JSON document containing the URL, crawl timestamp, and raw HTML.
+The inverted index maps each term to a posting list of
+\texttt{(url, tf-idf\_score)} pairs, sorted by score descending.
+
+Your design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The number of MapReduce stages required and what each stage
+        computes (hint: tf-idf requires knowing the total document
+        frequency of each term across the entire corpus, which is not
+        available in a single pass).
+  \item The Map and Reduce function type signatures and logic for
+        each stage.
+  \item The Partitioner strategy to ensure all records for the same
+        term go to the same Reducer in the appropriate stage.
+  \item How the Combiner can be applied in Stage 1 and what the
+        network savings are for a typical term with 10,000 occurrences
+        per 128-MB input split.
+  \item How the pipeline handles the case where a single extremely
+        common term (e.g., ``the'') causes a Reducer skew: the single
+        Reducer responsible for ``the'' processes 100$\times$ more data
+        than the average Reducer.
+\end{enumerate}
+
+\dpr \textbf{HBase Schema Design for a Real-Time Recommendation System.}
+An online streaming music service needs to store and serve user
+listening history and song metadata for a real-time recommendation
+engine. Requirements:
+\begin{itemize}
+  \item 50 million users; each user has an average of 2,000 play
+        events, growing at 10 events/day.
+  \item Each play event: \texttt{user\_id}, \texttt{song\_id},
+        \texttt{play\_ts}, \texttt{duration\_played\_sec},
+        \texttt{skipped} (boolean).
+  \item The recommendation engine reads the 200 most recent plays
+        for a user in $<$5 ms.
+  \item A nightly batch job (Hive or Spark) must scan all plays
+        in the last 7 days across all users to recompute
+        collaborative filtering features.
+\end{itemize}
+
+Design the HBase schema. Your design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The table name(s), column families, and column qualifiers.
+  \item The row key format, with explicit justification for how it
+        supports the 5-ms recommendation read requirement.
+  \item How the ``most recent 200 plays'' query is executed
+        (scan direction, stop condition, use of reverse timestamp).
+  \item How to configure cell versioning to automatically expire
+        play events older than 90 days without a separate compaction job.
+  \item How the nightly batch Hive/Spark job reads from HBase
+        (what API it uses and what the scan looks like).
+  \item The estimated RegionServer count if each region is limited
+        to 10\GB, and the strategy for pre-splitting regions at
+        table creation to avoid write hotspots.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{MapReduce Word Count in Python (MRJob-style).}
+Implement a word count MapReduce job in pure Python without any
+framework, simulating the Map, Shuffle/Sort, and Reduce phases.
+Extend it with a Combiner and measure the shuffle volume reduction.
+
+\begin{lstlisting}[style=pyspark, caption={PE4.1: MapReduce word count with Combiner}]
+import re
+from collections import defaultdict
+
+documents = [
+    ("doc1", "To be or not to be that is the question"),
+    ("doc2", "All the world is a stage and all the men and women"),
+    ("doc3", "To be is to do to do is to be to be is to do"),
+    ("doc4", "Be not afraid of greatness some are born great"),
+]
+
+# ---------- MAP PHASE ----------
+def mapper(doc_id, text):
+    """Emit (word, 1) for every word in text."""
+    for word in re.findall(r'[a-z]+', text.lower()):
+        yield (word, 1)
+
+# ---------- COMBINER (optional local aggregation) ----------
+def combiner(map_output):
+    """
+    Locally aggregate (word, 1) pairs from a single mapper.
+    Input:  iterable of (word, 1) tuples
+    Output: iterable of (word, local_count) tuples
+    """
+    local_counts = defaultdict(int)
+    for word, count in map_output:
+        local_counts[word] += count
+    return list(local_counts.items())
+
+# ---------- SHUFFLE AND SORT ----------
+def shuffle_and_sort(all_map_output):
+    """
+    Group all (word, value) pairs by word.
+    Returns dict: word -> list of values
+    """
+    grouped = defaultdict(list)
+    for word, val in all_map_output:
+        grouped[word].append(val)
+    return dict(sorted(grouped.items()))  # sorted by key
+
+# ---------- REDUCE PHASE ----------
+def reducer(word, values):
+    """Sum all counts for a word."""
+    return (word, sum(values))
+
+# ---------- JOB RUNNER ----------
+def run_mapreduce(documents, use_combiner=True):
+    all_map_output = []
+    per_mapper_counts = []
+
+    for doc_id, text in documents:
+        map_out = list(mapper(doc_id, text))
+        per_mapper_counts.append(len(map_out))
+
+        if use_combiner:
+            map_out = combiner(map_out)
+
+        all_map_output.extend(map_out)
+
+    shuffle_out = shuffle_and_sort(all_map_output)
+
+    results = {}
+    for word, values in shuffle_out.items():
+        _, count = reducer(word, values)
+        results[word] = count
+
+    shuffle_volume = sum(len(str(w)) + len(str(v))
+                         for w, v in all_map_output)
+    return results, shuffle_volume, per_mapper_counts
+
+# Run without and with Combiner
+res_no_comb,  vol_no,  cnts_no  = run_mapreduce(documents, use_combiner=False)
+res_with_comb, vol_yes, cnts_yes = run_mapreduce(documents, use_combiner=True)
+
+print("Top 10 words:")
+for w, c in sorted(res_with_comb.items(), key=lambda x: -x[1])[:10]:
+    print(f"  {w:<15} {c}")
+
+print(f"\nShuffle volume WITHOUT combiner: {vol_no:,} bytes")
+print(f"Shuffle volume WITH    combiner: {vol_yes:,} bytes")
+print(f"Reduction factor: {vol_no / vol_yes:.1f}x")
+\end{lstlisting}
+
+\pe \textbf{HiveQL Query Writing and Partitioning Analysis (Python simulation).}
+Simulate the effect of Hive partitioning on query I/O by implementing
+a partition-pruning model that shows how much data is skipped for
+various query predicates.
+
+\begin{lstlisting}[style=pyspark, caption={PE4.2: Hive partition pruning simulator}]
+import random
+from datetime import date, timedelta
+
+# Simulate a partitioned Hive table: (date, country) -> size_gb
+random.seed(42)
+countries = ["US", "GB", "DE", "FR", "JP", "IN", "BR", "AU"]
+start = date(2023, 1, 1)
+
+# Build partition metadata (what the Hive Metastore stores)
+partitions = {}
+for i in range(365):
+    dt = (start + timedelta(days=i)).isoformat()
+    for country in countries:
+        size_gb = random.uniform(0.5, 2.5)
+        partitions[(dt, country)] = round(size_gb, 3)
+
+total_tb = sum(partitions.values()) / 1024
+print(f"Total table size: {total_tb:.2f} TB across "
+      f"{len(partitions):,} partitions\n")
+
+def query_io(predicate_dt=None, predicate_country=None):
+    """
+    Simulate partition pruning for a query with optional filters.
+    predicate_dt      : exact date string or None (full scan)
+    predicate_country : country code or None (full scan)
+    Returns: (partitions_read, gb_read)
+    """
+    read = {k: v for k, v in partitions.items()
+            if (predicate_dt      is None or k[0] == predicate_dt)
+            and (predicate_country is None or k[1] == predicate_country)}
+    return len(read), sum(read.values())
+
+queries = [
+    ("Full table scan",
+     dict(predicate_dt=None, predicate_country=None)),
+    ("Single date (2024-01-15)",
+     dict(predicate_dt="2024-01-15", predicate_country=None)),
+    ("Single country (US), all dates",
+     dict(predicate_dt=None, predicate_country="US")),
+    ("Single date + country (2024-01-15, DE)",
+     dict(predicate_dt="2024-01-15", predicate_country="DE")),
+]
+
+total_parts = len(partitions)
+total_gb    = sum(partitions.values())
+
+print(f"{'Query':<45} {'Parts read':>12} {'GB read':>10} {'Pruned':>8}")
+print("-" * 78)
+for desc, kwargs in queries:
+    n_parts, gb = query_io(**kwargs)
+    pruned_pct = (1 - n_parts / total_parts) * 100
+    print(f"{desc:<45} {n_parts:>12,} {gb:>10.1f} {pruned_pct:>7.1f}%")
+\end{lstlisting}
+
+\pe \textbf{HBase MemStore and Compaction Simulator (Python).}
+Simulate HBase's write path: WAL append, MemStore insertion, flush to
+HFile, and minor compaction.
+
+\begin{lstlisting}[style=pyspark, caption={PE4.3: HBase write path and compaction simulator}]
+import time
+
+MEMSTORE_THRESHOLD = 10  # flush after 10 entries (demo scale)
+COMPACTION_THRESHOLD = 3  # compact after 3 HFiles
+
+class HBaseRegionSimulator:
+    def __init__(self, region_name):
+        self.region_name   = region_name
+        self.wal           = []          # Write-Ahead Log (list of ops)
+        self.memstore      = {}          # row_key -> {col -> value}
+        self.hfiles        = []          # list of sorted dicts
+        self.write_count   = 0
+
+    def put(self, row_key, column, value):
+        ts = int(time.time() * 1000)
+        # 1. Append to WAL
+        self.wal.append({"op": "PUT", "row": row_key,
+                          "col": column, "val": value, "ts": ts})
+        # 2. Write to MemStore
+        if row_key not in self.memstore:
+            self.memstore[row_key] = {}
+        self.memstore[row_key][column] = (value, ts)
+        self.write_count += 1
+
+        # 3. Flush if threshold reached
+        if len(self.memstore) >= MEMSTORE_THRESHOLD:
+            self._flush()
+
+    def _flush(self):
+        if not self.memstore:
+            return
+        # Sort by row key (lexicographic) and materialise as HFile
+        hfile = dict(sorted(self.memstore.items()))
+        self.hfiles.append(hfile)
+        print(f"  [FLUSH] MemStore -> HFile #{len(self.hfiles)} "
+              f"({len(hfile)} rows)")
+        self.memstore.clear()
+
+        # Compact if too many HFiles
+        if len(self.hfiles) >= COMPACTION_THRESHOLD:
+            self._minor_compact()
+
+    def _minor_compact(self):
+        print(f"  [COMPACT] Merging {len(self.hfiles)} HFiles...")
+        merged = {}
+        for hfile in self.hfiles:
+            for row, cols in hfile.items():
+                if row not in merged:
+                    merged[row] = {}
+                merged[row].update(cols)
+        self.hfiles = [dict(sorted(merged.items()))]
+        print(f"  [COMPACT] Done. 1 HFile with {len(merged)} rows.")
+
+    def get(self, row_key):
+        # Check MemStore first
+        if row_key in self.memstore:
+            return {"source": "memstore", "data": self.memstore[row_key]}
+        # Scan HFiles (most recent first)
+        for hfile in reversed(self.hfiles):
+            if row_key in hfile:
+                return {"source": "hfile", "data": hfile[row_key]}
+        return None
+
+    def status(self):
+        print(f"\nRegion '{self.region_name}' status:")
+        print(f"  WAL entries : {len(self.wal)}")
+        print(f"  MemStore    : {len(self.memstore)} rows")
+        print(f"  HFiles      : {len(self.hfiles)}")
+
+# Simulate 25 writes to a user-activity HBase region
+region = HBaseRegionSimulator("user-activity-0001")
+
+users = [f"u-{i:05d}" for i in range(1, 8)]
+import random; random.seed(0)
+for _ in range(25):
+    uid = random.choice(users)
+    col = random.choice(["activity:logins", "activity:purchases",
+                          "profile:name", "profile:country"])
+    val = str(random.randint(1, 1000))
+    region.put(uid, col, val)
+
+region._flush()  # flush remaining MemStore
+region.status()
+
+# Test a GET
+print("\nGET u-00001:", region.get("u-00001"))
+\end{lstlisting}
