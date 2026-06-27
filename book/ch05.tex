@@ -1,0 +1,1696 @@
+%% ch05.tex — Chapter 5: Resource Management, File Formats, and I/O Optimisation
+%% Part of "Data Engineering" textbook
+
+\chapter{Resource Management, File Formats, and I/O Optimisation}
+\label{ch:yarn-formats}
+
+\epigraph{\textit{``Storing data in HDFS is cheap. Storing it in the wrong format
+is expensive --- you pay the cost every single time you query it.''}}{Julien Le Dem, Apache Parquet co-creator, 2014}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Identify the specific bottlenecks of the Hadoop 1.x JobTracker
+        architecture and explain why they imposed an approximate
+        4{,}000-node scalability ceiling.
+  \item Describe YARN's three-component architecture---Resource\-Manager,
+        NodeManager, and ApplicationMaster---and trace the complete
+        job execution flow from client submission to container completion.
+  \item Explain what a YARN Container is, why it replaced the fixed
+        MapReduce \emph{slot} model, and how it enables framework-agnostic
+        resource sharing.
+  \item Compare YARN's three pluggable schedulers---FIFO, Capacity, and
+        Fair---and select the appropriate scheduler for a given
+        multi-tenant production scenario.
+  \item Describe YARN's three-tier fault tolerance model (NodeManager,
+        ApplicationMaster, and ResourceManager failures) and identify
+        which tier each failure type is handled at.
+  \item Explain the fundamental difference between row-oriented and
+        columnar storage, derive the I/O reduction formula for a
+        $k$-column query on a $c$-column table, and apply it to a
+        concrete performance calculation.
+  \item Describe the internal structure of a Parquet file---row groups,
+        column chunks, and pages---and explain how the footer enables
+        predicate pushdown to skip row groups without reading them.
+  \item Compare Avro, Parquet, and ORC on orientation, schema model,
+        splittability, compression, and primary use case; and select
+        the appropriate format for a given data engineering workload.
+  \item Explain the splittability property for compression codecs and
+        explain why Gzip-compressed CSV is an anti-pattern in HDFS.
+  \item Describe Dominant Resource Fairness (DRF) and explain why
+        single-resource fairness metrics fail for heterogeneous workloads.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapters~\ref{ch:hdfs} and~\ref{ch:mapreduce} established the two
+pillars of the original Hadoop stack: HDFS stores data, and MapReduce
+processes it. By 2012, however, two engineering problems were threatening
+the viability of that stack at production scale.
+
+The first problem was \emph{scheduling}. A Hadoop 1.x cluster could only
+run MapReduce jobs; when Apache Spark (2010) and Apache Tez (2013)
+emerged as significantly faster alternatives, they had no path to cluster
+resources because the MapReduce JobTracker was hardcoded to manage only
+MapReduce tasks. Organisations that wanted to use Spark had to maintain
+a completely separate cluster, with all the associated duplication of
+hardware, operations effort, and data movement overhead.
+
+The second problem was \emph{storage format}. As analytical workloads
+evolved from full-table scans to targeted column selections---driven by
+the growth of SQL analytics (Hive) and machine learning feature
+engineering---the row-oriented file formats that Hadoop had inherited
+(CSV, JSON, sequence files) became serious performance bottlenecks.
+Selecting 3 columns from a 100-column CSV table on HDFS required reading
+and discarding 97\% of the data on every query.
+
+YARN \parencite{YARN2013} and columnar file formats (Parquet, ORC)
+were the industry's responses to these two problems. This chapter covers
+both in depth, then examines the compression and I/O optimisation
+techniques that complete the performance picture.
+
+%%====================================================================
+\section{The Hadoop 1.x Scheduling Bottleneck}
+\label{sec:hadoop1-bottleneck}
+%%====================================================================
+
+In Hadoop 1.x, cluster resource management and MapReduce job execution
+were fused into a single process: the \term{JobTracker}. The JobTracker
+performed four distinct functions simultaneously:
+\begin{enumerate}
+  \item Accepted job submissions from clients.
+  \item Allocated fixed \term{slots}---Map slots and Reduce slots---to
+        tasks running on TaskTrackers.
+  \item Monitored every running task and detected failures.
+  \item Maintained the job history for completed jobs.
+\end{enumerate}
+
+This fusion created three interlocking problems that collectively
+prevented Hadoop 1.x from scaling beyond approximately 4{,}000 nodes.
+
+\textbf{Framework lock-in.} The slot allocation model was hardcoded for
+MapReduce. A Map slot could run exactly one Map task; a Reduce slot could
+run exactly one Reduce task. There was no abstraction for the resource
+requirements of a non-MapReduce task---no way for a Spark executor to
+request a container of 8\GB\ RAM and 4 CPU cores, for example. Any
+framework that needed to run on the cluster had to pretend to be MapReduce.
+
+\textbf{Rigid slot granularity.} Map slots and Reduce slots were
+configured with fixed memory and CPU limits cluster-wide. A job with
+small Map tasks and large Reduce tasks could not allocate more memory
+to Reducers at the expense of Mappers; both were constrained by the
+same slot size. A node with 10 Map slots and 0 available Reduce slots
+could not repurpose its unused Map slots to serve waiting Reduce tasks,
+even if it had spare RAM and CPU capacity.
+
+\textbf{Single-point scalability.} The JobTracker's memory footprint
+grew linearly with the number of running tasks: each task required a
+metadata entry in the JobTracker's heap. At 4{,}000 nodes with 10 tasks
+per node, the JobTracker managed 40{,}000 task records simultaneously.
+Beyond this scale, JVM garbage collection pressure made the JobTracker
+unresponsive \parencite{YARN2013}.
+
+%%====================================================================
+\section{YARN: Yet Another Resource Negotiator}
+\label{sec:yarn}
+%%====================================================================
+
+Apache Hadoop YARN, published by Vavilapalli et al.\ in 2013, resolved
+all three bottlenecks through a single architectural decision: separate
+cluster resource management from application-specific execution logic
+\parencite{YARN2013}. YARN replaces the monolithic JobTracker with three
+distinct components, each with a clearly bounded responsibility.
+
+%--------------------------------------------------------------------
+\subsection{The ResourceManager}
+\label{subsec:rm}
+%--------------------------------------------------------------------
+
+The \term{ResourceManager} (RM) is the cluster-level resource scheduler.
+It runs on a dedicated master node and contains two sub-components.
+
+The \term{Scheduler} is responsible for allocating \term{containers}---
+the YARN resource abstraction---to running applications. The Scheduler
+is \emph{pluggable}: operators can choose from three built-in policies
+(described in Section~\ref{sec:schedulers}) or implement a custom policy.
+Critically, the Scheduler has no knowledge of the application logic; it
+only knows the container requirements (\texttt{\{vcores: N, memory:
+M~MB\}}) and the cluster's current capacity. This separation means the
+same Scheduler can manage MapReduce tasks, Spark executors, Samza stream
+processors, and any other future framework without modification.
+
+The \term{ApplicationsManager} accepts job submissions from clients and
+coordinates the launch of each application's first container, which will
+host the ApplicationMaster.
+
+%--------------------------------------------------------------------
+\subsection{The NodeManager}
+\label{subsec:nm}
+%--------------------------------------------------------------------
+
+A \term{NodeManager} (NM) runs on every worker node in the cluster.
+Its responsibilities are narrowly scoped to the local machine:
+\begin{itemize}
+  \item Launch containers requested by ApplicationMasters, using Linux
+        cgroups for CPU isolation and enforced memory limits.
+  \item Monitor the resource usage (CPU, RAM, disk I/O, network) of
+        every container on the local node and report to the ResourceManager
+        via periodic heartbeats.
+  \item Kill any container that exceeds its allocated memory limit to
+        protect other containers on the same node.
+  \item Aggregate container logs and upload them to HDFS for post-job
+        debugging.
+\end{itemize}
+
+The NodeManager has no global view of the cluster; it knows only about
+its own node. This is a deliberate design choice: the scalability of the
+YARN control plane depends on the RM and each NM having well-bounded
+state, with the RM collecting aggregate information rather than
+processing per-task details.
+
+%--------------------------------------------------------------------
+\subsection{The ApplicationMaster}
+\label{subsec:am}
+%--------------------------------------------------------------------
+
+The \term{ApplicationMaster} (AM) is the component that makes YARN
+framework-agnostic. One ApplicationMaster runs per submitted job, inside
+its own container allocated by the ResourceManager. The AM contains all
+application-specific logic that the old JobTracker had embedded:
+
+\begin{itemize}
+  \item \textbf{Resource negotiation:} the AM communicates with the RM to
+        request containers for its tasks. A Spark AM requests containers
+        with specific CPU and memory configurations for Spark Executors;
+        a MapReduce AM requests separate Map-phase and Reduce-phase
+        containers.
+  \item \textbf{Task placement:} the AM instructs NodeManagers to launch
+        specific tasks inside allocated containers. The AM can apply its
+        own data-locality preferences when choosing which nodes to request
+        containers from.
+  \item \textbf{Progress monitoring:} the AM tracks the progress of all
+        running tasks and re-requests containers for failed tasks.
+  \item \textbf{Framework-specific fault tolerance:} the MapReduce AM
+        implements speculative execution; the Spark AM manages executor
+        loss and task re-submission.
+\end{itemize}
+
+The AM model means YARN is, in the authors' words, ``a cluster operating
+system'' \parencite{YARN2013}: the RM and NMs are the kernel that
+manages hardware resources; the AM is a user-space process that
+implements the policy of a specific framework. Just as Linux supports
+arbitrary user-space processes, YARN supports arbitrary AMs.
+
+%--------------------------------------------------------------------
+\subsection{The Container: YARN's Resource Unit}
+\label{subsec:container}
+%--------------------------------------------------------------------
+
+\begin{defbox}{YARN Container}
+A \textbf{YARN Container} is an allocation of a specific quantity of
+cluster resources on a specific node:
+\[
+\text{Container} = \bigl\{\;\text{node} : m,\;\; \text{vCores} : n,\;\;
+                           \text{memory} : M\;\text{MB}\;\bigr\}
+\]
+The Container replaces Hadoop 1.x's fixed Map/Reduce slot with a
+flexible, application-specified resource envelope. The NodeManager
+on node $m$ enforces the allocated limits; any container exceeding
+its memory allocation is immediately killed by the NM.
+\end{defbox}
+
+The Container abstraction is the key enabler of framework diversity.
+Because a Container is specified in terms of generic resources (vCores
+and RAM)---not in terms of task types---the same Resource\-Manager can
+grant containers to a MapReduce AM requesting small (2~vCPU,\,4~GB)
+Map-task containers, a Spark AM requesting large (8~vCPU,\,32~GB)
+executor containers, and a Samza AM requesting tiny (1~vCPU,\,2~GB)
+stream-task containers, all simultaneously on the same cluster.
+
+%--------------------------------------------------------------------
+\subsection{YARN Job Execution Flow}
+\label{subsec:yarn-flow}
+%--------------------------------------------------------------------
+
+The YARN job execution follows six steps from client submission to
+completion:
+
+\begin{enumerate}
+  \item \textbf{Submit.} The client submits the job to the
+        ResourceManager's ApplicationsManager, providing the application
+        JAR (or binary), configuration, and resource requirements.
+
+  \item \textbf{Launch AM container.} The RM allocates one container on
+        an available NodeManager for the ApplicationMaster. The NM
+        launches the AM process inside that container.
+
+  \item \textbf{AM registers and requests resources.} The AM registers
+        itself with the RM and submits resource requests: a list of
+        containers with their required vCores, RAM, and preferred nodes
+        (for data locality).
+
+  \item \textbf{RM grants containers.} The Scheduler allocates containers
+        based on the scheduling policy and current cluster availability.
+        Granted containers are communicated to the AM.
+
+  \item \textbf{AM launches tasks.} For each granted container, the AM
+        contacts the appropriate NodeManager via RPC and instructs it to
+        launch a specific task process inside the container.
+
+  \item \textbf{Task execution, monitoring, and completion.} Tasks run
+        inside containers, report progress to the AM. On task completion,
+        the AM releases the container back to the RM. When all tasks
+        complete, the AM unregisters from the RM, and the RM releases
+        the AM's own container.
+\end{enumerate}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    actor/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40, rounded corners=4pt,
+                  minimum width=2.6cm, minimum height=0.75cm, align=center,
+                  font=\small\bfseries\sffamily},
+    nm/.style={rectangle, draw=DEGreen!70!black, fill=DELightGreen, rounded corners=4pt,
+               minimum width=2.2cm, minimum height=0.7cm, align=center,
+               font=\small\sffamily},
+    ambox/.style={rectangle, draw=DEAccent!80, fill=DELightAccent, rounded corners=4pt,
+                  minimum width=2.2cm, minimum height=0.7cm, align=center,
+                  font=\small\sffamily},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % Actors
+  \node[actor] (cl)  at (0,   6.5) {Client};
+  \node[actor] (rm)  at (5.0, 6.5) {Resource\-Manager};
+  \node[ambox] (am)  at (5.0, 4.0) {Application\-Master};
+  \node[nm]    (nm1) at (1.5, 1.5) {NodeManager 1};
+  \node[nm]    (nm2) at (5.0, 1.5) {NodeManager 2};
+  \node[nm]    (nm3) at (8.5, 1.5) {NodeManager 3};
+
+  % Step 1: Client -> RM
+  \draw[arr, DEAccent]
+    (cl.east) -- (rm.west)
+    node[midway, above, lbl, text=DEAccent] {\tiny \textbf{(1)} submit job};
+
+  % Step 2: RM -> NM1 (launch AM container)
+  \draw[arr, DEBlue]
+    (rm.south) to[out=-100, in=90] (nm1.north)
+    node[pos=0.4, left, lbl, text=DEBlue] {\tiny \textbf{(2)} launch\\AM container};
+
+  % Step 3: AM -> RM (register + request)
+  \draw[arr, DEAccent]
+    (am.north) -- (rm.south)
+    node[midway, right, lbl, text=DEAccent]
+         {\tiny \textbf{(3)} register\\\tiny + request containers};
+
+  % Step 4: RM -> AM (grant containers) - dashed
+  \draw[arr, DEBlue, dashed]
+    (rm.south) to[bend right=8] (am.north)
+    node[midway, left, lbl, text=DEBlue]
+         {\tiny \textbf{(4)} grant\\container list};
+
+  % Step 5: AM -> NMs (launch tasks)
+  \draw[arr, DEGreen!70!black]
+    (am.south) to[out=-130, in=90] (nm1.north)
+    node[pos=0.35, left, lbl, text=DEGreen!70!black] {\tiny \textbf{(5)} launch task};
+  \draw[arr, DEGreen!70!black]
+    (am.south) -- (nm2.north)
+    node[midway, right, lbl, text=DEGreen!70!black] {\tiny \textbf{(5)} launch task};
+  \draw[arr, DEGreen!70!black]
+    (am.south) to[out=-50, in=90] (nm3.north)
+    node[pos=0.35, right, lbl, text=DEGreen!70!black] {\tiny \textbf{(5)} launch task};
+
+  % Step 6: NMs -> AM (task status)
+  \draw[arr, DEGray!60, dashed]
+    (nm2.north) to[bend right=15] (am.south)
+    node[midway, left, lbl, text=DEGray!60] {\tiny \textbf{(6)} status/progress};
+
+\end{tikzpicture}
+\caption{YARN job execution flow. The ResourceManager (RM) manages global
+         resources and launches the ApplicationMaster (AM) in its own container.
+         The AM then negotiates additional containers with the RM and instructs
+         NodeManagers to launch application tasks, monitoring their progress
+         independently of the RM.}
+\label{fig:yarn-flow}
+\end{figure}
+
+%%====================================================================
+\section{YARN Schedulers: Sharing the Cluster}
+\label{sec:schedulers}
+%%====================================================================
+
+With multiple teams submitting jobs simultaneously to a shared cluster,
+the Scheduler's policy determines which jobs get resources first and
+how much capacity each team is guaranteed. YARN provides three built-in
+scheduler implementations.
+
+%--------------------------------------------------------------------
+\subsection{The FIFO Scheduler}
+\label{subsec:fifo-sched}
+%--------------------------------------------------------------------
+
+The \term{FIFO (First In, First Out) Scheduler} maintains a single job
+queue and assigns resources in submission order. The first job submitted
+receives all available cluster capacity until it completes; subsequent
+jobs wait. FIFO is simple to understand and configure, but it is
+unsuitable for multi-tenant clusters. A single long-running batch job
+(e.g., a multi-hour ETL pipeline) can starve time-sensitive interactive
+queries for hours. FIFO is appropriate only for single-user development
+clusters or automated pipeline clusters that run one job at a time.
+
+%--------------------------------------------------------------------
+\subsection{The Capacity Scheduler}
+\label{subsec:capacity-sched}
+%--------------------------------------------------------------------
+
+The \term{Capacity Scheduler}, the default in Hadoop distributions from
+Hortonworks and Cloudera, divides the cluster's total capacity into
+named \term{queues}. Each queue has a guaranteed minimum capacity and a
+maximum capacity:
+
+\begin{itemize}
+  \item The \textbf{minimum capacity} ensures that jobs in this queue can
+        always obtain at least $X$\% of cluster resources, even when other
+        queues are busy.
+  \item The \textbf{maximum capacity} prevents a single queue from
+        consuming the entire cluster, even when the cluster is otherwise idle.
+  \item \textbf{Elastic borrowing}: when a queue has unused capacity, other
+        queues can borrow it. The capacity is reclaimed---with a configurable
+        grace period for preemption---when the owning queue submits new jobs.
+\end{itemize}
+
+A typical multi-team Hadoop cluster might configure:
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Queue}     & \textbf{Min capacity} & \textbf{Max capacity} \\
+\midrule
+\texttt{production} & 60\%                 & 80\% \\
+\texttt{analytics}  & 30\%                 & 60\% \\
+\texttt{adhoc}      & 10\%                 & 40\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The production queue always has at least 60\% of cluster capacity
+available for revenue-generating pipelines, even if the analytics and
+adhoc queues are idle.
+
+%--------------------------------------------------------------------
+\subsection{The Fair Scheduler}
+\label{subsec:fair-sched}
+%--------------------------------------------------------------------
+
+The \term{Fair Scheduler}, the default in Apache Hadoop distributions and
+historically used by Facebook and Twitter, allocates resources so that
+all running jobs receive an equal share of available capacity over time.
+When only one job is running, it receives 100\% of the cluster. When a
+second job is submitted, it begins receiving resources immediately; over
+a short window, both jobs converge on 50\% each. When the second job
+completes, the first job again receives 100\%.
+
+The key property of the Fair Scheduler is its treatment of newly
+submitted short jobs. Under the Capacity Scheduler, a short interactive
+query submitted to a busy production queue must wait behind already-running
+batch jobs. Under the Fair Scheduler, the new query preempts some
+resources from running jobs immediately, completing quickly before
+returning those resources to the batch jobs. This makes the Fair Scheduler
+particularly effective for clusters that serve a mix of batch pipelines
+and interactive analytical queries.
+
+%--------------------------------------------------------------------
+\subsection{Dominant Resource Fairness}
+\label{subsec:drf}
+%--------------------------------------------------------------------
+
+Both the Capacity and Fair Schedulers must decide how to measure
+``fairness'' in a cluster with multiple resource dimensions (vCores and
+RAM). A job requiring many CPUs but little memory and a job requiring
+few CPUs but much memory have different resource profiles; allocating
+equal CPU to both may leave one job RAM-starved while the other has
+excess RAM.
+
+\term{Dominant Resource Fairness} (DRF), introduced by Ghodsi et al.\
+at NSDI 2011 \parencite{DRF2011}, resolves this by defining each job's
+fairness share in terms of its \emph{dominant resource}---the resource
+type for which the job's relative allocation is highest. If a job consumes
+$20\%$ of the cluster's CPU but only $5\%$ of its RAM, its dominant
+resource is CPU and its dominant share is $20\%$. The DRF scheduler
+equalises dominant shares across all running jobs, ensuring that no job
+dominates the cluster in the resource dimension that matters most to it.
+YARN's Fair Scheduler implements DRF as its fairness metric for
+multi-resource scheduling.
+
+%--------------------------------------------------------------------
+\subsection{YARN Fault Tolerance}
+\label{subsec:yarn-fault}
+%--------------------------------------------------------------------
+
+YARN's fault tolerance is layered across three tiers, matching the
+three components of its architecture.
+
+\textbf{NodeManager failure.} If a NodeManager stops sending heartbeats
+to the ResourceManager (default timeout: 10 minutes), the RM marks it
+as dead. All containers on that NodeManager are immediately marked as
+failed, and the RM notifies the relevant ApplicationMasters. Each AM
+decides how to respond according to its framework's fault tolerance
+policy: a MapReduce AM re-requests replacement containers for failed Map
+or Reduce tasks; a Spark AM marks the executor as lost and reschedules
+its tasks on surviving executors.
+
+\textbf{ApplicationMaster failure.} If the AM process crashes, the RM
+detects the failure via a missed heartbeat and restarts the AM in a
+new container (up to a configurable maximum number of attempts, default
+2). The restarted AM can recover job state from HDFS checkpoints if the
+framework supports it. MapReduce AMs checkpoint completed task outputs
+to HDFS, allowing a restarted AM to resume from the last completed
+stage. Early versions of Spark did not checkpoint AM state, so AM
+failure required restarting the entire job.
+
+\textbf{ResourceManager failure.} In Hadoop 1.x, RM failure was
+catastrophic: the entire cluster became inaccessible. YARN 2.4
+introduced \term{ResourceManager High Availability}, mirroring the HDFS
+HA design: an Active RM and a Standby RM, with ZooKeeper providing
+leader election and automatic failover in under 60 seconds. The Active
+RM's state (running applications, container allocations) is periodically
+checkpointed to ZooKeeper so the Standby can reconstruct it on promotion.
+
+\begin{researchspotlight}{Vavilapalli et al.\ (2013) --- Apache Hadoop YARN: Yet Another Resource Negotiator}
+\textbf{Citation:} Vavilapalli, V.~K., et~al.\ (2013). Apache Hadoop
+YARN: Yet Another Resource Negotiator. \textit{Proceedings of the
+4th ACM Symposium on Cloud Computing (SoCC 2013)},
+pp.\ 5:1--5:16. \parencite{YARN2013}
+
+\smallskip\noindent
+\textbf{Key insight:} The paper's central thesis is that the fusion of
+resource management and MapReduce execution logic in Hadoop 1.x's
+JobTracker was the primary scalability and extensibility bottleneck.
+Separating these concerns---through the RM/NM/AM decomposition---makes
+the cluster a general-purpose computing platform rather than a
+MapReduce appliance.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Defined the Container abstraction (\texttt{\{node, vCores, memory\}})
+        as the universal resource unit, replacing the rigid Map/Reduce
+        slot model and enabling flexible, framework-specific resource
+        allocation.
+  \item Introduced the ApplicationMaster pattern: a per-application
+        process that encapsulates framework-specific scheduling, fault
+        tolerance, and monitoring logic, making YARN framework-agnostic
+        by design.
+  \item Demonstrated scalability to 6{,}000 nodes with 100{,}000
+        simultaneous tasks, exceeding Hadoop 1.x's 4{,}000-node limit
+        by 50\%, with ResourceManager scheduling latency below
+        1 second at 1{,}000 heartbeats/second.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} YARN is cited over 3{,}000 times and became
+the default cluster OS for the entire Hadoop ecosystem. Its three-tier
+architecture directly influenced Kubernetes's Pod/Node/Master model;
+the Container abstraction is the direct ancestor of the Kubernetes Pod.
+Apache Spark, Apache Tez, Apache Samza, Apache Flink, and TensorFlow
+on Hadoop all ran as YARN applications. The ApplicationMaster pattern
+established a design precedent that every subsequent cluster computing
+framework has replicated.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Row-Oriented vs.\ Columnar Storage}
+\label{sec:row-columnar}
+%%====================================================================
+
+The second major performance dimension this chapter addresses is the
+physical organisation of data within files. The choice between
+row-oriented and columnar (column-oriented) storage can change the
+I/O cost of an analytical query by one to two orders of magnitude,
+making it one of the highest-leverage decisions in a data engineering
+system.
+
+%--------------------------------------------------------------------
+\subsection{Row-Oriented Storage}
+\label{subsec:row-oriented}
+%--------------------------------------------------------------------
+
+In a \term{row-oriented} (or \emph{N-ary storage model}, NSM) file
+format, all fields of a single record are stored contiguously on disk:
+
+\begin{center}
+\setlength{\fboxsep}{4pt}
+\fbox{\texttt{user\_id=1, name=``Alice'', age=24, score=91, country=``US'', ...}}\\[2pt]
+\fbox{\texttt{user\_id=2, name=``Bob'',   age=31, score=78, country=``DE'', ...}}\\[2pt]
+\fbox{\texttt{user\_id=3, name=``Carol'', age=27, score=88, country=``JP'', ...}}
+\end{center}
+
+Row-oriented storage is optimal for workloads that need to read or
+write complete records: transactional databases (OLTP), log ingestion
+pipelines, and streaming append operations. Writing a new record requires
+a single sequential write. Reading a specific record by key requires
+reading one contiguous block of bytes.
+
+Row-oriented storage is \emph{suboptimal} for analytical workloads that
+select a small number of columns from a wide table. A query
+\texttt{SELECT score FROM users} must read every field of every row---
+\texttt{user\_id}, \texttt{name}, \texttt{age}, \texttt{country},
+and all other columns---even though only the \texttt{score} field is
+needed. For a table with $c$ columns, a query selecting $k$ columns
+reads $c/k$ times more data than necessary.
+
+%--------------------------------------------------------------------
+\subsection{Columnar Storage: The I/O Reduction Formula}
+\label{subsec:columnar}
+%--------------------------------------------------------------------
+
+In a \term{columnar} (or \emph{decomposition storage model}, DSM) file
+format, all values of a single column are stored contiguously on disk:
+
+\begin{center}
+\setlength{\fboxsep}{4pt}
+\fbox{\texttt{user\_id: [1, 2, 3, ...]}} $\;\;\;$
+\fbox{\texttt{name: [Alice, Bob, Carol, ...]}} $\;\;\;$
+\fbox{\texttt{score: [91, 78, 88, ...]}}
+\end{center}
+
+For the same \texttt{SELECT score FROM users} query, a columnar store
+reads \emph{only the score column chunk}---a contiguous block containing
+\texttt{[91, 78, 88, ...]}, and nothing else. The \texttt{user\_id},
+\texttt{name}, \texttt{age}, and other column chunks are not read at all.
+
+\begin{defbox}{Columnar I/O Reduction}
+Let a table have $c$ columns, $n$ rows, and $\bar{s}$ bytes per cell on
+average. A query selecting $k$ columns:
+\begin{align}
+\text{Row store I/O}     &= n \cdot c \cdot \bar{s} \label{eq:row-io} \\
+\text{Column store I/O}  &= n \cdot k \cdot \bar{s} \label{eq:col-io} \\
+\text{I/O reduction}     &= \frac{k}{c} \label{eq:io-reduction}
+\end{align}
+For $k = 3$, $c = 100$: the columnar store reads only $3\%$ of the
+data that a row store would read---a $33\times$ reduction.
+\end{defbox}
+
+Additional compression efficiency: because all values in a column chunk
+have the same data type, they compress far better than a mixed row.
+A column of \texttt{country} codes (``US'', ``DE'', ``JP'', ...) with
+high repetition compresses 10--50$\times$ better than an entire row
+containing a mix of integers, strings, and floats.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    hdr/.style={rectangle, fill=DEBlue!80, text=white, draw=DEBlue,
+                minimum width=1.5cm, minimum height=0.55cm,
+                font=\tiny\bfseries\sffamily, align=center},
+    rcell/.style={rectangle, draw=DEGray!40, fill=DEGray!8,
+                  minimum width=1.5cm, minimum height=0.55cm,
+                  font=\tiny, align=center},
+    ccell/.style={rectangle, draw=DEGray!40, fill=DEGray!8,
+                  minimum width=1.5cm, minimum height=0.55cm,
+                  font=\tiny, align=center},
+    hcell/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
+                  minimum width=1.5cm, minimum height=0.55cm,
+                  font=\tiny\bfseries, align=center},
+    lbl/.style={font=\small\bfseries\sffamily, align=center}
+  ]
+
+  %--- Row Store (left) ---
+  \node[lbl, text=DERed] at (-3.4, 4.1) {Row Store};
+  \node[font=\tiny\sffamily\itshape, text=DEGray] at (-3.4, 3.7) {(CSV, JSON)};
+
+  % Headers
+  \foreach \col/\x in {user\_id/-5.3, name/-3.8, age/-2.3, score/-0.8}
+    \node[hdr] at (\x, 3.2) {\col};
+
+  % Row 1 (entire row highlighted red = all data read)
+  \foreach \val/\x in {1/-5.3, Alice/-3.8, 24/-2.3, 91/-0.8}
+    \node[rcell, fill=DERed!20, draw=DERed!50] at (\x, 2.65) {\val};
+  % Row 2
+  \foreach \val/\x in {2/-5.3, Bob/-3.8, 31/-2.3, 78/-0.8}
+    \node[rcell, fill=DERed!20, draw=DERed!50] at (\x, 2.10) {\val};
+  % Row 3
+  \foreach \val/\x in {3/-5.3, Carol/-3.8, 27/-2.3, 88/-0.8}
+    \node[rcell, fill=DERed!20, draw=DERed!50] at (\x, 1.55) {\val};
+  % Row 4
+  \foreach \val/\x in {4/-5.3, Dave/-3.8, 29/-2.3, 95/-0.8}
+    \node[rcell, fill=DERed!20, draw=DERed!50] at (\x, 1.00) {\val};
+
+  \draw[DERed!60, very thick, rounded corners=2pt]
+       (-6.1, 0.7) rectangle (-0.1, 2.95);
+  \node[font=\tiny\bfseries, text=DERed] at (-3.1, 0.4)
+       {Query reads ALL 4 columns};
+
+  %--- Column Store (right) ---
+  \node[lbl, text=DEGreen!70!black] at (4.5, 4.1) {Column Store};
+  \node[font=\tiny\sffamily\itshape, text=DEGray] at (4.5, 3.7) {(Parquet, ORC)};
+
+  % Headers
+  \foreach \col/\x in {user\_id/1.5, name/3.0, age/4.5, score/6.0}
+    \node[hdr] at (\x, 3.2) {\col};
+
+  % Column data stored contiguously
+  \foreach \val/\y in {1/2.65, 2/2.10, 3/1.55, 4/1.00}
+    \node[ccell] at (1.5, \y) {\val};
+  \foreach \val/\y in {Alice/2.65, Bob/2.10, Carol/1.55, Dave/1.00}
+    \node[ccell] at (3.0, \y) {\val};
+  \foreach \val/\y in {24/2.65, 31/2.10, 27/1.55, 29/1.00}
+    \node[ccell] at (4.5, \y) {\val};
+  % score column highlighted (only one read)
+  \foreach \val/\y in {91/2.65, 78/2.10, 88/1.55, 95/1.00}
+    \node[hcell] at (6.0, \y) {\val};
+
+  \draw[DEGreen!60, very thick, rounded corners=2pt]
+       (5.2, 0.7) rectangle (6.8, 2.95);
+  \node[font=\tiny\bfseries, text=DEGreen!70!black] at (4.5, 0.4)
+       {Query reads ONLY score column};
+
+  % Divider
+  \draw[DEGray!30, dashed, thick] (0, 0.1) -- (0, 4.2);
+
+\end{tikzpicture}
+\caption{Row-oriented vs.\ columnar storage for a \texttt{SELECT score FROM users}
+         query. The row store reads all four columns for every row (red box).
+         The column store reads only the \texttt{score} column chunk (green box),
+         skipping \texttt{user\_id}, \texttt{name}, and \texttt{age} entirely.
+         For 100 columns with a 3-column query, the columnar store provides a
+         $33\times$ I/O reduction.}
+\label{fig:row-vs-column}
+\end{figure}
+
+%%====================================================================
+\section{Big Data File Formats in Depth}
+\label{sec:file-formats}
+%%====================================================================
+
+Three file formats dominate the modern Hadoop and cloud data lake
+ecosystem: Apache Avro, Apache Parquet, and Apache ORC. Each represents
+a different design point in the space of storage orientation, schema
+management, compression efficiency, and processing engine compatibility.
+
+%--------------------------------------------------------------------
+\subsection{Apache Avro: Schema-Evolving Row Storage}
+\label{subsec:avro}
+%--------------------------------------------------------------------
+
+Apache Avro is a row-oriented serialisation framework developed at
+Yahoo! in 2009 and now an Apache top-level project. Avro stores each
+record as a single contiguous binary blob, with the schema described
+as a JSON document embedded in the file header. It is the preferred
+format for data ingestion pipelines---particularly Kafka-to-HDFS
+streams---for two reasons.
+
+\textbf{Schema evolution.} As event schemas change over time (new
+fields added, field names changed, types widened), Avro allows
+\emph{reader schemas} and \emph{writer schemas} to differ according
+to well-defined compatibility rules. A consumer reading data written
+with an older schema can specify a new reader schema; Avro's binary
+codec automatically:
+\begin{itemize}
+  \item Fills missing fields with their declared default values.
+  \item Ignores fields present in the data but absent from the reader schema.
+  \item Promotes numeric types (e.g., \texttt{int} to \texttt{long}).
+\end{itemize}
+This forward and backward compatibility makes Avro the standard for
+streaming ingestion (Kafka) to long-term storage (HDFS), where the
+schema evolves continuously as the application changes.
+
+\textbf{Splittability.} An Avro file is divided into \term{blocks}
+(not to be confused with HDFS blocks) separated by sync markers. A
+Hadoop InputFormat can seek to a sync marker and start reading from
+any block without decompressing from the beginning, making Avro files
+natively splittable.
+
+%--------------------------------------------------------------------
+\subsection{Apache Parquet: Columnar Analytics Storage}
+\label{subsec:parquet}
+%--------------------------------------------------------------------
+
+Apache Parquet, developed jointly by Twitter and Cloudera in 2013, is
+the de facto standard for analytical data storage in the Hadoop
+ecosystem and on cloud data lakes. Its internal organisation is
+designed to minimise I/O for column-selective analytical queries.
+
+\textbf{File structure.} A Parquet file is divided into \term{row
+groups} (default $\sim$128\MB, aligning with HDFS block size). Each
+row group is subdivided into \term{column chunks}---one per column.
+Each column chunk is further divided into \term{pages} of approximately
+1\MB\ each. Data within a page is optionally dictionary-encoded
+(replacing repeated values with short integer codes) and then
+compressed with a configurable codec (Snappy by default).
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    file/.style={rectangle, draw=DEBlue!50, fill=DELightBlue!20,
+                 rounded corners=4pt, minimum width=8.5cm},
+    rg/.style={rectangle, draw=DEBlue!40, fill=DEBlue!8,
+               minimum width=8.0cm, minimum height=0.55cm,
+               font=\small\bfseries\sffamily, align=center},
+    cc/.style={rectangle, draw=DEGreen!50, fill=DELightGreen,
+               minimum width=2.3cm, minimum height=0.5cm,
+               font=\scriptsize\sffamily, align=center},
+    pg/.style={rectangle, draw=DEAccent!60, fill=DELightAccent,
+               minimum width=0.65cm, minimum height=0.4cm,
+               font=\tiny, align=center},
+    hdr/.style={rectangle, draw=DEBlue!70, fill=DEBlue!80, text=white,
+                minimum width=8.0cm, minimum height=0.5cm,
+                font=\scriptsize\bfseries\sffamily, align=center},
+    ft/.style={rectangle, draw=DEAccent!80, fill=DEAccent!70, text=white,
+               minimum width=8.0cm, minimum height=0.6cm,
+               font=\scriptsize\bfseries\sffamily, align=center},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % File header
+  \node[hdr] at (0, 7.2) {Magic bytes: PAR1};
+
+  % Row Group 1
+  \node[rg] at (0, 6.6) {Row Group 1 ($\approx$128 MB)};
+  \node[cc] at (-2.6, 6.0) {col:user\_id};
+  \node[cc] at (0,    6.0) {col:name};
+  \node[cc] at (2.6,  6.0) {col:score};
+  % Pages inside col:score
+  \foreach \x in {2.0, 2.65, 3.3} {
+    \node[pg] at (\x, 5.4) {P};
+  }
+  \node[font=\tiny\sffamily\itshape, text=DEGray] at (0, 5.4)
+       {(each column chunk split into $\approx$1 MB pages)};
+
+  % Row Group 2
+  \node[rg] at (0, 4.8) {Row Group 2 ($\approx$128 MB)};
+  \node[cc] at (-2.6, 4.2) {col:user\_id};
+  \node[cc] at (0,    4.2) {col:name};
+  \node[cc] at (2.6,  4.2) {col:score};
+
+  % Footer
+  \node[ft] at (0, 3.5) {File Footer};
+  \node[lbl, text=DEAccent!80] at (0, 2.95)
+       {\tiny Row group offsets \textbullet\ Column statistics (min/max/null count) per column per row group};
+  \node[lbl, text=DEAccent!80] at (0, 2.55)
+       {\tiny Schema \textbullet\ Encoding metadata \textbullet\ Compression codec};
+  \node[hdr] at (0, 2.1) {Magic bytes: PAR1};
+
+  % Predicate pushdown annotation
+  \draw[DERed!60, very thick, dashed, rounded corners=3pt]
+       (-4.4, 2.0) rectangle (4.4, 2.75);
+  \node[font=\tiny\bfseries, text=DERed] at (5.5, 2.4)
+       {Read footer FIRST};
+  \node[font=\tiny\sffamily, text=DERed, align=left] at (5.5, 1.9)
+       {skip row groups where\\col stats eliminate them};
+
+\end{tikzpicture}
+\caption{Parquet file internal structure. The footer contains per-column,
+         per-row-group statistics (min, max, null count) that enable predicate
+         pushdown: a query with \texttt{WHERE score > 90} reads the footer
+         first, then skips all row groups where \texttt{max(score) $\leq$ 90},
+         reading zero bytes from those row groups.}
+\label{fig:parquet-layout}
+\end{figure}
+
+\textbf{Predicate pushdown.} The Parquet \term{file footer} stores
+column-level statistics---minimum value, maximum value, and null
+count---for every column chunk in every row group. A query engine
+(Spark SQL, Hive on Tez, Presto) reads the footer first. If the
+footer shows that the \texttt{score} column in Row Group 1 has
+$\text{min}=60, \text{max}=85$, and the query filters
+\texttt{WHERE score > 90}, the engine can skip the entire Row Group 1
+without reading a single byte of its data. This \emph{predicate
+pushdown} to the storage layer can reduce the physical I/O of a
+selective query from terabytes to gigabytes.
+
+\textbf{Dictionary encoding.} Before compression, Parquet applies
+\term{dictionary encoding} to columns with low cardinality. A column
+containing country codes with 200 distinct values out of 100 million
+rows stores the 200 distinct values in a compact dictionary, then
+stores each row's value as a small integer index into the dictionary.
+This can reduce the size of a low-cardinality column by 80--95\%
+before compression is even applied.
+
+%--------------------------------------------------------------------
+\subsection{Apache ORC: Hive-Optimised Columnar Storage}
+\label{subsec:orc}
+%--------------------------------------------------------------------
+
+Apache ORC (Optimised Row Columnar) was developed at Hortonworks in
+2013 specifically for Apache Hive and is the recommended format for
+the Hive ecosystem. ORC and Parquet are architecturally similar---both
+are columnar, self-describing, and support predicate pushdown---but
+differ in several engineering choices.
+
+ORC uses \term{stripes} (analogous to Parquet's row groups, default
+250\MB) and stores a \term{file-level index} in the footer plus a
+\term{stripe-level index} within each stripe. The stripe-level index
+provides statistics at 10{,}000-row granularity within the stripe,
+enabling finer-grained skipping than Parquet's row-group granularity.
+
+ORC's default compression codec is Zlib (gzip), which achieves higher
+compression ratios than Parquet's default Snappy at the cost of slower
+decompression speed. For Hive workloads where query latency is measured
+in minutes rather than seconds, the storage savings from Zlib typically
+outweigh the decompression overhead. ORC also supports Hive's ACID
+(atomicity, consistency, isolation, durability) transactions---a feature
+Parquet does not natively support---enabling \texttt{UPDATE} and
+\texttt{DELETE} operations on Hive tables.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of the five major Hadoop file formats}
+\label{tab:format-comparison}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{L{1.6cm} L{1.6cm} L{2.0cm} L{1.4cm} L{1.8cm} L{2.6cm}}
+\toprule
+\textbf{Format} & \textbf{Orient.} & \textbf{Schema} & \textbf{Split.} &
+\textbf{Compress.} & \textbf{Primary use case} \\
+\midrule
+Text/CSV  & Row      & External        & With codec  & None (default) & Small data; portability \\
+JSON      & Row      & Self (verbose)  & No (raw)    & External       & APIs; log ingestion \\
+Avro      & Row      & Self (JSON)     & Yes         & Snappy/Deflate & Kafka ingest; schema evolution \\
+Parquet   & Columnar & Self            & Yes         & Snappy/Gzip    & Spark, Presto, ML; analytics \\
+ORC       & Columnar & Self            & Yes         & Zlib/Snappy    & Hive warehouse; ACID; archival \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%%====================================================================
+\section{Compression Codecs and Splittability}
+\label{sec:compression}
+%%====================================================================
+
+Compression reduces the physical size of data on disk and in transit,
+lowering both storage costs and I/O time. In the Hadoop ecosystem,
+choosing the right compression codec requires balancing three
+dimensions: compression ratio, decompression speed, and---most
+critically for distributed processing---\emph{splittability}.
+
+%--------------------------------------------------------------------
+\subsection{The Splittability Property}
+\label{subsec:splittability}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Splittability}
+A file format is \textbf{splittable} if a Hadoop InputFormat can start
+reading from any point in the file without decompressing from the
+beginning. Splittability determines whether HDFS can assign multiple
+independent Map tasks to different portions of the same file, enabling
+full parallelism.
+\end{defbox}
+
+The practical consequence is dramatic. A 10\GB\ unsplittable Gzip CSV
+file on HDFS is stored in 80 consecutive 128\MB\ blocks. HDFS distributes
+these blocks across the cluster normally, but the MapReduce or Spark job
+can assign only a \emph{single} task to this file: the task must read
+all 80 blocks sequentially from start to finish, since decompression
+must begin at byte 0 and proceed in order. No parallelism is possible.
+
+A 10\GB\ Parquet+Snappy file with 128\MB\ row groups is similarly
+stored in 80 blocks. But the Parquet InputFormat can start reading at
+any row group boundary independently. The job assigns 80 parallel tasks,
+each reading one row group from a local DataNode---achieving 80$\times$
+parallelism and completing the job in $1/80$th the wall-clock time of
+the single-task case.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    blk/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
+                minimum width=1.3cm, minimum height=0.65cm,
+                font=\scriptsize\sffamily, align=center},
+    gzblk/.style={rectangle, draw=DERed!60, fill=DERed!15,
+                  minimum width=6.0cm, minimum height=0.65cm,
+                  font=\scriptsize\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % Parquet (splittable)
+  \node[font=\small\bfseries\sffamily, text=DEGreen!70!black] at (3.0, 4.0)
+       {Parquet + Snappy (splittable)};
+  \node[blk] (rg1) at (0.8, 3.2) {Row Grp 1};
+  \node[blk] (rg2) at (2.4, 3.2) {Row Grp 2};
+  \node[blk] (rg3) at (4.0, 3.2) {Row Grp 3};
+  \node[blk] (rg4) at (5.6, 3.2) {Row Grp 4};
+
+  \draw[arr, DEGreen!70!black] (0.8, 2.7) -- (rg1.south) node[below, lbl]{\tiny Task 1};
+  \draw[arr, DEGreen!70!black] (2.4, 2.7) -- (rg2.south) node[below, lbl]{\tiny Task 2};
+  \draw[arr, DEGreen!70!black] (4.0, 2.7) -- (rg3.south) node[below, lbl]{\tiny Task 3};
+  \draw[arr, DEGreen!70!black] (5.6, 2.7) -- (rg4.south) node[below, lbl]{\tiny Task 4};
+
+  \node[font=\tiny\sffamily\itshape, text=DEGreen!70!black] at (3.2, 1.9)
+       {4 tasks in parallel — full data locality possible};
+
+  % Gzip CSV (not splittable)
+  \node[font=\small\bfseries\sffamily, text=DERed] at (3.0, 1.3)
+       {Gzip CSV (NOT splittable)};
+  \node[gzblk] at (3.0, 0.7) {Single undivided compressed stream};
+
+  \draw[arr, DERed!60] (3.0, 0.1) -- (3.0, 0.38)
+       node[below, lbl, text=DERed] {\tiny Task 1 only --- no parallelism};
+
+\end{tikzpicture}
+\caption{Splittability comparison. Parquet's row-group boundaries allow
+         $N$ tasks to process $N$ row groups in parallel. A Gzip-compressed
+         CSV file has no internal boundaries the InputFormat can seek to,
+         so the entire file is processed by a single task.}
+\label{fig:splittability}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Compression Codec Comparison}
+\label{subsec:codecs}
+%--------------------------------------------------------------------
+
+\begin{table}[ht]
+\centering
+\caption{Hadoop compression codecs: performance and splittability}
+\label{tab:codecs}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{L{1.6cm} L{1.4cm} L{1.4cm} L{1.4cm} L{4.0cm}}
+\toprule
+\textbf{Codec} & \textbf{Speed} & \textbf{Ratio} & \textbf{Splittable?} &
+\textbf{Recommended use} \\
+\midrule
+Snappy & Fastest & Medium   & No (but Parquet/Avro row groups are) & Parquet, Avro in Spark/Hive (default) \\
+Gzip   & Slow    & High     & \textbf{No} & Avoid for large HDFS files; use Parquet+Snappy instead \\
+LZO    & Fast    & Medium   & Yes (with index) & Legacy Hadoop; requires external index file \\
+Bzip2  & Slowest & Highest  & Yes (natively) & Large plain-text files where I/O cost dominates \\
+Zstd   & Fast    & High     & No (block-level) & ORC archival; Parquet cold storage \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{caution}{The Gzip Anti-Pattern}
+The most common performance anti-pattern in Hadoop data pipelines is
+storing large datasets as Gzip-compressed CSV or JSON files.
+Gzip's block format does not contain synchronisation markers that allow
+random seeks; decompression must begin at byte 0. A 1~TB Gzip CSV file
+processed by a 1{,}000-node Spark cluster is forced to run on
+\emph{a single task}, using one core on one node, while the other
+999 nodes sit idle. The correct alternative is \textbf{Parquet + Snappy}:
+the Parquet format provides splittable boundaries (row groups) even
+though Snappy itself is not splittable, and Snappy's very fast
+decompression minimises CPU overhead.
+\end{caution}
+
+%%====================================================================
+\section{I/O Optimisation Techniques}
+\label{sec:io-opt}
+%%====================================================================
+
+Beyond format and codec selection, three additional query-time
+optimisation techniques reduce the I/O cost of analytical workloads
+on columnar storage systems.
+
+%--------------------------------------------------------------------
+\subsection{Predicate Pushdown}
+\label{subsec:pred-pushdown}
+%--------------------------------------------------------------------
+
+\term{Predicate pushdown} moves filter conditions from the query engine
+into the storage layer. In Parquet, the file footer stores column-level
+statistics (min, max, null count) per row group. When a query contains
+a filter predicate (e.g., \texttt{WHERE revenue > 1000000}), the query
+engine evaluates the predicate against the footer statistics for each
+row group \emph{before reading the row group's data}. Any row group for
+which the predicate is definitely false (i.e., \texttt{max(revenue)}
+$\leq 1{,}000{,}000$) is skipped entirely. Only row groups where the
+predicate \emph{might} be true are read.
+
+In practice, for a time-series table partitioned by date and sorted by
+user ID within each partition, predicate pushdown on a user-ID filter
+can skip 99\% of the data in large Parquet files, reducing a 1-hour
+query to under 2 minutes.
+
+%--------------------------------------------------------------------
+\subsection{Column Pruning}
+\label{subsec:col-pruning}
+%--------------------------------------------------------------------
+
+\term{Column pruning} (also called \emph{projection pushdown}) ensures
+that only the columns required by the query are read from disk. In a
+row-oriented format, this is impossible: all columns of a row are stored
+together, so reading one requires reading all. In a columnar format, each
+column is stored independently; the query engine passes the list of
+required columns to the file reader, which opens and reads only those
+column chunks. A query selecting 5 of 200 columns from a Parquet file
+reads exactly $5/200 = 2.5\%$ of the storage bytes.
+
+Apache Spark applies column pruning automatically for Parquet files
+through the Catalyst query optimiser: the optimiser analyses the query's
+column references before execution and passes only the referenced
+columns to the Parquet reader. No manual configuration is required.
+
+%--------------------------------------------------------------------
+\subsection{Partition Pruning}
+\label{subsec:partition-pruning-ch5}
+%--------------------------------------------------------------------
+
+\term{Partition pruning}, introduced in the context of Hive in
+Chapter~\ref{ch:mapreduce}, operates at the file system (HDFS directory)
+level rather than within a file. A table partitioned by \texttt{dt}
+(date) stores each day's data in a separate HDFS subdirectory
+(\texttt{/data/table/dt=2024-01-15/}). A query filtering on a specific
+date reads only that subdirectory's files, skipping all other partitions
+entirely. Partition pruning, predicate pushdown, and column pruning are
+complementary and can be applied simultaneously:
+
+\begin{enumerate}
+  \item \textbf{Partition pruning} eliminates entire HDFS directories
+        based on the partition key filter.
+  \item \textbf{Predicate pushdown} eliminates row groups within the
+        remaining Parquet files based on column statistics in the footer.
+  \item \textbf{Column pruning} eliminates irrelevant column chunks
+        within the remaining row groups.
+\end{enumerate}
+
+The combined effect can reduce the I/O of a targeted analytical query
+from terabytes to megabytes---multiple orders of magnitude---purely
+through optimisations at the storage layer, without any changes to the
+query itself.
+
+%%====================================================================
+\section{Case Study: LinkedIn's Multi-Framework YARN Cluster (2013--2016)}
+\label{sec:linkedin-case}
+%%====================================================================
+
+\begin{casestudy}{LinkedIn --- Consolidating Five Frameworks on One 5{,}000-Node YARN Cluster}
+
+\textbf{Background.}
+By 2013, LinkedIn was processing approximately 500~TB of data per day
+for its professional networking platform---analysing member profiles,
+connections, job postings, messages, and advertising signals to power
+features used by over 300 million members. The company ran five distinct
+data processing frameworks: MapReduce (for Hive ETL), Apache Spark
+(for the People You May Know recommendation algorithm, PYMK), Apache
+Samza (for real-time Kafka stream processing), Apache Pig (for ad
+targeting feature engineering), and Apache Tez (for interactive
+Hive-on-Tez queries). Before YARN, these frameworks ran on \emph{separate
+siloed clusters}---three distinct Hadoop clusters, each configured and
+operated independently.
+
+\smallskip
+\textbf{The silo problem.}
+The siloed cluster architecture created two systemic inefficiencies.
+First, each cluster was under-utilised: the MapReduce cluster averaged
+45\% utilisation (heavily used during nightly batch runs, idle during
+the day), while the Spark cluster was heavily utilised for the PYMK
+job's 4-hour compute window and nearly idle the rest of the time.
+Combining both clusters would have provided the same total capacity
+at significantly higher average utilisation. Second, cross-cluster
+data movement added 30--90 minutes of latency to pipelines that
+needed data from multiple clusters: an ETL job on the MapReduce cluster
+had to export results to HDFS and wait for the Spark cluster to ingest
+them.
+
+\smallskip
+\textbf{The unified YARN architecture.}
+In 2013, LinkedIn migrated to a unified 5{,}000-node YARN cluster using
+the Capacity Scheduler with six queues:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Queue}      & \textbf{Capacity} & \textbf{Primary workload} \\
+\midrule
+\texttt{production} & 40\%              & Hive ETL; Pig ad features \\
+\texttt{spark}      & 25\%              & PYMK; Spark ML models \\
+\texttt{samza}      & 15\%              & Kafka stream processing \\
+\texttt{adhoc}      & 10\%              & Analyst Hive queries \\
+\texttt{tez}        & 7\%               & Interactive Hive-on-Tez \\
+\texttt{reserve}    & 3\%               & Overflow / burst capacity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\smallskip
+\textbf{The PYMK pipeline.}
+LinkedIn's People You May Know (``Friend recommendations'') feature
+illustrates how multiple frameworks share the YARN cluster in a single
+end-to-end pipeline:
+\begin{enumerate}
+  \item \textbf{Ingest} (Samza, \texttt{samza} queue): a Kafka consumer
+        reads member-profile-view events at approximately 2 million
+        events per second, materialising them to HDFS in Avro format.
+  \item \textbf{Feature store} (Hive, \texttt{production} queue): a
+        nightly Hive ETL job joins first-, second-, and third-degree
+        connection data for all 300 million members into a wide feature
+        table stored in ORC+Zlib format (partitioned by member-ID bucket).
+  \item \textbf{Graph model} (Spark GraphX, \texttt{spark} queue): a
+        Spark job runs label propagation over the social graph to score
+        approximately 10 billion candidate recommendation pairs per day.
+        The PYMK Spark job used 600 executors each with 8~GB RAM and
+        4 vCPUs---4{,}800~GB of RAM and 2{,}400 vCPUs drawn from the
+        \texttt{spark} queue's 25\% allocation of the 5{,}000-node cluster.
+  \item \textbf{Serve}: top-$k$ recommendations per member are written
+        to Voldemort (LinkedIn's key-value store) for real-time serving
+        at sub-10-millisecond latency.
+\end{enumerate}
+
+\smallskip
+\textbf{Quantified outcomes.}
+The migration from three siloed clusters to a unified YARN cluster
+produced measurable improvements across every operational dimension:
+\begin{itemize}
+  \item \textbf{Utilisation}: average cluster utilisation rose from
+        $\sim$45\% (across three separate clusters) to $\sim$78\%
+        (on the unified cluster)---a 73\% increase in effective
+        compute capacity from the same hardware.
+  \item \textbf{PYMK latency}: the PYMK Spark job recompute time
+        dropped from 18 hours (on a separate, undersized Hadoop 1.x
+        MapReduce cluster) to 4 hours (on YARN with Spark GraphX),
+        enabling daily rather than every-other-day recommendation
+        refreshes.
+  \item \textbf{Operational cost}: consolidation eliminated one full
+        team's worth of cluster operations overhead and reduced
+        inter-cluster data synchronisation latency by 90\%.
+  \item \textbf{Peak containers}: at peak, the unified cluster ran
+        over 400{,}000 simultaneous containers across all six queues.
+\end{itemize}
+
+\smallskip
+\textbf{The architectural lesson.}
+LinkedIn's deployment established a principle that has since become an
+industry standard: \emph{the cluster is the computer, and the resource
+manager is its operating system}. Just as an operating system allows
+multiple processes with different CPU and memory profiles to share
+hardware fairly, YARN allows multiple data processing frameworks with
+different resource profiles to share a cluster fairly. The Capacity
+Scheduler's queue hierarchy provides the ``process priority'' mechanism;
+the Container is the ``process memory allocation''; the NodeManager's
+cgroup-based isolation is the ``memory protection''. This analogy---
+cluster OS / cluster kernel---was explicitly used by the YARN paper's
+authors and has guided the design of Kubernetes, Mesos, and every
+subsequent cluster resource manager.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch5-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item Hadoop 1.x's \textbf{JobTracker} bottleneck had three causes:
+        framework lock-in (MapReduce only), rigid fixed-size slots,
+        and single-process scalability limits ($\approx$4{,}000 nodes).
+
+  \item \textbf{YARN} separates resource management into three
+        components: \textbf{ResourceManager} (global scheduler),
+        \textbf{NodeManager} (per-node agent), and
+        \textbf{ApplicationMaster} (per-job framework logic).
+        A \textbf{Container} (\texttt{\{node, vCores, memory\}})
+        replaces the fixed slot.
+
+  \item YARN's three schedulers: \textbf{FIFO} (single queue),
+        \textbf{Capacity} (guaranteed multi-queue allocation),
+        and \textbf{Fair} (equal sharing over time). \textbf{DRF}
+        extends fairness to multiple resource dimensions.
+
+  \item \textbf{Row-oriented} formats (CSV, JSON, Avro) store all
+        fields of a record contiguously. \textbf{Columnar} formats
+        (Parquet, ORC) store all values of a column contiguously.
+        For a $k$-column query on a $c$-column table, columnar I/O
+        is reduced by factor $k/c$.
+
+  \item \textbf{Avro}: row-oriented, schema evolution (reader/writer
+        schemas), splittable, Kafka-native. \textbf{Parquet}:
+        columnar, row groups, footer statistics for predicate pushdown,
+        Spark/Presto native. \textbf{ORC}: columnar, stripe-level
+        index, Zlib compression, Hive ACID support.
+
+  \item A file is \textbf{splittable} if multiple tasks can read
+        different ranges independently. Gzip CSV is not splittable
+        (one task only). Parquet/Avro blocks are splittable even if
+        the codec (Snappy) is not.
+
+  \item The three I/O optimisation layers apply in order:
+        \textbf{partition pruning} (skip directories), \textbf{predicate
+        pushdown} (skip row groups via footer statistics),
+        \textbf{column pruning} (read only required column chunks).
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch5-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq What is the YARN ResourceManager's Scheduler component? What
+information does the Scheduler use to make allocation decisions, and
+what information does it deliberately \emph{not} know?
+
+\sq Explain the role of the ApplicationMaster (AM) in YARN. Why does
+one AM per job---rather than a centralised AM for all jobs---improve
+the scalability of the ResourceManager?
+
+\sq What is a YARN Container? Write the resource specification for a
+container that would host a Spark executor requiring 8 CPU cores and
+24~GB of RAM on node \texttt{dn-07.cluster.internal}.
+
+\sq Explain the difference between YARN's Capacity Scheduler and Fair
+Scheduler. Give a production scenario where the Capacity Scheduler is
+the better choice, and a scenario where the Fair Scheduler is better.
+
+\sq What is Dominant Resource Fairness (DRF)? Give an example where
+allocating equal CPU across two jobs would result in an unfair outcome,
+and explain how DRF resolves it.
+
+\sq A YARN NodeManager stops sending heartbeats to the ResourceManager.
+Trace the sequence of events that occurs: which component detects the
+failure, what happens to the containers on that NodeManager, and which
+component decides what to do next?
+
+\sq What is the difference between the \emph{write schema} and the
+\emph{read schema} in Apache Avro? Give a concrete example where they
+differ and explain how Avro handles the mismatch.
+
+\sq Explain predicate pushdown in Apache Parquet. What information is
+stored in the Parquet file footer, and how does a query engine use it
+to avoid reading data?
+
+\sq What is the splittability property for a Hadoop file format? A
+10\GB\ file on a 100-node cluster is stored as Gzip-compressed CSV.
+How many Map tasks does MapReduce assign to this file, and why?
+
+\sq Compare Parquet and ORC on three dimensions: primary processing
+engine, default compression codec, and ACID transaction support.
+
+\sq A data engineer proposes storing a 500\TB\ analytics warehouse as
+raw JSON files (one JSON object per line) in HDFS. Identify three
+specific performance problems with this proposal and propose a better
+alternative.
+
+\sq Explain column pruning (projection pushdown). For a 200-column
+Parquet table, a query references 6 columns. What fraction of the
+physical storage does the Parquet reader access?
+
+\sq What does it mean for a columnar format to use \emph{dictionary
+encoding}? For a column containing the values ``US'', ``GB'', ``DE'',
+``FR'' repeated across 500 million rows, explain how dictionary encoding
+reduces the column chunk size.
+
+\sq YARN's ResourceManager HA uses ZooKeeper for failover. What role
+does ZooKeeper play, and what happens to running applications during
+the 30--60 second RM failover window?
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{YARN Capacity Planning.}
+An e-commerce company operates a 2{,}000-node YARN cluster. Each node
+has 64~GB RAM and 16 vCPUs. The Capacity Scheduler is configured with
+three queues: \texttt{batch} (50\%), \texttt{streaming} (30\%),
+\texttt{adhoc} (20\%). Container sizes: batch MapReduce mapper:
+\{4~GB, 2~vCPU\}; streaming Samza task: \{2~GB, 1~vCPU\}; adhoc Spark
+executor: \{8~GB, 4~vCPU\}.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the total cluster RAM and vCPU capacity.
+  \item For each queue, calculate the maximum number of concurrent
+        containers, and identify whether the bottleneck resource is
+        RAM or vCPU.
+  \item A batch job needs 5{,}000 mapper containers simultaneously.
+        How many batch nodes can serve this simultaneously? If demand
+        exceeds the \texttt{batch} queue's allocation, describe what
+        happens under (i) Capacity Scheduler with preemption and
+        (ii) Capacity Scheduler without preemption.
+  \item The streaming team submits a Samza job with 3{,}000 tasks,
+        each requiring \{2~GB, 1~vCPU\}. Calculate the dominant
+        resource for the streaming queue using DRF.
+\end{enumerate}
+
+\ap \textbf{File Format I/O Comparison.}
+A retail company stores 5 years of transaction records in HDFS. The
+table has 80 columns, 10 billion rows, and an average cell size of
+12 bytes. A weekly analytics query selects 4 columns, filters on a
+date range covering 7 days out of 365, and has a predicate on one
+column that eliminates 90\% of row groups.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the total uncompressed table size in terabytes.
+  \item If stored as CSV, estimate the I/O for the weekly query
+        (no partition pruning, no predicate pushdown).
+  \item If stored as Parquet + Snappy, partitioned by date, with
+        predicate pushdown: apply partition pruning (7/365 days),
+        then predicate pushdown (90\% of remaining row groups skipped),
+        then column pruning (4/80 columns). Calculate the remaining I/O.
+  \item Express the I/O reduction as a ratio. If each I/O unit
+        (TB read) costs the cluster 5 minutes of compute time on
+        a 100-node cluster, estimate the query time saving.
+\end{enumerate}
+
+\ap \textbf{Splittability and Parallelism Analysis.}
+A genomics pipeline ingests 2~TB of DNA sequencing data per day.
+Three format options are proposed:
+
+\begin{itemize}
+  \item \textbf{Option A}: single 2~TB Gzip-compressed FASTQ file
+  \item \textbf{Option B}: 16{,}000 Gzip-compressed FASTQ files of
+        128~MB each
+  \item \textbf{Option C}: Parquet files with 128~MB row groups
+        (2~TB total across $\approx$16{,}000 row groups)
+\end{itemize}
+
+\begin{enumerate}[label=(\alph*)]
+  \item For each option, calculate the number of Map tasks HDFS assigns,
+        and explain whether data-local execution is achievable.
+  \item Option B produces 16{,}000 files. What is the NameNode memory
+        overhead (assume 300 bytes per file + block pair, and each
+        file fits in one 128~MB block)?
+  \item Option C uses a single logical Parquet file of 2~TB divided
+        into 16{,}000 row groups. Assuming perfect data locality, how many
+        Map tasks run in parallel if the cluster has 500 nodes with
+        40 task slots each?
+  \item Rank the three options on: (i) MapReduce parallelism, (ii)
+        NameNode memory pressure, (iii) engineering simplicity.
+        Recommend one option for the production pipeline.
+\end{enumerate}
+
+\ap \textbf{YARN Failure Cascade Analysis.}
+A 500-node YARN cluster is running a Spark job with 400 executor
+containers distributed across 400 nodes. Each executor holds 50~GB of
+cached RDD data (4 partitions of 12.5~GB each). A power distribution
+unit trip simultaneously takes down 50 nodes.
+
+\begin{enumerate}[label=(\alph*)]
+  \item How many executor containers are immediately lost?
+  \item Which YARN components detect the node failure, and in what order?
+  \item The Spark ApplicationMaster requests 50 replacement executors.
+        If the remaining 450 nodes each have 4 available executor slots,
+        how quickly can the RM satisfy the request (assume 500 ms
+        scheduling cycle)?
+  \item The replacement executors must recompute the 50 lost executors'
+        cached RDD partitions (200 partitions, 12.5~GB each, at
+        100~MB/s recompute throughput). Estimate the total recompute time.
+  \item What data engineering design change would eliminate the need
+        for full RDD recomputation after executor failure?
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{Data Lake Format Strategy for a Financial Services Platform.}
+A global investment bank ingests 15 sources of market data into a central
+data lake: real-time tick data (1 billion trades/day, each trade:
+\{symbol, price, volume, timestamp, exchange, side\}), reference data
+(static security metadata: 2 million instruments, 120 columns),
+and regulatory reporting data (daily settlement reports, 80 columns,
+7-year retention requirement).
+
+Design the format and compression strategy for each data tier. Your
+design must specify:
+\begin{enumerate}[label=(\alph*)]
+  \item The HDFS file format and compression codec for each of the
+        three source types, with explicit justification for each choice.
+  \item The partitioning scheme for tick data (which columns to partition
+        on, at what granularity, and why).
+  \item The YARN queue configuration for three consumer teams: algorithmic
+        trading analytics (latency-sensitive, needs $<$5-minute query
+        response), risk analytics (batch, 2-hour window nightly), and
+        compliance reporting (weekly, long-running, low priority).
+  \item How you would handle schema evolution if the tick data schema
+        adds three new fields for a new exchange that emits extended
+        market data.
+  \item The estimated storage reduction from converting raw CSV tick
+        data (at 35 bytes per event on average) to Parquet+Snappy
+        (assuming 6:1 compression ratio on this workload) for one
+        year of data.
+\end{enumerate}
+
+\dpr \textbf{YARN Migration from Three Siloed Clusters.}
+A media company runs three separate Hadoop clusters: Cluster A
+(1{,}000 nodes, MapReduce for nightly content ETL), Cluster B
+(500 nodes, Spark for recommendation models), Cluster C
+(300 nodes, Kafka/Samza for real-time user event processing).
+Average utilisation: Cluster A 40\%, Cluster B 35\%, Cluster C 55\%.
+The company plans to consolidate into a single YARN cluster.
+
+Design the consolidation. Your design must address:
+\begin{enumerate}[label=(\alph*)]
+  \item Total node count for the unified cluster, given a target
+        average utilisation of 70\% (justify your sizing).
+  \item Capacity Scheduler queue configuration: queue names, capacity
+        percentages, and maximum capacities for each team's workload.
+  \item The migration sequence: which workload migrates first, how
+        parallel operation during the transition is managed, and how
+        you validate that the migrated workload performs correctly.
+  \item How preemption should be configured between the nightly ETL
+        jobs (MapReduce, 8-hour window) and the recommendation Spark
+        jobs (4-hour window, started 2 hours before ETL completes).
+  \item The rollback plan if the unified cluster shows unexpected
+        performance degradation for the Samza real-time workload.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{YARN Capacity Planning Calculator (Python).}
+Implement a YARN capacity planning tool that models a multi-queue
+cluster, computes maximum concurrent containers per queue, identifies
+the bottleneck resource (RAM vs.\ vCPU), and detects over-subscription.
+
+\begin{lstlisting}[style=pyspark, caption={PE5.1: YARN capacity planning calculator}]
+from dataclasses import dataclass
+
+@dataclass
+class NodeSpec:
+    count:   int
+    ram_gb:  int
+    vcpus:   int
+
+@dataclass
+class QueueSpec:
+    name:         str
+    capacity_pct: float    # fraction of cluster [0, 1]
+    container_ram_gb: int
+    container_vcpus:  int
+
+def plan_cluster(node: NodeSpec, queues: list[QueueSpec]):
+    total_ram_gb = node.count * node.ram_gb
+    total_vcpus  = node.count * node.vcpus
+
+    print(f"Cluster: {node.count} nodes x {node.ram_gb} GB / {node.vcpus} vCPU")
+    print(f"Total:   {total_ram_gb:,} GB RAM | {total_vcpus:,} vCPUs")
+    print()
+    print(f"{'Queue':<14} {'Cap':>5} {'RAM alloc':>10} {'CPU alloc':>10} "
+          f"{'Max conts':>10} {'Bottleneck':>12}")
+    print("-" * 65)
+
+    for q in queues:
+        q_ram_gb = total_ram_gb  * q.capacity_pct
+        q_vcpus  = total_vcpus   * q.capacity_pct
+        by_ram   = int(q_ram_gb  / q.container_ram_gb)
+        by_cpu   = int(q_vcpus   / q.container_vcpus)
+        max_c    = min(by_ram, by_cpu)
+        bottle   = "RAM" if by_ram < by_cpu else "vCPU"
+        print(f"{q.name:<14} {q.capacity_pct*100:>4.0f}% "
+              f"{q_ram_gb:>9,.0f} GB {q_vcpus:>9,.0f}    "
+              f"{max_c:>10,} {bottle:>12}")
+
+    # Detect container spec errors: container bigger than node
+    print()
+    for q in queues:
+        if q.container_ram_gb > node.ram_gb:
+            print(f"[ERROR] Queue {q.name}: container RAM {q.container_ram_gb} GB "
+                  f"> node RAM {node.ram_gb} GB")
+        if q.container_vcpus > node.vcpus:
+            print(f"[ERROR] Queue {q.name}: container vCPUs {q.container_vcpus} "
+                  f"> node vCPUs {node.vcpus}")
+
+# LinkedIn 5,000-node cluster model
+node = NodeSpec(count=5_000, ram_gb=64, vcpus=16)
+
+queues = [
+    QueueSpec("production", 0.40, container_ram_gb=4,  container_vcpus=2),
+    QueueSpec("spark",      0.25, container_ram_gb=8,  container_vcpus=4),
+    QueueSpec("samza",      0.15, container_ram_gb=2,  container_vcpus=1),
+    QueueSpec("adhoc",      0.10, container_ram_gb=4,  container_vcpus=2),
+    QueueSpec("tez",        0.07, container_ram_gb=4,  container_vcpus=2),
+    QueueSpec("reserve",    0.03, container_ram_gb=4,  container_vcpus=2),
+]
+
+plan_cluster(node, queues)
+\end{lstlisting}
+
+\pe \textbf{Parquet Layout and Predicate Pushdown Simulator (Python).}
+Simulate the Parquet file structure---row groups, column chunks,
+footer statistics---and implement predicate pushdown to skip row groups
+for a simple filter predicate.
+
+\begin{lstlisting}[style=pyspark, caption={PE5.2: Parquet predicate pushdown simulator}]
+import random
+import math
+
+random.seed(42)
+
+ROW_GROUP_ROWS = 1_000        # rows per row group (small for demo)
+TOTAL_ROWS     = 10_000       # total table rows
+COLUMNS        = ["user_id", "name", "country", "age", "score", "revenue"]
+BYTES_PER_CELL = 8            # average bytes per cell
+
+def generate_row_group(rg_id, start_row, rows):
+    """Simulate one Parquet row group with column stats."""
+    data = {
+        "user_id": list(range(start_row, start_row + rows)),
+        "score":   [random.randint(40, 100) for _ in range(rows)],
+        "revenue": [random.randint(0, 1_000_000) for _ in range(rows)],
+        "country": [random.choice(["US","GB","DE","JP","FR"]) for _ in range(rows)],
+        "age":     [random.randint(18, 80) for _ in range(rows)],
+        "name":    [f"User_{i}" for i in range(start_row, start_row + rows)],
+    }
+    # Build footer stats per column
+    stats = {}
+    for col, vals in data.items():
+        if isinstance(vals[0], int):
+            stats[col] = {"min": min(vals), "max": max(vals),
+                          "null_count": 0}
+        else:
+            stats[col] = {"min": min(vals), "max": max(vals),
+                          "null_count": 0}
+    return {"rg_id": rg_id, "row_count": rows, "data": data, "stats": stats}
+
+# Build Parquet file (footer + row groups)
+num_rg  = math.ceil(TOTAL_ROWS / ROW_GROUP_ROWS)
+rg_list = [generate_row_group(i, i * ROW_GROUP_ROWS,
+                               min(ROW_GROUP_ROWS,
+                                   TOTAL_ROWS - i * ROW_GROUP_ROWS))
+           for i in range(num_rg)]
+
+footer = {"num_row_groups": num_rg,
+          "schema": COLUMNS,
+          "row_group_stats": [rg["stats"] for rg in rg_list]}
+
+def parquet_scan(row_groups, footer, predicate_col, predicate_op, threshold,
+                 select_cols):
+    """
+    Simulate Parquet scan with:
+      - predicate pushdown (skip row groups via footer stats)
+      - column pruning (read only select_cols)
+    """
+    total_rg = len(row_groups)
+    rg_read  = 0
+    rows_returned = 0
+
+    for i, rg in enumerate(row_groups):
+        stats = footer["row_group_stats"][i]
+        col_stat = stats.get(predicate_col, {})
+
+        # Predicate pushdown: can we skip this row group?
+        if predicate_op == ">" and col_stat.get("max", float("inf")) <= threshold:
+            continue    # definitely no rows satisfy predicate -> skip
+        if predicate_op == "<" and col_stat.get("min", float("-inf")) >= threshold:
+            continue
+
+        rg_read += 1
+        # Column pruning: only access select_cols
+        for row_i in range(rg["row_count"]):
+            row_val = rg["data"][predicate_col][row_i]
+            if predicate_op == ">" and row_val > threshold:
+                rows_returned += 1
+            elif predicate_op == "<" and row_val < threshold:
+                rows_returned += 1
+
+    # I/O calculation
+    full_scan_bytes  = total_rg * ROW_GROUP_ROWS * len(COLUMNS)  * BYTES_PER_CELL
+    actual_col_bytes = rg_read  * ROW_GROUP_ROWS * len(select_cols) * BYTES_PER_CELL
+    io_reduction_pct = (1 - actual_col_bytes / full_scan_bytes) * 100
+
+    print(f"Query: SELECT {select_cols} WHERE {predicate_col} {predicate_op} {threshold}")
+    print(f"  Row groups total : {total_rg}")
+    print(f"  Row groups read  : {rg_read}  (skipped {total_rg - rg_read} via pushdown)")
+    print(f"  Rows returned    : {rows_returned:,}")
+    print(f"  Full scan bytes  : {full_scan_bytes:,}")
+    print(f"  Actual I/O bytes : {actual_col_bytes:,}")
+    print(f"  I/O reduction    : {io_reduction_pct:.1f}%")
+
+# Query: SELECT user_id, score WHERE score > 90
+parquet_scan(rg_list, footer,
+             predicate_col="score", predicate_op=">", threshold=90,
+             select_cols=["user_id", "score"])
+print()
+# Query: SELECT user_id, revenue WHERE revenue > 800000
+parquet_scan(rg_list, footer,
+             predicate_col="revenue", predicate_op=">", threshold=800_000,
+             select_cols=["user_id", "revenue"])
+\end{lstlisting}
+
+\pe \textbf{DRF Fairness Simulation (Python).}
+Simulate Dominant Resource Fairness for a cluster with two resource
+dimensions (CPU and RAM) and three competing jobs, showing how DRF
+equalises dominant shares.
+
+\begin{lstlisting}[style=pyspark, caption={PE5.3: Dominant Resource Fairness (DRF) simulator}]
+def drf_allocate(cluster_cpu, cluster_ram_gb, jobs, max_rounds=20):
+    """
+    Simulate DRF allocation.
+    Each job specifies: name, cpu_per_task, ram_per_task_gb, max_tasks
+    DRF grants one task at a time to the job with the lowest dominant share.
+    """
+    allocated = {j["name"]: {"tasks": 0, "cpu": 0.0, "ram": 0.0}
+                 for j in jobs}
+    used_cpu = 0.0
+    used_ram = 0.0
+
+    print(f"Cluster: {cluster_cpu} CPUs | {cluster_ram_gb} GB RAM")
+    print(f"\n{'Round':>5}  {'Job':>12}  {'Dominant':>10}  "
+          f"{'Dom share':>10}  {'Tasks':>7}  {'CPU':>7}  {'RAM':>7}")
+    print("-" * 68)
+
+    for rnd in range(1, max_rounds + 1):
+        # Compute dominant share for each job
+        dom_shares = {}
+        for j in jobs:
+            a = allocated[j["name"]]
+            if a["tasks"] >= j["max_tasks"]:
+                dom_shares[j["name"]] = float("inf")
+                continue
+            cpu_share = a["cpu"] / cluster_cpu if cluster_cpu > 0 else 0
+            ram_share = a["ram"] / cluster_ram_gb if cluster_ram_gb > 0 else 0
+            dom_res   = "cpu" if cpu_share >= ram_share else "ram"
+            dom_shares[j["name"]] = (max(cpu_share, ram_share), dom_res)
+
+        # Select job with minimum dominant share
+        eligible = [j for j in jobs
+                    if isinstance(dom_shares[j["name"]], tuple)
+                    and used_cpu + j["cpu_per_task"] <= cluster_cpu
+                    and used_ram + j["ram_per_task_gb"] <= cluster_ram_gb]
+        if not eligible:
+            break
+
+        winner = min(eligible, key=lambda j: dom_shares[j["name"]][0])
+        w_name = winner["name"]
+        dom_val, dom_res = dom_shares[w_name]
+
+        allocated[w_name]["tasks"] += 1
+        allocated[w_name]["cpu"]   += winner["cpu_per_task"]
+        allocated[w_name]["ram"]   += winner["ram_per_task_gb"]
+        used_cpu += winner["cpu_per_task"]
+        used_ram += winner["ram_per_task_gb"]
+
+        print(f"{rnd:>5}  {w_name:>12}  {dom_res:>10}  "
+              f"{dom_val*100:>9.1f}%  "
+              f"{allocated[w_name]['tasks']:>7}  "
+              f"{allocated[w_name]['cpu']:>7.1f}  "
+              f"{allocated[w_name]['ram']:>7.1f}")
+
+    print("\nFinal allocations:")
+    for j in jobs:
+        a = allocated[j["name"]]
+        cpu_share = a["cpu"] / cluster_cpu * 100
+        ram_share = a["ram"] / cluster_ram_gb * 100
+        print(f"  {j['name']:<14}: {a['tasks']} tasks | "
+              f"CPU: {a['cpu']:.1f} ({cpu_share:.1f}%) | "
+              f"RAM: {a['ram']:.1f} GB ({ram_share:.1f}%)")
+
+# 3 jobs with different resource profiles
+jobs = [
+    {"name": "MapReduce",  "cpu_per_task": 2,  "ram_per_task_gb": 4,   "max_tasks": 8},
+    {"name": "Spark",      "cpu_per_task": 4,  "ram_per_task_gb": 16,  "max_tasks": 6},
+    {"name": "Samza",      "cpu_per_task": 1,  "ram_per_task_gb": 2,   "max_tasks": 12},
+]
+
+drf_allocate(cluster_cpu=32, cluster_ram_gb=128, jobs=jobs, max_rounds=20)
+\end{lstlisting}

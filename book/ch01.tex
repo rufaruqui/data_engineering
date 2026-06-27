@@ -254,23 +254,6 @@ and sources that must be jointly ingested, stored, and analysed. Modern
 organisations do not operate a single data source with a uniform schema;
 they accumulate data from dozens of systems, each with its own format
 and semantics.
-
-Variety manifests along several axes. \emph{Format variety} arises when
-data arrives as CSV files, JSON documents, XML feeds, binary Avro
-records, columnar Parquet files, DICOM medical images, and MP4 video
-simultaneously---all of which must be stored and queried together.
-\emph{Source variety} arises when the same analytical question requires
-joining data from relational databases, REST APIs, IoT sensor streams,
-social media firehoses, and internal event logs. \emph{Semantic variety}
-arises when a field named \texttt{date} means the transaction date in
-one system, the record-entry date in another, and the customer birth
-date in a third.
-
-The foundational distinction among data types---structured,
-semi-structured, and unstructured---is the key conceptual framework for
-managing variety, and we explore it in detail in
-Section~\ref{sec:data-taxonomy}.
-
 \begin{researchspotlight}{Laney (2001) --- The Origin of the 3Vs}
 \textbf{Citation:} Laney, D. (2001). \textit{3D Data Management:
 Controlling Data Volume, Velocity and Variety}. META Group Research
@@ -305,6 +288,24 @@ data, even as the framework has been extended to 5Vs and beyond. Gartner
 officially adopted and extended the definition in 2012.
 \end{researchspotlight}
 
+Variety manifests along several axes. \emph{Format variety} arises when
+data arrives as CSV files, JSON documents, XML feeds, binary Avro
+records, columnar Parquet files, DICOM medical images, and MP4 video
+simultaneously---all of which must be stored and queried together.
+\emph{Source variety} arises when the same analytical question requires
+joining data from relational databases, REST APIs, IoT sensor streams,
+social media firehoses, and internal event logs. \emph{Semantic variety}
+arises when a field named \texttt{date} means the transaction date in
+one system, the record-entry date in another, and the customer birth
+date in a third.
+
+The foundational distinction among data types---structured,
+semi-structured, and unstructured---is the key conceptual framework for
+managing variety, and we explore it in detail in
+Section~\ref{sec:data-taxonomy}.
+
+
+
 %%====================================================================
 \section{The Extended 5Vs Framework}
 \label{sec:five-vs}
@@ -335,31 +336,9 @@ no actionable insight if the right analytical questions are never asked,
 or if the results are never operationalised. Value is the bridge between
 technical capability and organisational outcomes.
 
-\begin{table}[ht]
-\centering
-\caption{The 5Vs framework with engineering implications}
-\label{tab:five-vs}
-\renewcommand{\arraystretch}{1.45}
-\begin{tabular}{L{1.8cm} L{3.2cm} L{3.5cm} L{2.6cm}}
-\toprule
-\textbf{Dimension} & \textbf{Definition} & \textbf{Production example} &
-\textbf{Primary engineering challenge} \\
-\midrule
-Volume    & Scale of data generated and stored & Meta: 500\TB/day ingested &
-            Distributed storage (HDFS, S3) \\
-Velocity  & Speed of generation and processing & Visa: 24,000 tx/s &
-            Stream processing (Kafka, Flink) \\
-Variety   & Diversity of formats and sources & CSV + JSON + DICOM + MP4 &
-            Schema integration, ETL/ELT \\
-Veracity  & Trustworthiness of data quality & GPS drift, OCR errors, bot tweets &
-            Data quality pipelines, validation \\
-Value     & Business utility extracted from data & Fraud prevented, revenue gained &
-            Feature engineering, ML pipelines \\
-\bottomrule
-\end{tabular}
-\end{table}
 
-\begin{researchspotlight}{McKinsey Global Institute (2011) --- Quantifying the Value Dimension}
+
+\begin{researchspotlight}{Quantifying the Value Dimension}
 \textbf{Citation:} Manyika, J.\ et~al.\ (2011). \textit{Big Data: The
 Next Frontier for Innovation, Competition, and Productivity}. McKinsey
 Global Institute, May 2011. \parencite{McKinsey2011}
@@ -396,6 +375,30 @@ technology investment priorities at major corporations and governments
 worldwide, and it validated the creation of dedicated data engineering
 and data science functions within large organisations.
 \end{researchspotlight}
+
+\begin{table}[h!t]
+\centering
+\caption{The 5Vs framework with engineering implications}
+\label{tab:five-vs}
+\renewcommand{\arraystretch}{1.45}
+\begin{tabular}{L{1.8cm} L{3.2cm} L{3.5cm} L{2.6cm}}
+\toprule
+\textbf{Dimension} & \textbf{Definition} & \textbf{Production example} &
+\textbf{Primary engineering challenge} \\
+\midrule
+Volume    & Scale of data generated and stored & Meta: 500\TB/day ingested &
+            Distributed storage (HDFS, S3) \\
+Velocity  & Speed of generation and processing & Visa: 24,000 tx/s &
+            Stream processing (Kafka, Flink) \\
+Variety   & Diversity of formats and sources & CSV + JSON + DICOM + MP4 &
+            Schema integration, ETL/ELT \\
+Veracity  & Trustworthiness of data quality & GPS drift, OCR errors, bot tweets &
+            Data quality pipelines, validation \\
+Value     & Business utility extracted from data & Fraud prevented, revenue gained &
+            Feature engineering, ML pipelines \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 %%====================================================================
 \section{A Taxonomy of Digital Data}
@@ -544,12 +547,14 @@ why the tools introduced in later chapters---Spark MLlib, distributed
 deep learning frameworks, and specialised feature stores---are essential
 components of modern data engineering systems.
 
-\begin{table}[ht]
+
+
+\begin{table}[h!t]
 \centering
 \caption{Comparison of data type characteristics and engineering implications}
 \label{tab:data-type-comparison}
 \renewcommand{\arraystretch}{1.45}
-\begin{tabular}{L{2.0cm} L{2.6cm} L{2.6cm} L{2.8cm}}
+\begin{tabular}{L{2.8cm} L{2.6cm} L{3.2cm} L{2.8cm}}
 \toprule
 \textbf{Dimension}       & \textbf{Structured}     & \textbf{Semi-structured}  & \textbf{Unstructured} \\
 \midrule
@@ -558,12 +563,24 @@ Schema timing            & On write                 & On read                   
 Storage                  & RDBMS tables             & Files, NoSQL, APIs        & Object stores, HDFS \\
 Query tool               & SQL                      & JSONPath, Hive, Spark SQL & NLP, CV, Spark MLlib \\
 Global share             & $\sim$20\%               & $\sim$10\%                & $\sim$70--80\% \\
-Schema change cost       & High (migration)         & Low                       & N/A \\
+Schema change cost       & High                     & Low                       & N/A \\
 Typical ingestion tool   & Sqoop                    & Kafka, Flume              & Custom pipelines \\
 \textbf{Examples}        & Bank ledger, ERP records & REST API JSON, server logs & MRI scan, audio call \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+
+%%====================================================================
+\section{The Engineering Response to Scale}
+\label{sec:engineering-response}
+%%====================================================================
+
+Given the 3Vs, the engineering question is: how do we build systems
+capable of storing petabytes, processing millions of events per second,
+and integrating dozens of heterogeneous data sources? The answer, which
+runs through every chapter of this book, reduces to a small set of
+foundational principles.
 
 \begin{caution}{JSON is Semi-Structured, Not Unstructured}
 A frequent and consequential error: classifying JSON or XML as
@@ -579,18 +596,6 @@ semi-structured data can be stored and queried in a data lake with
 minimal transformation; unstructured data requires a preprocessing
 pipeline before it becomes analytically useful.
 \end{caution}
-
-%%====================================================================
-\section{The Engineering Response to Scale}
-\label{sec:engineering-response}
-%%====================================================================
-
-Given the 3Vs, the engineering question is: how do we build systems
-capable of storing petabytes, processing millions of events per second,
-and integrating dozens of heterogeneous data sources? The answer, which
-runs through every chapter of this book, reduces to a small set of
-foundational principles.
-
 %--------------------------------------------------------------------
 \subsection{Vertical vs.\ Horizontal Scaling}
 \label{subsec:scaling}
