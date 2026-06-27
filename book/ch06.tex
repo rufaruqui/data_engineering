@@ -1,0 +1,1919 @@
+%% ch06.tex — Chapter 6: Apache Spark: In-Memory Distributed Computing
+%% Part of "Data Engineering" textbook
+
+\chapter{Apache Spark: In-Memory Distributed Computing}
+\label{ch:spark}
+
+\epigraph{\textit{``The most important question we faced was: what should be
+the fundamental programming model? We chose to expose distributed memory
+as a first-class abstraction, and that single decision determined
+everything else about Spark's design.''}}{Matei Zaharia, co-creator of Apache Spark, 2016}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Identify the specific I/O bottleneck of MapReduce for iterative
+        workloads and derive the disk-I/O cost formula that motivated
+        the design of Spark.
+  \item Define a Resilient Distributed Dataset (RDD), explain its five
+        defining properties, and describe how lineage-based fault tolerance
+        differs from replication-based fault tolerance.
+  \item Trace the life cycle of a Spark job from \texttt{sc.textFile()}
+        through the DAG Scheduler, Task Scheduler, and Executor, identifying
+        the role of each component.
+  \item Distinguish narrow transformations from wide transformations,
+        explain why wide transformations introduce shuffle boundaries,
+        and identify which RDD operations fall into each category.
+  \item Explain the performance difference between \texttt{groupByKey}
+        and \texttt{reduceByKey}, and apply the correct operator to avoid
+        unnecessary data movement.
+  \item Describe the four phases of the Catalyst query optimizer (analysis,
+        logical optimisation, physical planning, and code generation) and
+        explain how each phase reduces query execution cost.
+  \item Select the appropriate RDD persistence level from
+        \texttt{MEMORY\_ONLY}, \texttt{MEMORY\_AND\_DISK},
+        \texttt{MEMORY\_ONLY\_SER}, and \texttt{DISK\_ONLY} for a given
+        workload, cost, and fault-tolerance requirement.
+  \item Describe the Spark MLlib Pipeline API---Transformer, Estimator,
+        Pipeline, and PipelineModel---and construct a three-stage
+        feature engineering and classification pipeline.
+  \item Explain Spark's unified memory management model, distinguish
+        execution memory from storage memory, and calculate the available
+        memory for each region given a heap size and configuration.
+  \item Apply the salting technique to resolve data skew in a wide
+        transformation, and explain why skew is undetectable by the
+        Catalyst optimizer.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+By 2010, Hadoop's MapReduce framework had conquered the storage and
+batch-processing challenges that motivated its creation. Thousands of
+organisations processed petabytes per day with clusters of commodity
+servers, achieving the economics that Google had demonstrated internally
+with its MapReduce implementation \parencite{MapReduce2004}. Yet
+practitioners who attempted to use MapReduce for machine learning training,
+graph analysis, and iterative data mining encountered a fundamental
+performance barrier: MapReduce was designed for data that is read once,
+processed once, and written once. Any algorithm that reads the same data
+repeatedly---which describes virtually every machine learning training
+algorithm---paid an enormous, repeated disk I/O penalty that made
+computation on even modest datasets prohibitively slow.
+
+This chapter introduces Apache Spark, the distributed computing framework
+that resolved the iterative-workload bottleneck by elevating distributed
+memory to a first-class programming abstraction. Spark's central concept,
+the \term{Resilient Distributed Dataset} (RDD), allows the results of an
+expensive computation to be stored in the combined RAM of a cluster and
+reused across multiple algorithm iterations without a single disk read.
+For workloads such as logistic regression training, this in-memory
+approach achieved speedups of 20$\times$ to 100$\times$ over MapReduce
+in the original benchmarks \parencite{RDD2012}.
+
+%%====================================================================
+\section{The MapReduce Iteration Problem}
+\label{sec:mr-iteration}
+%%====================================================================
+
+To understand why Spark was necessary, we must quantify precisely what
+MapReduce does poorly: iterative computation over the same dataset.
+
+Consider training a logistic regression model on a 100\GB\ training set
+using gradient descent. The training algorithm proceeds in rounds, called
+\emph{iterations} or \emph{epochs}. In each iteration, the algorithm:
+(1) reads the entire training set; (2) computes the gradient of the loss
+function with respect to the current model parameters; (3) updates the
+parameters; and (4) checks a convergence criterion. A typical training
+run requires 50 to 200 iterations before the model converges.
+
+\textbf{The MapReduce implementation} maps one iteration to one
+MapReduce job. Each job:
+\begin{enumerate}
+  \item Reads the 100\GB\ training set from HDFS (3$\times$ replicated
+        = 300\GB\ of disk reads).
+  \item Runs Map tasks to compute per-record gradient contributions.
+  \item Runs a Reduce task to aggregate the gradients.
+  \item Writes the updated model parameters to HDFS.
+  \item The next iteration reads HDFS again from the beginning.
+\end{enumerate}
+
+\begin{defbox}{MapReduce Iteration I/O Cost}
+For an iterative algorithm requiring $I$ iterations over a dataset of
+size $D$ bytes, stored on HDFS with replication factor $r$:
+\begin{align}
+\text{Total disk I/O (MapReduce)} &= I \times D \times r
+  \label{eq:mr-io-cost}
+\end{align}
+For logistic regression with $I = 100$ iterations, $D = 100\GB$,
+$r = 3$:
+\[
+  \text{Total disk I/O} = 100 \times 100\GB \times 3 = 30{,}000\GB = 30\TB
+\]
+Processing 30\TB\ of disk I/O to train a model on 100\GB\ of unique data
+is a $300\times$ I/O amplification. On a cluster that sustains 1\GB/s
+aggregate disk read throughput per node, with 100 nodes, this represents
+5 minutes of wall-clock time \emph{per iteration}---8.3 hours total for
+100 iterations.
+\end{defbox}
+
+The root cause is straightforward: MapReduce has no mechanism for retaining
+intermediate data in memory between jobs. Every job boundary is a forced
+write to and read from HDFS. The framework was designed for single-pass
+batch processing, not iterative refinement. The cluster's RAM---which by
+2010 already totalled hundreds of gigabytes across even a modest 100-node
+cluster---is completely wasted between iterations: it is cleared, and the
+entire dataset is re-read from disk for the next round.
+
+Interactive analytical workloads suffer a related problem. A data
+analyst running ten queries over the same dataset against a Hive-on-MapReduce
+cluster must wait for the full input to be read from HDFS for each query,
+even if the dataset has already been read by a prior query. There is no
+shared memory pool between independent jobs that could serve as a cache.
+
+Matei Zaharia and his collaborators at UC Berkeley identified both problems
+in 2010 and proposed a solution: expose the cluster's aggregate RAM as a
+distributed, fault-tolerant storage layer that persists across job
+boundaries. This idea became Apache Spark \parencite{Spark2010}.
+
+%%====================================================================
+\section{Resilient Distributed Datasets}
+\label{sec:rdd}
+%%====================================================================
+
+The fundamental abstraction of Apache Spark is the \term{Resilient
+Distributed Dataset} (RDD), introduced formally by Zaharia et al.\ at
+NSDI 2012 \parencite{RDD2012}. An RDD is the unit of data in Spark in
+the same way that an HDFS block is the unit of data in Hadoop: every
+computation operates on RDDs, produces RDDs, and stores RDDs.
+
+\begin{defbox}{Resilient Distributed Dataset (RDD)}
+An \textbf{RDD} is an immutable, partitioned, fault-tolerant collection
+of records that can be stored in memory across a cluster of nodes and
+computed in parallel. Formally, an RDD $R$ is characterised by five
+properties:
+\begin{enumerate}
+  \item \textbf{A set of partitions:} $R = \{P_1, P_2, \ldots, P_k\}$,
+        where each partition $P_i$ is a subset of the data assigned to
+        one executor.
+  \item \textbf{A set of dependencies:} a reference to the parent RDD(s)
+        from which $R$ was derived, forming a lineage graph (DAG).
+  \item \textbf{A function to compute each partition} from its parent
+        partition(s).
+  \item \textbf{Partitioning metadata:} the scheme (e.g., hash or range)
+        used to assign records to partitions.
+  \item \textbf{Preferred locations:} hints on which nodes hold the data
+        locally (e.g., HDFS block locations).
+\end{enumerate}
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{Lineage-Based Fault Tolerance}
+\label{subsec:lineage}
+%--------------------------------------------------------------------
+
+The ``Resilient'' in RDD refers to Spark's mechanism for recovering from
+executor failures: \term{lineage-based fault tolerance}. This is the most
+conceptually important property of RDDs, and it distinguishes Spark's
+approach from both MapReduce (which writes intermediate results to disk)
+and traditional distributed shared memory (which replicates data in RAM).
+
+When an executor fails and the partitions it held are lost, Spark does not
+need to restart the entire job. Instead, it consults the RDD's
+\term{lineage graph}---the directed acyclic graph of transformations that
+produced the lost partition---and \emph{recomputes only the lost partition}
+on a surviving executor.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    rdd/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!50,
+                rounded corners=5pt, minimum width=2.8cm, minimum height=0.7cm,
+                font=\small\bfseries\sffamily, align=center},
+    part/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
+                 rounded corners=3pt, minimum width=1.1cm, minimum height=0.55cm,
+                 font=\tiny\sffamily, align=center},
+    lostpart/.style={rectangle, draw=DERed!70, fill=DERed!20,
+                     rounded corners=3pt, minimum width=1.1cm, minimum height=0.55cm,
+                     font=\tiny\sffamily, align=center, dashed},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % RDD A (source)
+  \node[rdd] (A)  at (0,   5.2) {RDD A\\(source)};
+  \node[part] (A1) at (-1.5, 4.2) {$P_1$};
+  \node[part] (A2) at (0,   4.2) {$P_2$};
+  \node[part] (A3) at (1.5, 4.2) {$P_3$};
+  \draw[arr, DEBlue!50] (A.south) -- (A1.north);
+  \draw[arr, DEBlue!50] (A.south) -- (A2.north);
+  \draw[arr, DEBlue!50] (A.south) -- (A3.north);
+
+  % Transformation label
+  \node[lbl, text=DEAccent] at (3.5, 4.5) {.filter(f)\\(narrow dep.)};
+  \draw[DEAccent!50, dashed, -{Stealth[length=3pt]}] (3.5, 4.1) -- (1.0, 4.1);
+
+  % RDD B (derived)
+  \node[rdd] (B)  at (0, 3.0) {RDD B\\(filtered)};
+  \node[part]     (B1) at (-1.5, 2.0) {$P_1$};
+  \node[lostpart] (B2) at (0,   2.0) {$P_2$ \textbf{LOST}};
+  \node[part]     (B3) at (1.5, 2.0) {$P_3$};
+  \draw[arr, DEBlue!50] (B.south) -- (B1.north);
+  \draw[arr, DERed!60,  dashed]   (B.south) -- (B2.north);
+  \draw[arr, DEBlue!50] (B.south) -- (B3.north);
+
+  % Lineage arrows from A partitions to B partitions
+  \draw[arr, DEGreen!70!black, thick] (A1.south) -- (B1.north);
+  \draw[arr, DERed!60, dashed, thick] (A2.south) -- (B2.north);
+  \draw[arr, DEGreen!70!black, thick] (A3.south) -- (B3.north);
+
+  % Recovery annotation
+  \node[lbl, text=DERed, align=left] at (4.5, 2.3)
+       {\textbf{Executor fails:}\\$P_2$ of RDD~B lost};
+  \node[lbl, text=DEGreen!70!black, align=left] at (4.5, 1.4)
+       {\textbf{Recompute:}\\reapply \texttt{filter(f)}\\to $A.P_2$ only};
+  \draw[DERed, -{Stealth[length=3pt]}] (3.4, 2.1) -- (0.6, 2.1);
+  \draw[DEGreen!70!black, -{Stealth[length=3pt]}] (3.4, 1.5) -- (0.6, 1.5);
+
+  % Lineage label
+  \node[font=\small\bfseries\sffamily, text=DEGray] at (-4.0, 3.5)
+       {Lineage};
+  \node[font=\tiny\sffamily, text=DEGray, align=center] at (-4.0, 3.1)
+       {``$B$ was computed\\by applying filter~$f$\\to each partition of~$A$''};
+  \draw[DEGray!50, dashed] (-3.2, 3.5) -- (-1.7, 3.5);
+
+\end{tikzpicture}
+\caption{RDD lineage-based fault tolerance. When $P_2$ of RDD~B is lost
+         due to executor failure, Spark consults the lineage graph to determine
+         that $P_2$ of~B was produced by applying \texttt{filter(f)} to $P_2$
+         of RDD~A, which is still available. Only the lost partition is
+         recomputed---no full job restart is required.}
+\label{fig:rdd-lineage}
+\end{figure}
+
+This design trades replication overhead for recomputation cost. RDDs
+backed by data on HDFS (the most common case) can always recompute any
+lost partition from its HDFS source data, which is itself replicated.
+For RDDs produced by long chains of transformations, Spark allows
+users to insert \term{checkpoints}---explicit writes of an RDD to HDFS
+that truncate the lineage graph---preventing unbounded recomputation
+cost in the event of failure after many transformation stages.
+
+\begin{keyinsight}{Lineage vs.\ Replication: A Design Trade-off}
+Lineage-based fault tolerance costs nothing in memory (no second copy
+of the data is maintained) but can be expensive in time if the lineage
+is long. Replication-based fault tolerance (as in HDFS) costs memory
+for every replica but recovers in constant time regardless of lineage
+length. Spark's design assumes that executor failures are rare and
+datasets are large relative to available RAM---so paying memory for
+replication would defeat the purpose of in-memory computing. For
+streaming workloads where maintaining lineage across an unbounded stream
+is impractical, Spark Structured Streaming adds micro-batch replication.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Lazy Evaluation and the RDD DAG}
+\label{subsec:lazy}
+%--------------------------------------------------------------------
+
+RDDs are computed \term{lazily}: calling a transformation method such as
+\texttt{filter()} or \texttt{map()} does not immediately execute any
+computation. It only records the transformation in the RDD's lineage
+graph. Actual computation is triggered only when the programmer calls
+an \term{action}---a method that returns a non-RDD result to the driver
+(such as \texttt{count()}, \texttt{collect()}, or \texttt{saveAsTextFile()}).
+
+This laziness is not a limitation; it is a deliberate optimisation
+opportunity. When an action is called, Spark's DAG Scheduler can inspect
+the entire lineage graph of all RDDs involved in producing the result
+and optimise the computation plan. It can fuse adjacent narrow
+transformations into a single pass over the data, avoiding intermediate
+materialisation, and it can identify which partitions are already cached
+in memory and skip their recomputation.
+
+%--------------------------------------------------------------------
+\subsection{RDD Persistence}
+\label{subsec:persistence}
+%--------------------------------------------------------------------
+
+The performance advantage of Spark over MapReduce materialises only when
+RDDs are \emph{persisted}. When an RDD is used in multiple actions---the
+common case in iterative algorithms---the programmer must explicitly call
+\texttt{rdd.persist(StorageLevel.MEMORY\_ONLY)} (or the equivalent
+\texttt{rdd.cache()}, which is shorthand for
+\texttt{MEMORY\_ONLY}) to instruct Spark to retain the RDD's partitions
+in executor memory after the first computation. Without persistence,
+each action triggers a full recomputation from the lineage root.
+
+\begin{table}[ht]
+\centering
+\caption{RDD storage levels and their trade-offs}
+\label{tab:storage-levels}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{L{3.2cm} L{1.4cm} L{1.4cm} L{4.5cm}}
+\toprule
+\textbf{Storage level} & \textbf{Memory} & \textbf{Disk} & \textbf{When to use} \\
+\midrule
+\texttt{MEMORY\_ONLY}       & Yes (raw) & No  & Fits in RAM; fast recompute from HDFS \\
+\texttt{MEMORY\_AND\_DISK}  & Yes (raw) & Overflow & Larger-than-RAM; avoid full recompute \\
+\texttt{MEMORY\_ONLY\_SER}  & Yes (Kryo) & No & Tight on RAM; CPU overhead acceptable \\
+\texttt{MEMORY\_AND\_DISK\_SER} & Yes (Kryo) & Overflow & Tight on RAM + large data \\
+\texttt{DISK\_ONLY}         & No        & Yes & Rarely accessed; fast recompute is slow \\
+\texttt{OFF\_HEAP}          & Off-heap  & No  & Avoid GC pauses; Tungsten memory \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Spark evicts persisted RDD partitions using a \emph{least-recently-used}
+(LRU) policy when storage memory is exhausted. Under
+\texttt{MEMORY\_AND\_DISK}, evicted partitions spill to the local disk of
+the executor node rather than being dropped; they are read back from disk
+if needed by a subsequent action. Under \texttt{MEMORY\_ONLY}, evicted
+partitions are simply recomputed from their lineage on demand.
+
+%%====================================================================
+\section{Spark Architecture}
+\label{sec:spark-arch}
+%%====================================================================
+
+A Spark application consists of a single \term{driver program} and one
+or more \term{executors} running on worker nodes. The driver and
+executors communicate through a \term{cluster manager}, which allocates
+the physical resources (CPU cores and RAM) that the application requires.
+
+%--------------------------------------------------------------------
+\subsection{The Driver Program and SparkSession}
+\label{subsec:driver}
+%--------------------------------------------------------------------
+
+The \term{driver program} is the process that contains the user's
+application code. It runs the \texttt{main()} function of the Spark
+application, constructs the \term{SparkSession} (the unified entry point
+since Spark 2.0, replacing the earlier \texttt{SparkContext} and
+\texttt{HiveContext}), and orchestrates the overall execution.
+
+The driver performs three critical functions:
+\begin{itemize}
+  \item \textbf{DAG construction:} as the application code calls
+        transformation methods, the driver records each transformation
+        in an RDD lineage DAG. No computation occurs yet.
+  \item \textbf{Job submission:} when an action is called, the driver
+        submits a job to the DAG Scheduler. The DAG Scheduler partitions
+        the lineage DAG into \term{stages}---groups of transformations
+        that can be pipelined without a data shuffle---and submits each
+        stage as a set of \term{tasks} to the Task Scheduler.
+  \item \textbf{Result collection:} for actions that return data to the
+        driver (such as \texttt{collect()} or \texttt{first()}), the
+        driver receives task results from executors and assembles the
+        final result.
+\end{itemize}
+
+\begin{caution}{The Driver Memory Trap}
+\texttt{rdd.collect()} transfers \emph{all} partitions of an RDD to the
+driver's JVM heap. On a production dataset of even a few hundred
+gigabytes, this causes an OutOfMemoryError that crashes the driver
+process and terminates the entire application. The correct alternatives
+are \texttt{rdd.take(n)} (return only the first $n$ records),
+\texttt{rdd.saveAsTextFile(path)} (write results to HDFS without
+collecting), or \texttt{rdd.sample(false, 0.01)} (return a 1\% sample).
+Use \texttt{collect()} only for small result sets that the driver
+can safely hold in memory---such as the output of a final aggregation.
+\end{caution}
+
+%--------------------------------------------------------------------
+\subsection{Executors}
+\label{subsec:executors}
+%--------------------------------------------------------------------
+
+\term{Executors} are long-lived JVM processes launched on worker nodes
+at application start-up time. Each executor:
+\begin{itemize}
+  \item Runs \emph{tasks} assigned by the Task Scheduler, with multiple
+        tasks running concurrently in separate threads (one thread per
+        available vCPU core allocated to the executor).
+  \item Maintains a local \emph{block store}---the Spark Block Manager---
+        that holds cached RDD partitions and shuffle output blocks.
+  \item Reports task status, progress, and shuffle data locations back
+        to the driver via a heartbeat mechanism.
+  \item Runs for the entire lifetime of the application, enabling in-memory
+        data sharing across multiple Spark jobs within the same application.
+\end{itemize}
+
+The executor's JVM heap is divided between \emph{execution memory}
+(for active task computation: sort buffers, hash tables for aggregations,
+shuffle read/write buffers) and \emph{storage memory} (for cached
+RDD partitions). This division is discussed in depth in
+Section~\ref{sec:memory}.
+
+%--------------------------------------------------------------------
+\subsection{Cluster Managers}
+\label{subsec:cluster-managers}
+%--------------------------------------------------------------------
+
+Spark is \emph{cluster-manager-agnostic}: it delegates the allocation
+of physical resources to a pluggable cluster manager. Three cluster
+managers are commonly used in production:
+
+\begin{itemize}
+  \item \textbf{Spark Standalone:} Spark's built-in cluster manager,
+        suitable for dedicated Spark clusters. Simple to configure but
+        does not support multi-tenant resource sharing or integration
+        with other frameworks. Appropriate for development and
+        single-purpose deployment.
+  \item \textbf{YARN:} the most common production deployment (see
+        Chapter~\ref{ch:yarn-formats}). Spark submits an
+        ApplicationMaster to YARN; the AM negotiates executor containers
+        with the ResourceManager. All of YARN's scheduling policies
+        (Capacity, Fair, DRF) apply to Spark executors. Enables
+        multi-framework resource sharing with MapReduce, Tez, and Samza
+        on the same cluster.
+  \item \textbf{Kubernetes:} the preferred deployment model on
+        cloud infrastructure. The driver runs as a Kubernetes Pod; each
+        executor runs in its own Pod. Kubernetes manages container
+        scheduling, scaling, and isolation using its standard
+        infrastructure, enabling integration with cloud autoscaling.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{DAG Scheduler and Task Scheduler}
+\label{subsec:dag-task-sched}
+%--------------------------------------------------------------------
+
+When an action triggers job execution, the driver's scheduler pipeline
+proceeds in two phases.
+
+The \term{DAG Scheduler} receives the RDD lineage graph, identifies the
+\emph{stage boundaries} (discussed in Section~\ref{sec:transformations}),
+and decomposes the computation into a DAG of stages. Each stage is a
+maximal set of consecutive narrow transformations that can be pipelined.
+Stage boundaries are placed wherever a wide transformation (shuffle)
+appears. The DAG Scheduler also applies \emph{partition skipping}: any
+stage whose output partitions are already cached in executor storage memory
+is skipped entirely, and the cached data is used directly as input to the
+next stage.
+
+The \term{Task Scheduler} receives the physical task list for each ready
+stage and submits tasks to executors via the cluster manager. The Task
+Scheduler applies \emph{delay scheduling}: if the data-local executor is
+briefly unavailable, the Task Scheduler waits a configurable period
+(default 3 seconds) before falling back to a rack-local or
+any-node assignment, maximising data locality.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40,
+                rounded corners=4pt, minimum width=3.2cm, minimum height=0.75cm,
+                font=\small\bfseries\sffamily, align=center},
+    cm/.style={rectangle, draw=DEAccent!70, fill=DELightAccent,
+               rounded corners=4pt, minimum width=3.2cm, minimum height=0.75cm,
+               font=\small\bfseries\sffamily, align=center},
+    exec/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
+                 rounded corners=4pt, minimum width=2.5cm, minimum height=0.65cm,
+                 font=\small\sffamily, align=center},
+    task/.style={rectangle, draw=DEGreen!50, fill=DEGreen!10,
+                 rounded corners=2pt, minimum width=1.0cm, minimum height=0.45cm,
+                 font=\tiny\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily, align=center}
+  ]
+
+  % Driver box (left column)
+  \node[box] (ss)  at (0, 7.0) {SparkSession};
+  \node[box] (dag) at (0, 5.7) {DAG Scheduler};
+  \node[box] (ts)  at (0, 4.4) {Task Scheduler};
+
+  % Cluster Manager (center-right)
+  \node[cm]  (cm)  at (5.0, 5.7) {Cluster Manager\\(YARN / K8s)};
+
+  % Worker nodes
+  \node[exec] (e1) at (3.2, 2.8) {Executor 1};
+  \node[exec] (e2) at (5.5, 2.8) {Executor 2};
+  \node[exec] (e3) at (7.8, 2.8) {Executor 3};
+
+  % Tasks inside executors
+  \node[task] at (2.7, 2.1) {T1}; \node[task] at (3.7, 2.1) {T2};
+  \node[task] at (5.0, 2.1) {T3}; \node[task] at (6.0, 2.1) {T4};
+  \node[task] at (7.3, 2.1) {T5}; \node[task] at (8.3, 2.1) {T6};
+
+  % Driver internal flow
+  \draw[arr, DEBlue] (ss.south)  -- (dag.north)
+       node[midway, right, lbl] {\tiny action triggered};
+  \draw[arr, DEBlue] (dag.south) -- (ts.north)
+       node[midway, right, lbl] {\tiny stage task list};
+
+  % Task Scheduler → Cluster Manager
+  \draw[arr, DEAccent] (ts.east) to[out=0, in=-120] (cm.south)
+       node[pos=0.5, above, lbl, text=DEAccent] {\tiny request containers};
+
+  % Cluster Manager → Executors
+  \draw[arr, DEAccent!70!black] (cm.south) to[out=-90, in=90] (e1.north);
+  \draw[arr, DEAccent!70!black] (cm.south) -- (e2.north);
+  \draw[arr, DEAccent!70!black] (cm.south) to[out=-90, in=90] (e3.north);
+  \node[lbl, text=DEAccent!70!black] at (5.0, 3.9)
+       {\tiny launch executor containers};
+
+  % Executors heartbeat to driver
+  \draw[arr, DEGray!50, dashed]
+       (e2.west) to[bend right=30] (ts.east)
+       node[pos=0.4, right, lbl, text=DEGray] {\tiny\itshape status / results};
+
+  % Driver label
+  \node[font=\small\bfseries\sffamily, text=DEGray, rotate=90]
+       at (-2.2, 5.7) {Driver Process};
+  \draw[DEGray!30, dashed, rounded corners]
+       (-1.8, 3.9) rectangle (1.8, 7.5);
+
+\end{tikzpicture}
+\caption{Spark architecture. The driver process contains the DAG Scheduler
+         and Task Scheduler. The cluster manager (YARN, Kubernetes, or Standalone)
+         allocates executor containers on worker nodes. Executors run tasks assigned
+         by the driver and report results via heartbeat. Executors remain alive for
+         the full application lifetime, enabling in-memory data sharing across jobs.}
+\label{fig:spark-arch}
+\end{figure}
+
+%%====================================================================
+\section{Transformations and Actions}
+\label{sec:transformations}
+%%====================================================================
+
+Every RDD operation in Spark is classified as either a \emph{transformation}
+or an \emph{action}. Understanding this distinction, and the further
+sub-classification of transformations into narrow and wide, is essential
+for writing correct and performant Spark applications.
+
+%--------------------------------------------------------------------
+\subsection{Narrow Transformations}
+\label{subsec:narrow}
+%--------------------------------------------------------------------
+
+A \term{narrow transformation} is one in which each output partition
+depends on at most one input partition. No data movement across the
+network is required: each executor can compute its output partitions
+independently, working only on the input partitions it already holds
+locally. Consecutive narrow transformations are \emph{pipelined} by the
+DAG Scheduler into a single stage: a task processes a record through all
+pipelined transformations without materialising any intermediate RDD.
+
+The most important narrow transformations are:
+
+\begin{itemize}
+  \item \texttt{map(f):} applies function $f$ to each record, producing
+        one output record per input record.
+  \item \texttt{filter(p):} retains only records satisfying predicate $p$.
+  \item \texttt{flatMap(f):} applies $f$ to each record and flattens the
+        resulting sequences into one output RDD.
+  \item \texttt{mapPartitions(f):} applies $f$ once per partition rather
+        than once per record, which is more efficient when the function
+        has per-call overhead (e.g., opening a database connection or
+        loading a model).
+  \item \texttt{union(other):} concatenates two RDDs with the same
+        schema, with no data movement (each partition of the result is
+        exactly one partition of an input).
+  \item \texttt{sample(fraction):} samples each partition independently,
+        with no cross-partition communication.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Wide Transformations and the Shuffle}
+\label{subsec:wide}
+%--------------------------------------------------------------------
+
+A \term{wide transformation} is one in which each output partition may
+depend on multiple input partitions, potentially held on different
+executors. Producing the output requires \emph{moving data across the
+network}---a \term{shuffle}. Every shuffle is a stage boundary: the
+DAG Scheduler inserts a synchronisation point before the downstream
+stage begins, ensuring all upstream tasks have completed and written
+their shuffle output before the downstream tasks begin reading it.
+
+The shuffle is the most expensive operation in Spark. Each shuffle
+involves:
+\begin{enumerate}
+  \item \textbf{Map side (shuffle write):} each upstream task
+        hash-partitions its output records by key and writes each
+        partition's records to a local shuffle file on the executor's
+        disk. This write is unavoidable: the data must survive until
+        all downstream tasks have read it.
+  \item \textbf{Network transfer:} each downstream task reads the shuffle
+        blocks it needs from remote executors via HTTP, crossing the
+        network.
+  \item \textbf{Reduce side (shuffle read):} each downstream task
+        receives and potentially sorts its input before applying the
+        aggregation or join function.
+\end{enumerate}
+
+The most important wide transformations are:
+
+\begin{itemize}
+  \item \texttt{groupByKey():} collects all values for each key into a
+        single iterable in one partition. Requires a full shuffle.
+  \item \texttt{reduceByKey(f):} applies the commutative and associative
+        function $f$ to reduce values for each key. Crucially,
+        \texttt{reduceByKey} applies a partial aggregation \emph{within
+        each partition} before the shuffle (analogous to the Combiner in
+        MapReduce), dramatically reducing the volume of data transferred.
+  \item \texttt{aggregateByKey(zeroValue)(seqOp, combOp):} a generalisation
+        of \texttt{reduceByKey} that supports different input and output types.
+  \item \texttt{sortByKey(ascending):} globally sorts the RDD by key,
+        requiring a range-partitioned shuffle.
+  \item \texttt{join(other):} joins two RDDs on their keys, requiring
+        both to be hash-shuffled by key to co-locate matching records.
+  \item \texttt{distinct():} removes duplicates, requiring a shuffle to
+        co-locate all copies of each record.
+  \item \texttt{repartition(n):} redistributes the RDD into exactly $n$
+        partitions, performing a full shuffle.
+\end{itemize}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    part/.style={rectangle, draw=DEBlue!50, fill=DELightBlue!50,
+                 minimum width=1.6cm, minimum height=0.6cm,
+                 font=\tiny\sffamily, align=center},
+    shuffle/.style={rectangle, draw=DEAccent!70, fill=DELightAccent,
+                    minimum width=1.6cm, minimum height=0.6cm,
+                    font=\tiny\sffamily, align=center},
+    stage/.style={font=\small\bfseries\sffamily, text=DEBlue},
+    arr/.style={-{Stealth[length=3.5pt,width=3.5pt]}, thick},
+    lbl/.style={font=\scriptsize\sffamily}
+  ]
+
+  % Stage 1
+  \node[stage] at (1.2, 6.2) {Stage 1};
+  \node[part] (s1p1) at (0,   5.5) {textFile\\$P_1$};
+  \node[part] (s1p2) at (1.6, 5.5) {textFile\\$P_2$};
+  \node[part] (s1p3) at (3.2, 5.5) {textFile\\$P_3$};
+
+  % Narrow transforms (pipelined)
+  \node[lbl, text=DEGreen!70!black] at (-1.5, 4.5)
+       {flatMap, map\\(narrow, pipelined)};
+  \draw[DEGreen!60, dashed] (-0.8, 4.3) -- (0, 4.8);
+
+  \node[part] (s1o1) at (0,   4.5) {map out\\$P_1$};
+  \node[part] (s1o2) at (1.6, 4.5) {map out\\$P_2$};
+  \node[part] (s1o3) at (3.2, 4.5) {map out\\$P_3$};
+
+  \draw[arr, DEBlue!60] (s1p1.south) -- (s1o1.north);
+  \draw[arr, DEBlue!60] (s1p2.south) -- (s1o2.north);
+  \draw[arr, DEBlue!60] (s1p3.south) -- (s1o3.north);
+
+  % Shuffle boundary
+  \draw[DERed!60, very thick, dashed]
+       (-0.9, 3.9) -- (4.1, 3.9);
+  \node[lbl, text=DERed] at (5.4, 3.9)
+       {\textbf{Shuffle boundary}\\(reduceByKey)};
+
+  % Stage 2
+  \node[stage] at (1.2, 3.4) {Stage 2};
+
+  \node[shuffle] (s2p1) at (0,   3.1) {reduce\\$K_1$};
+  \node[shuffle] (s2p2) at (1.6, 3.1) {reduce\\$K_2$};
+  \node[shuffle] (s2p3) at (3.2, 3.1) {reduce\\$K_3$};
+
+  % All-to-all shuffle arrows
+  \foreach \src in {s1o1, s1o2, s1o3}
+    \foreach \dst in {s2p1, s2p2, s2p3}
+      \draw[DEAccent!50, thin] (\src.south) -- (\dst.north);
+
+  % Output
+  \node[part] (out1) at (0,   2.1) {out $P_1$};
+  \node[part] (out2) at (1.6, 2.1) {out $P_2$};
+  \node[part] (out3) at (3.2, 2.1) {out $P_3$};
+  \draw[arr, DEGreen!70!black] (s2p1.south) -- (out1.north);
+  \draw[arr, DEGreen!70!black] (s2p2.south) -- (out2.north);
+  \draw[arr, DEGreen!70!black] (s2p3.south) -- (out3.north);
+  \node[lbl, text=DEGreen!70!black] at (-1.5, 2.2) {saveAsTextFile\\(action)};
+  \draw[DEGreen!60, dashed] (-0.8, 2.2) -- (0, 2.2);
+
+\end{tikzpicture}
+\caption{Spark stage and shuffle boundary for a word-count job. Stage~1 pipelines
+         \texttt{textFile}, \texttt{flatMap}, and \texttt{map} (all narrow) into a
+         single pass. The \texttt{reduceByKey} is a wide transformation, creating a
+         shuffle boundary. Stage~2 performs the shuffle read and final aggregation.
+         The all-to-all arrows represent network transfer of shuffle blocks.}
+\label{fig:shuffle-boundary}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{groupByKey vs.\ reduceByKey: A Critical Distinction}
+\label{subsec:groupby-vs-reduceby}
+%--------------------------------------------------------------------
+
+\begin{caution}{\texttt{groupByKey} Transfers All Data; \texttt{reduceByKey} Does Not}
+The most common performance anti-pattern in Spark is using
+\texttt{groupByKey()} when \texttt{reduceByKey()} is applicable.
+Consider computing the sum of values per key. \texttt{groupByKey()}
+sends \emph{all} raw values for each key across the network to one
+executor, where the sum is computed. If there are $10^8$ records with
+key ``DE'' each holding a 16-byte value, that is 1.6\GB\ of network
+traffic \emph{just for that one key}.
+
+\texttt{reduceByKey(lambda a, b: a + b)} first sums values within each
+source partition independently (producing one sum per partition per key),
+then shuffles only these partial sums. If there are 200 partitions,
+the shuffle transfers 200 numbers for key ``DE''---16-byte numbers---
+instead of 1.6\GB. The network amplification factor is reduced by the
+partition count ($200\times$ in this example).
+
+The general rule: use \texttt{reduceByKey}, \texttt{aggregateByKey}, or
+\texttt{combineByKey} whenever the aggregation function is associative
+and commutative. Use \texttt{groupByKey} only when all raw values for a
+key must be available simultaneously (e.g., computing a per-key median).
+\end{caution}
+
+%--------------------------------------------------------------------
+\subsection{Actions}
+\label{subsec:actions}
+%--------------------------------------------------------------------
+
+\term{Actions} are the operations that trigger the execution of the
+accumulated RDD lineage DAG and return a concrete result. The most
+important actions are:
+
+\begin{itemize}
+  \item \texttt{count():} returns the number of records in the RDD as a
+        \texttt{Long}.
+  \item \texttt{collect():} transfers all partitions to the driver and
+        returns a local array (use only for small results).
+  \item \texttt{take(n):} returns the first $n$ records from the first
+        partition(s), with less data movement than \texttt{collect()}.
+  \item \texttt{reduce(f):} applies the associative and commutative
+        function $f$ to all records, returning a single value.
+  \item \texttt{foreach(f):} applies function $f$ to each record on
+        the executor side (e.g., to write records to an external system)
+        without returning data to the driver.
+  \item \texttt{saveAsTextFile(path):} writes the RDD as plain text
+        files to an HDFS path (one file per partition).
+  \item \texttt{saveAsSequenceFile(path):} writes as Hadoop SequenceFile
+        format (key-value pairs).
+\end{itemize}
+
+%%====================================================================
+\section{Spark SQL: DataFrames, Datasets, and the Catalyst Optimizer}
+\label{sec:spark-sql}
+%%====================================================================
+
+The RDD API provides low-level control over distributed computation but
+requires the programmer to reason explicitly about types, partitions, and
+data layouts. For SQL-style analytical workloads, this level of control
+is unnecessarily cumbersome. Spark SQL, introduced in Spark 1.0 and
+substantially redesigned through Spark 2.0 and 3.0, provides a
+structured, schema-aware API that allows the Spark engine to apply
+far more aggressive automatic optimisations.
+
+%--------------------------------------------------------------------
+\subsection{DataFrames and Datasets}
+\label{subsec:dataframes}
+%--------------------------------------------------------------------
+
+A \term{DataFrame} is an RDD of \texttt{Row} objects with a named,
+typed schema---conceptually a distributed relational table. The schema
+is declared explicitly or inferred from structured data sources (Parquet,
+ORC, JSON, Hive tables, JDBC). Unlike a raw RDD, a DataFrame carries
+column names and data types, enabling the query engine to reason about
+the computation without executing it.
+
+A \term{Dataset} is a strongly typed, JVM-object-centric version of
+the DataFrame, available in Scala and Java. A \texttt{Dataset[Person]}
+stores JVM \texttt{Person} objects rather than generic \texttt{Row}
+objects, providing compile-time type safety at the cost of some JVM
+serialisation overhead. In Python and R, DataFrames are used exclusively
+(there is no separate Dataset API because these languages are dynamically
+typed).
+
+The \term{SparkSession} is the unified entry point for all Spark SQL
+operations:
+
+\begin{lstlisting}[style=pyspark, caption={SparkSession creation and DataFrame operations}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, avg, count
+
+spark = SparkSession.builder \
+    .appName("SalesAnalysis") \
+    .config("spark.sql.shuffle.partitions", "200") \
+    .getOrCreate()
+
+# Load a Parquet table from HDFS
+sales = spark.read.parquet("hdfs:///data/sales/dt=2024-*")
+
+# DataFrame operations: filter, groupBy, aggregate
+result = (sales
+    .filter(col("amount") > 100)
+    .groupBy("region", "product_id")
+    .agg(
+        count("*").alias("num_sales"),
+        avg("amount").alias("avg_amount")
+    )
+    .orderBy(col("avg_amount").desc())
+)
+
+result.write.mode("overwrite").parquet("hdfs:///output/sales_summary")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{The Catalyst Optimizer}
+\label{subsec:catalyst}
+%--------------------------------------------------------------------
+
+The key advantage of the DataFrame/SQL API over the raw RDD API is that
+every DataFrame operation passes through the \term{Catalyst optimizer}
+before execution. Catalyst is a tree-based query optimizer written in
+Scala that applies a cascade of rule-based and cost-based transformations
+to reduce query execution cost. It operates in four phases.
+
+\textbf{Phase 1 --- Analysis.} Catalyst resolves attribute names and
+data types by consulting the \term{Spark Catalog}---the metadata registry
+for tables, views, functions, and databases (backed by the Hive Metastore
+in production). Unresolved logical plans (trees with unresolved attribute
+references) become resolved logical plans (trees where every attribute
+has a confirmed name and data type).
+
+\textbf{Phase 2 --- Logical Optimisation.} Catalyst applies rule-based
+algebraic transformations to the resolved logical plan:
+\begin{itemize}
+  \item \textbf{Predicate pushdown:} move \texttt{WHERE} filter conditions
+        as close to the data source as possible, so that Parquet row
+        groups can be skipped before data is read into memory.
+  \item \textbf{Column pruning:} remove columns not referenced by the
+        query from the scan; only referenced column chunks are read
+        from Parquet files.
+  \item \textbf{Constant folding:} evaluate expressions that involve
+        only constants at compile time (e.g., \texttt{WHERE year = 2020
+        + 4} becomes \texttt{WHERE year = 2024}).
+  \item \textbf{Join reordering:} place smaller tables on the build side
+        of hash joins (or as the broadcast side of broadcast hash joins).
+\end{itemize}
+
+\textbf{Phase 3 --- Physical Planning.} Catalyst converts the optimised
+logical plan into one or more candidate physical plans---concrete
+execution strategies involving Spark operators. For a join, physical
+plans may include sort-merge join (for large tables), broadcast hash join
+(when one table fits in executor memory, default threshold 10\MB), or
+hash join. Catalyst applies a simple cost model (based on estimated row
+counts from Parquet file statistics) to select the lowest-cost plan.
+
+\textbf{Phase 4 --- Code Generation (Tungsten).} The selected physical
+plan is compiled to JVM bytecode by the \term{Tungsten} execution engine.
+Tungsten uses \emph{whole-stage code generation}: rather than interpreting
+a query plan row-by-row through a generic operator tree, Tungsten
+generates a single JVM method that fuses all operators in a pipeline into
+a tight loop. This eliminates virtual function call overhead and enables
+the JIT compiler to produce CPU-efficient native code. Tungsten also uses
+off-heap \emph{unsafe} memory for sort and aggregate buffers, bypassing
+JVM garbage collection overhead.
+
+\begin{systemdesign}{Catalyst and Parquet: An End-to-End Example}
+A query \texttt{SELECT product\_id, SUM(amount) FROM sales WHERE region
+= 'EU' AND dt BETWEEN '2024-01-01' AND '2024-03-31' GROUP BY
+product\_id} on a Parquet table partitioned by \texttt{dt} passes
+through Catalyst as follows:
+\begin{enumerate}
+  \item \textbf{Partition pruning:} only the subdirectories
+        \texttt{/sales/dt=2024-01-01/} through
+        \texttt{/sales/dt=2024-03-31/} are scanned. All other partitions
+        are eliminated before any data is read.
+  \item \textbf{Predicate pushdown:} the \texttt{region = 'EU'} filter
+        is pushed into the Parquet reader. Row groups where
+        \texttt{max(region) < 'EU'} or \texttt{min(region) > 'EU'}
+        (lexicographically) are skipped via footer statistics.
+  \item \textbf{Column pruning:} only the \texttt{region},
+        \texttt{product\_id}, and \texttt{amount} column chunks are read;
+        all other column chunks are not opened.
+  \item \textbf{Aggregation:} Catalyst generates a two-phase aggregate
+        plan: a partial sum within each partition (no shuffle), then a
+        shuffle on \texttt{product\_id}, then a final sum per partition
+        in the reduce stage.
+\end{enumerate}
+The combined effect of partition pruning, predicate pushdown, and column
+pruning can reduce the physical I/O from terabytes to gigabytes on a
+selective query---without any manual hint or configuration beyond
+the initial table partitioning.
+\end{systemdesign}
+
+%--------------------------------------------------------------------
+\subsection{SparkSQL and Hive Integration}
+\label{subsec:spark-hive}
+%--------------------------------------------------------------------
+
+Spark SQL integrates with the \tool{Hive Metastore} through the Hive
+Catalog interface, allowing SparkSQL queries to operate on tables defined
+by Hive DDL statements, including partitioned Parquet and ORC tables
+(introduced in Chapter~\ref{ch:yarn-formats}). This integration allows
+organisations to migrate from Hive-on-MapReduce to Spark SQL with no
+changes to table definitions, partition schemes, or ETL job logic---only
+the execution engine changes.
+
+%%====================================================================
+\section{MLlib: Distributed Machine Learning}
+\label{sec:mllib}
+%%====================================================================
+
+Apache Spark MLlib is Spark's built-in machine learning library. Its
+central design goal is to express machine learning pipelines---sequences
+of data preprocessing, feature engineering, and model training steps---as
+\term{Pipeline} objects that can be fit to training data, saved to disk,
+and applied to new data with a single API call.
+
+%--------------------------------------------------------------------
+\subsection{Core Abstractions: Transformer, Estimator, and Pipeline}
+\label{subsec:pipeline-api}
+%--------------------------------------------------------------------
+
+The MLlib Pipeline API is built from three abstractions.
+
+A \term{Transformer} is an object that implements a \texttt{transform(df)}
+method: it takes a DataFrame as input and produces a new DataFrame with
+one or more new columns added. Transformers are \emph{stateless}---they
+do not learn parameters from data. Examples include \texttt{Tokenizer}
+(splits text into words), \texttt{HashingTF} (converts token lists to
+TF-IDF feature vectors), \texttt{StandardScaler} after fitting (normalises
+numerical features using pre-computed mean and standard deviation), and
+any trained model (which transforms a feature DataFrame into a
+predictions DataFrame).
+
+An \term{Estimator} is an object that implements a \texttt{fit(df)}
+method: it trains a model on data and produces a \emph{Transformer}
+(the trained model). Examples include \texttt{LogisticRegression},
+\texttt{RandomForestClassifier}, \texttt{KMeans}, and
+\texttt{StandardScaler} (before fitting---the fitted version is a
+Transformer).
+
+A \term{Pipeline} is an ordered sequence of Transformers and Estimators.
+\texttt{pipeline.fit(df)} calls \texttt{fit()} on each Estimator in
+sequence, using the training DataFrame and passing the output to the
+next stage. The result is a \texttt{PipelineModel}---a sequence of
+Transformers---which can be applied to new data via
+\texttt{model.transform(test\_df)}.
+
+\begin{lstlisting}[style=pyspark, caption={MLlib Pipeline for text classification}]
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import (Tokenizer, HashingTF, IDF,
+                                 StringIndexer, VectorAssembler)
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
+# Load labelled text data
+df = spark.read.parquet("hdfs:///data/news_articles")
+
+# Build pipeline stages
+tokenizer  = Tokenizer(inputCol="text", outputCol="tokens")
+hashing_tf = HashingTF(inputCol="tokens", outputCol="raw_features",
+                       numFeatures=20_000)
+idf        = IDF(inputCol="raw_features", outputCol="features")
+indexer    = StringIndexer(inputCol="label", outputCol="label_idx")
+lr         = LogisticRegression(featuresCol="features",
+                                labelCol="label_idx",
+                                maxIter=100)
+
+pipeline = Pipeline(stages=[tokenizer, hashing_tf, idf, indexer, lr])
+
+# Train / test split
+train, test = df.randomSplit([0.8, 0.2], seed=42)
+
+# Fit: trains IDF, StringIndexer, LogisticRegression on train
+model = pipeline.fit(train)
+
+# Transform: applies all transformations to test
+predictions = model.transform(test)
+
+evaluator = MulticlassClassificationEvaluator(
+    labelCol="label_idx", predictionCol="prediction",
+    metricName="accuracy")
+print(f"Test accuracy: {evaluator.evaluate(predictions):.4f}")
+
+# Persist the trained model to HDFS for serving
+model.save("hdfs:///models/news_classifier_v1")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Key MLlib Algorithms}
+\label{subsec:mllib-algos}
+%--------------------------------------------------------------------
+
+\begin{table}[ht]
+\centering
+\caption{Representative MLlib algorithms by category}
+\label{tab:mllib-algos}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{L{2.4cm} L{3.6cm} L{4.4cm}}
+\toprule
+\textbf{Category} & \textbf{Algorithm} & \textbf{Typical use case} \\
+\midrule
+Classification  & LogisticRegression, RandomForestClassifier, GBTClassifier, LinearSVC & Spam detection, churn prediction, document classification \\
+Regression      & LinearRegression, RandomForestRegressor, GBTRegressor & Price forecasting, demand estimation \\
+Clustering      & KMeans, GaussianMixture, BisectingKMeans & Customer segmentation, anomaly detection \\
+Recommendation  & ALS (Alternating Least Squares) & Collaborative filtering (Netflix, Spotify) \\
+Feature Eng.    & PCA, Word2Vec, MinHashLSH, QuantileDiscretizer & Dimensionality reduction, similarity search \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Alternating Least Squares (ALS)} deserves particular mention as
+it illustrates how Spark's in-memory model enables iterative ML algorithms.
+ALS is a matrix factorisation algorithm for collaborative filtering: given
+a user-item rating matrix with many missing entries, it alternately holds
+user factors fixed and solves for item factors (an embarrassingly parallel
+linear algebra problem), then holds item factors fixed and solves for user
+factors. Each alternation reads the full ratings matrix. On a dataset of
+$10^9$ ratings, this read is performed 10--20 times per training run; with
+the ratings cached in Spark's distributed memory, all subsequent reads are
+served from RAM at disk-free speed.
+
+%%====================================================================
+\section{Memory Management in Spark}
+\label{sec:memory}
+%%====================================================================
+
+Spark's performance advantage over MapReduce rests on its ability to
+use the executor's JVM heap for both active computation and RDD caching.
+Understanding how Spark divides this memory between competing uses is
+essential for diagnosing and resolving the two most common production
+failure modes: spill-to-disk (which degrades performance) and OOM
+(OutOfMemory) errors (which crash executors).
+
+%--------------------------------------------------------------------
+\subsection{The Unified Memory Model}
+\label{subsec:unified-mem}
+%--------------------------------------------------------------------
+
+Spark 1.6 introduced the \term{unified memory model}, which replaced
+the earlier static partitioning of execution and storage memory with a
+dynamic boundary. The executor JVM heap is divided into three regions:
+
+\begin{enumerate}
+  \item \textbf{Reserved Memory} (300\MB, fixed): reserved for Spark's
+        internal objects. Not configurable.
+  \item \textbf{Spark Memory} (\texttt{spark.memory.fraction} $\times$
+        (heap $-$ 300\MB), default $0.6$): the pool shared between
+        execution and storage.
+  \item \textbf{User Memory} (remaining $1 - 0.6 = 0.4$ fraction):
+        available for user-defined data structures, UDF objects, and
+        the Java/Scala collections used in application code.
+\end{enumerate}
+
+Within the Spark Memory pool, execution memory and storage memory share
+the space dynamically:
+
+\begin{itemize}
+  \item \textbf{Storage Memory} (initially \texttt{spark.memory.storageFraction}
+        $\times$ Spark Memory, default $0.5$) caches persisted RDD
+        partitions. Storage memory can expand into unused execution memory,
+        but cannot forcibly evict active execution memory.
+  \item \textbf{Execution Memory} (the remainder) holds sort buffers,
+        hash tables for aggregations, and shuffle read/write buffers.
+        Execution memory can borrow from storage memory, and if it does,
+        Spark evicts cached RDD partitions (via LRU) to make room.
+\end{itemize}
+
+\begin{defbox}{Unified Memory Allocation}
+For an executor with $H$ bytes of JVM heap:
+\begin{align}
+M_{\text{spark}}   &= \texttt{fraction} \times (H - 300\MB) \label{eq:spark-mem} \\
+M_{\text{storage}} &\approx \texttt{storageFraction} \times M_{\text{spark}} \label{eq:storage-mem} \\
+M_{\text{exec}}    &= M_{\text{spark}} - M_{\text{storage}} \quad \text{(initial)} \label{eq:exec-mem}
+\end{align}
+For $H = 16\GB$, \texttt{fraction} $= 0.6$, \texttt{storageFraction}
+$= 0.5$:
+\begin{align*}
+M_{\text{spark}}   &= 0.6 \times (16\GB - 0.3\GB) \approx 9.4\GB \\
+M_{\text{storage}} &\approx 0.5 \times 9.4\GB = 4.7\GB \\
+M_{\text{exec}}    &\approx 4.7\GB \quad \text{(can grow up to } 9.4\GB)
+\end{align*}
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{Serialisation and Kryo}
+\label{subsec:kryo}
+%--------------------------------------------------------------------
+
+When RDD partitions are persisted with \texttt{MEMORY\_ONLY\_SER} or
+spill to disk, Spark must serialise Java/Scala objects into a byte
+stream. By default, Spark uses Java's native serialisation, which is
+flexible (handles arbitrary Java objects) but slow and space-inefficient.
+
+\term{Kryo serialisation} (\texttt{spark.serializer = org.apache.spark.
+serializer.KryoSerializer}) is a third-party library that serialises
+registered classes 2--10$\times$ faster and produces 3--5$\times$ smaller
+byte representations than Java serialisation. For RDDs of simple, known
+types (such as \texttt{(String, Int)} pairs or custom case classes),
+Kryo is almost always the correct choice.
+
+\begin{lstlisting}[style=pyspark, caption={Enabling Kryo serialization and registering classes}]
+from pyspark import SparkConf, SparkContext
+
+conf = SparkConf() \
+    .setAppName("KryoDemo") \
+    .set("spark.serializer",
+         "org.apache.spark.serializer.KryoSerializer") \
+    .set("spark.kryo.registrationRequired", "false") \
+    .set("spark.kryoserializer.buffer.max", "256m")
+
+sc = SparkContext(conf=conf)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Data Skew and Salting}
+\label{subsec:skew}
+%--------------------------------------------------------------------
+
+\term{Data skew} occurs when the keys of a wide transformation are
+distributed unevenly: a small number of keys contain a very large
+fraction of the records. In a \texttt{reduceByKey}, all records for
+the same key must be sent to the same partition. If 40\% of the dataset
+has the key \texttt{``US''}, one task will process 40\% of the data
+while the other 199 tasks process the remaining 60\% divided evenly.
+The entire stage cannot complete until the skewed task finishes. The
+stage latency is dominated by the slowest task, making the overall
+job wall-clock time proportional to the largest single-key volume.
+
+The standard remedy is \term{salting}: appending a random integer suffix
+(the ``salt'') to skewed keys to distribute their records across multiple
+partitions, then performing a two-phase aggregation.
+
+\begin{lstlisting}[style=pyspark, caption={Salting to resolve data skew in a PySpark RDD}]
+import random
+
+SALT_FACTOR = 50    # number of salt buckets for skewed keys
+SKEWED_KEYS = {"US", "CN", "DE"}   # keys known to be skewed
+
+def add_salt(record):
+    key, value = record
+    if key in SKEWED_KEYS:
+        salted_key = (key, random.randint(0, SALT_FACTOR - 1))
+    else:
+        salted_key = (key, 0)
+    return (salted_key, value)
+
+def remove_salt(record):
+    (key, _salt), value = record
+    return (key, value)
+
+# Phase 1: shuffle by (key, salt) -> 50x more reducers for skewed keys
+partial = (rdd
+    .map(add_salt)
+    .reduceByKey(lambda a, b: a + b))   # partial aggregation
+
+# Phase 2: strip salt, re-aggregate to get final per-key totals
+final = (partial
+    .map(remove_salt)
+    .reduceByKey(lambda a, b: a + b))   # final aggregation
+\end{lstlisting}
+
+\begin{techdebt}{Skew is Invisible to the Optimizer}
+Data skew is one of the most common causes of Spark job failure in
+production, and it is almost entirely invisible to the Catalyst optimizer.
+Catalyst can pushdown predicates, prune columns, and choose between sort-merge
+and broadcast joins---but it cannot detect that 40\% of the data has the
+same key unless the user provides statistics or explicit hints. The symptoms
+are: a stage where 199 out of 200 tasks complete quickly but one task runs
+for hours, eventually causing the executor to OOM or timeout.
+
+Diagnostic steps: examine the Spark UI ``Stages'' tab and look for tasks with
+anomalously large ``Input Size'' or ``Shuffle Read Size.'' Use
+\texttt{df.groupBy("key").count().orderBy(F.desc("count")).show(20)} to identify
+skewed keys before designing the aggregation.
+\end{techdebt}
+
+%%====================================================================
+\section{Research Spotlights}
+\label{sec:ch6-research}
+%%====================================================================
+
+\begin{researchspotlight}{Zaharia et al.\ (2010) --- Spark: Cluster Computing with Working Sets}
+\textbf{Citation:} Zaharia, M., Chowdhury, M., Franklin, M.~J.,
+Shenker, S., and Stoica, I.\ (2010). Spark: Cluster Computing with
+Working Sets. \textit{Proceedings of the 2nd USENIX Workshop on Hot
+Topics in Cloud Computing (HotCloud 2010)}.
+\parencite{Spark2010}
+
+\smallskip\noindent
+\textbf{Key insight:} The paper's thesis is that MapReduce is fundamentally
+unsuited for two important and growing workload classes: \emph{iterative
+algorithms} (machine learning, graph processing) and \emph{interactive
+data analysis} (exploratory SQL on cached datasets). Both require
+reading the same data multiple times, and MapReduce's forced disk
+materialisation between stages makes this prohibitively expensive.
+The solution is to treat distributed RAM as a first-class abstraction
+that persists across job boundaries.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Introduced the concept of a \emph{working set}---the subset of
+        data that an application accesses repeatedly---and argued that
+        a cluster computing framework should allow the working set to be
+        stored in distributed memory across the cluster.
+  \item Demonstrated that a logistic regression training job ran
+        $10\times$ faster on Spark than on Hadoop MapReduce by caching
+        the training set in memory after the first iteration.
+  \item Showed that interactive queries over a 39\GB\ Wikipedia dataset
+        ran in 0.5--1 second on cached data vs.\ 20--60 seconds on
+        Hadoop, enabling genuine interactive exploration at scale.
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} The HotCloud 2010 paper introduced Spark to the
+research community and has been cited over 5{,}000 times. Within three
+years of this publication, Spark had been adopted by hundreds of
+organisations and had become the fastest-growing Apache project in
+history. The working-set insight---that most production ML and analytics
+workloads repeatedly access the same data---is now the primary
+justification for in-memory computing frameworks across the industry.
+\end{researchspotlight}
+
+\begin{researchspotlight}{Zaharia et al.\ (2012) --- Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory Cluster Computing}
+\textbf{Citation:} Zaharia, M., Chowdhury, M., Das, T., Dave, A., Ma, J.,
+McCauley, M., Franklin, M.~J., Shenker, S., and Stoica, I.\ (2012).
+Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory
+Cluster Computing. \textit{Proceedings of the 9th USENIX Symposium on
+Networked Systems Design and Implementation (NSDI 2012)}, pp.\ 15--28.
+\textbf{Best Paper Award.} \parencite{RDD2012}
+
+\smallskip\noindent
+\textbf{Key insight:} The central contribution is the formalization of
+the RDD abstraction and its lineage-based fault tolerance model. The
+paper argues that existing distributed shared memory systems fail for
+large-scale data processing because they require fine-grained writes to
+be tracked for replication---an overhead that is prohibitive at
+petabyte scale. RDDs restrict mutations to coarse-grained
+transformations (each transformation applies the same function to all
+records in a partition), which makes it possible to describe any lost
+partition's provenance with a short lineage graph rather than a full
+data log.
+
+\smallskip\noindent
+\textbf{Technical contributions:}
+\begin{itemize}
+  \item Formally defined the RDD as a five-tuple (partitions, dependencies,
+        compute function, partitioner, preferred locations) and proved
+        that lineage-based fault tolerance is sufficient for the class
+        of coarse-grained transformations that covers all common data
+        analytics operations.
+  \item Distinguished narrow from wide dependencies and showed that
+        narrow-dependency lineage recomputation is always partition-local
+        (no cross-executor coordination needed), while wide-dependency
+        recomputation may require reading multiple parent partitions.
+  \item Benchmarked Spark RDDs against Hadoop MapReduce on four workloads:
+        logistic regression (25$\times$ speedup on second iteration),
+        PageRank (7$\times$ speedup), $k$-means clustering (40$\times$
+        speedup), and interactive SQL queries (sub-second vs.\ tens of
+        seconds).
+\end{itemize}
+
+\smallskip\noindent
+\textbf{Impact today:} The NSDI 2012 paper is the most-cited Spark
+paper, with over 10{,}000 citations, and is considered one of the
+foundational papers of the systems era of big data processing. The RDD
+abstraction directly influenced the design of DataFrame/Dataset APIs,
+Apache Flink's DataSet/DataStream APIs, TensorFlow's distributed variable
+model, and Ray's distributed object store. The narrow/wide dependency
+distinction is now standard vocabulary in distributed systems courses
+worldwide.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: Alibaba's Spark Deployment for Singles' Day (11.11)}
+\label{sec:alibaba-case}
+%%====================================================================
+
+\begin{casestudy}{Alibaba --- Apache Spark at 10{,}000 Nodes for the World's Largest Shopping Event}
+
+\textbf{Background.}
+Alibaba's Singles' Day (11.11) shopping festival---held annually on
+11 November---is the world's largest single-day commerce event.
+In 2019, the event generated \$38.4 billion USD in gross merchandise
+value within 24 hours, with a peak transaction rate of 544{,}000
+orders per second. Behind this scale lay one of the largest production
+deployments of Apache Spark in existence, integrated into Alibaba's
+MaxCompute (formerly ODPS) and E-MapReduce platforms.
+
+\smallskip
+\textbf{Scale.}
+Alibaba's internal Spark deployment for 11.11 2019 involved:
+\begin{itemize}
+  \item Over \textbf{10{,}000 executor nodes}, each with 96\GB\ of RAM
+        and 24 vCPUs---approximately 960\TB\ of aggregate RAM and
+        240{,}000 vCPUs available to Spark applications.
+  \item Processing over \textbf{970\PB} of data in the 24-hour event
+        window, primarily through Spark SQL queries over Parquet tables
+        partitioned by buyer\_id, seller\_id, and event timestamp.
+  \item Over \textbf{1 trillion individual user behaviour events}
+        (page views, searches, cart additions, purchases, refunds)
+        accumulated, processed, and fed into real-time recommendation
+        engines during the event.
+\end{itemize}
+
+\smallskip
+\textbf{The recommendation challenge.}
+The highest-impact use of Spark on 11.11 was powering Taobao's
+product recommendation system, which generates personalised product
+lists for 800 million active users. Recommendation model updates during
+the event must incorporate behaviour signals from the event itself:
+a user who viewed three laptops in the first hour of the event should
+be shown accessories in the second hour, not laptops she has already
+browsed.
+
+This requirement---updating models on streaming data \emph{during} the
+event, not just in nightly batch jobs---drove Alibaba's engineers to
+build a hybrid streaming-batch architecture:
+
+\begin{enumerate}
+  \item \textbf{Behaviour ingestion} (Alibaba's Blink / Apache Flink):
+        raw user events arrive from Taobao at approximately 11 million
+        events per second at peak. Flink processes them in real time,
+        computing streaming feature updates (user-product affinity scores,
+        click-through rates, conversion funnels) with a latency of
+        under 500 milliseconds.
+
+  \item \textbf{Model refresh} (Spark MLlib): every 10 minutes during
+        the 24-hour event, a Spark MLlib ALS collaborative filtering job
+        is triggered, consuming the latest streaming feature snapshots
+        from HDFS (written by Flink) as training data. The 10-minute
+        ALS job runs on 2{,}000 executor nodes with the rating matrix
+        (approximately 800 million users $\times$ 2 billion items, with
+        40 billion observed entries) cached in distributed memory across
+        the executors. Retraining from scratch on this matrix would
+        require 6--8 hours with disk-based MapReduce; with Spark and
+        in-memory caching, the job completes in 8--12 minutes.
+
+  \item \textbf{Recommendation serving}: the refreshed model parameters
+        (user and item latent factors, each a 128-dimensional vector)
+        are pushed to Alibaba's distributed key-value store and served
+        to Taobao's API layer within 2 minutes of the ALS job completing.
+        Users browsing during the refresh window see recommendations based
+        on model parameters that incorporate signals from as recently as
+        12 minutes ago.
+\end{enumerate}
+
+\smallskip
+\textbf{Spark SQL for campaign analytics.}
+Beyond recommendation, Alibaba's marketing analytics team ran Spark SQL
+queries continuously during 11.11 to power the event's live broadcast
+analytics dashboard---visible to 800 million TV viewers as a real-time
+counter of GMV, transaction volume, and category breakdowns. These
+queries joined three Parquet tables:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Table} & \textbf{Size} & \textbf{Update frequency} \\
+\midrule
+\texttt{transactions} & $\sim$200\TB\ at event end & Appended per minute \\
+\texttt{products}     & $\sim$3\GB\ (broadcast)    & Static \\
+\texttt{sellers}      & $\sim$5\GB\ (broadcast)    & Static \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Catalyst automatically applied \emph{broadcast hash join} for the
+small dimension tables (products, sellers), avoiding shuffles entirely
+for those joins. The \texttt{transactions} table, partitioned by
+\texttt{event\_minute}, was scanned with partition pruning: each
+dashboard query only read the most recent 5-minute partition
+($\sim$600\MB) rather than the full 200\TB\ of accumulated transactions.
+
+\smallskip
+\textbf{Skew management.}
+A critical engineering challenge was the Taobao flagship stores: a
+single store operated by a major brand might account for hundreds of
+millions of transaction records in 24 hours. Grouping by
+\texttt{seller\_id} without salting would have created severe skew,
+with one task processing $>$20\% of the entire dataset. Alibaba's
+engineering team applied salting for known high-volume sellers, reducing
+the maximum single-task volume to approximately 2\% of the dataset.
+
+\smallskip
+\textbf{Outcomes and lessons.}
+Alibaba's 11.11 2019 Spark deployment demonstrated three principles
+that have since become industry standards for large-scale event analytics:
+
+\begin{itemize}
+  \item \textbf{In-memory iterative retraining is viable at billion-user
+        scale.} The ALS rating matrix caching strategy reduced model
+        refresh time by $40\times$ compared to disk-based alternatives,
+        enabling 144 model refreshes during the 24-hour event.
+  \item \textbf{Broadcast joins for dimension tables eliminate shuffle.}
+        Alibaba measured a $15\times$ latency reduction for multi-table
+        queries by broadcasting the 3\GB\ products table to all 10{,}000
+        executor nodes, compared to sort-merge joining it through a
+        shuffle.
+  \item \textbf{Partition pruning must be designed into the schema.}
+        Partitioning the transactions table by \texttt{event\_minute}
+        rather than \texttt{dt} (which is standard for daily analytics)
+        allowed dashboard queries to scan only the most recent partition.
+        This was a deliberate schema design decision made 6 weeks before
+        the event; retroactively repartitioning 200\TB\ during the event
+        would have been impossible.
+\end{itemize}
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch6-summary}
+%%====================================================================
+
+\begin{itemize}
+  \item MapReduce's disk I/O bottleneck for iterative algorithms is
+        quantified by the formula: total I/O $= I \times D \times r$,
+        where $I$ is the number of iterations, $D$ is the dataset size,
+        and $r$ is the HDFS replication factor. For 100 iterations
+        on 100\GB\ with $r=3$, this produces 30\TB\ of disk I/O.
+
+  \item An \textbf{RDD} is an immutable, partitioned, lazily computed,
+        fault-tolerant collection of records. Its five defining properties
+        are: partitions, dependencies (lineage), compute function,
+        partitioning metadata, and preferred locations.
+
+  \item \textbf{Lineage-based fault tolerance} recomputes lost partitions
+        from their lineage graph rather than maintaining replicas. This
+        costs nothing in memory but may require recomputation after
+        long lineage chains; \textbf{checkpointing} truncates the lineage
+        to bound recomputation cost.
+
+  \item \textbf{Narrow transformations} (map, filter, flatMap) have each
+        output partition depending on at most one input partition and
+        require no shuffle. \textbf{Wide transformations} (reduceByKey,
+        groupByKey, join) require all-to-all data exchange (shuffle)
+        and create stage boundaries.
+
+  \item \textbf{\texttt{reduceByKey}} applies partial aggregation within
+        each partition before the shuffle, reducing network traffic by
+        approximately the partition count. \textbf{\texttt{groupByKey}}
+        transfers all raw values across the network and should be avoided
+        whenever an aggregation function is associative and commutative.
+
+  \item The \textbf{Catalyst optimizer} processes DataFrame/SQL plans in
+        four phases: analysis (name resolution), logical optimisation
+        (predicate pushdown, column pruning, constant folding), physical
+        planning (join strategy selection), and code generation (Tungsten
+        whole-stage code generation).
+
+  \item \textbf{RDD persistence levels} range from \texttt{MEMORY\_ONLY}
+        (fastest, no fault tolerance for evicted partitions) to
+        \texttt{DISK\_ONLY} (slowest, full fault tolerance). Kryo
+        serialisation reduces the memory footprint and serialisation
+        time of persisted RDDs by 3--10$\times$ over Java serialisation.
+
+  \item The \textbf{unified memory model} divides executor heap into
+        Reserved (fixed 300\MB), Spark (0.6 fraction), and User
+        (0.4 fraction) regions. Within the Spark region, execution and
+        storage memory share space dynamically, with execution memory
+        able to evict cached RDD partitions.
+
+  \item \textbf{Data skew} occurs when a small number of keys dominate
+        the dataset. The \textbf{salting} remedy appends a random integer
+        to skewed keys, distributing their records across multiple
+        partitions, then removes the salt in a second aggregation pass.
+
+  \item The MLlib \textbf{Pipeline API} expresses preprocessing and
+        training as a sequence of Transformers and Estimators. A
+        \texttt{Pipeline.fit()} call trains all Estimators and produces
+        a \texttt{PipelineModel} that can be saved to HDFS and applied
+        to new data.
+\end{itemize}
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch6-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq Explain the MapReduce iteration I/O problem using the formula
+$\text{Total I/O} = I \times D \times r$. For a $k$-means clustering
+job that runs 50 iterations on a 200\GB\ dataset with $r=3$, calculate
+the total disk I/O. How does Spark reduce this?
+
+\sq Define a Resilient Distributed Dataset. List its five defining
+properties and explain the purpose of each.
+
+\sq What is lineage-based fault tolerance? Compare it with replication-based
+fault tolerance on two dimensions: memory overhead and recovery latency.
+
+\sq Explain the concept of lazy evaluation in Spark. What is the
+performance benefit of deferring computation until an action is called?
+
+\sq Distinguish narrow transformations from wide transformations.
+Give two examples of each, and explain why wide transformations create
+stage boundaries in the DAG.
+
+\sq Why is \texttt{reduceByKey} almost always preferable to
+\texttt{groupByKey} for aggregation? Give a concrete numerical example
+showing the difference in network traffic for a dataset with 1 billion
+records and 200 partitions, where 30\% of records share the same key.
+
+\sq What is a YARN ApplicationMaster for a Spark job? Which component
+of Spark architecture runs inside the AM container, and what does it do?
+
+\sq Explain the four phases of the Catalyst optimizer. Which phase is
+responsible for choosing between a sort-merge join and a broadcast hash
+join, and what criterion determines the choice?
+
+\sq What is the unified memory model in Spark? For an executor with
+32\GB\ JVM heap, \texttt{spark.memory.fraction = 0.6}, and
+\texttt{spark.memory.storageFraction = 0.5}, calculate the available
+storage memory, execution memory, and user memory.
+
+\sq What is Tungsten whole-stage code generation? How does it differ
+from the interpreted, row-at-a-time Volcano model used by traditional
+query engines?
+
+\sq Explain the Spark MLlib abstraction of Transformer vs.\ Estimator.
+Give one concrete example of each and explain what \texttt{fit(df)}
+produces for an Estimator.
+
+\sq What is data skew in a Spark wide transformation? Describe the
+observable symptom in the Spark UI that indicates a skew problem.
+
+\sq What does \texttt{MEMORY\_ONLY\_SER} mean as an RDD storage level?
+Under what circumstances should you choose it over \texttt{MEMORY\_ONLY}?
+
+\sq Explain what a checkpoint does in Spark. When is checkpointing
+necessary, and what are its costs?
+
+\sq A Spark job with 8 stages takes 4 hours. The Spark UI shows that
+Stage 3 ran for 3.5 hours, with 199 tasks completing in 2 minutes and
+one task running for 3.5 hours. What is the most likely cause, and
+how would you diagnose it?
+
+\bigskip
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Spark vs.\ MapReduce: Iterative Algorithm Cost Analysis.}
+A genomics research lab runs a principal component analysis (PCA) on a
+SNP (single nucleotide polymorphism) dataset. The dataset is 500\GB,
+stored on HDFS with $r = 3$. PCA requires 80 power-iteration steps.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Calculate the total disk I/O for a MapReduce implementation
+        (one job per iteration, each job reads from and writes to HDFS).
+  \item The lab's HDFS cluster sustains 2\GB/s aggregate disk read
+        bandwidth. Estimate the wall-clock time for the MapReduce
+        implementation.
+  \item With Spark and \texttt{MEMORY\_ONLY} persistence, only the
+        first iteration reads from HDFS. Subsequent iterations read
+        from memory at 50\GB/s aggregate throughput. Estimate the total
+        wall-clock time for the Spark implementation.
+  \item Calculate the speedup ratio $T_{\text{MR}} / T_{\text{Spark}}$.
+  \item The dataset grows to 2\TB. The cluster has 1\TB\ of aggregate
+        executor RAM. Explain what happens to the Spark job when the RDD
+        no longer fits in memory under \texttt{MEMORY\_ONLY} and under
+        \texttt{MEMORY\_AND\_DISK}.
+\end{enumerate}
+
+\ap \textbf{Stage and Shuffle Analysis.}
+A Spark job reads a log file from HDFS, parses each line into a
+(session\_id, page\_url, duration\_seconds) tuple, filters records with
+duration $> 5$ seconds, computes the total duration per session, keeps
+sessions with total duration $> 60$ seconds, joins with a 200\MB\
+session-metadata table (session\_id, user\_id, country), groups by
+country, and writes to HDFS.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Draw the RDD lineage DAG for this job. Label each RDD with the
+        operation that produced it.
+  \item Identify all stage boundaries and explain why each boundary
+        is placed where it is.
+  \item Identify any narrow transformations that can be pipelined into
+        a single task pass, and explain the I/O savings this produces.
+  \item The session-metadata table is 200\MB. Explain how the Catalyst
+        optimizer would handle the join with this table and why this
+        avoids a shuffle.
+  \item The log file has 20 billion records and \texttt{spark.sql.
+        shuffle.partitions = 200}. The join produces 150 billion
+        output records. Explain whether 200 shuffle partitions is
+        appropriate and how you would determine the correct value.
+\end{enumerate}
+
+\ap \textbf{Unified Memory Sizing.}
+An e-commerce company runs a Spark job on a YARN cluster. Each executor
+is allocated 24\GB\ JVM heap and 6 vCPUs. The job caches a 180\GB\ RDD
+(serialised with Kryo) that must be accessed by 20 iterative training
+passes. The remaining 30\GB\ of the dataset does not need caching.
+
+\begin{enumerate}[label=(\alph*)]
+  \item With \texttt{spark.memory.fraction = 0.6} and
+        \texttt{spark.memory.storageFraction = 0.5}, calculate the
+        storage memory and execution memory per executor.
+  \item If the executor count is 40, calculate the total aggregate
+        storage memory across the cluster. Does the 180\GB\ RDD fit?
+  \item If Kryo serialisation achieves a 3$\times$ compression ratio
+        over the raw RDD size, recalculate whether the RDD fits in
+        aggregate storage memory.
+  \item If the RDD still does not fit, describe two configuration
+        changes (with specific parameter names and values) that could
+        increase the available storage memory.
+  \item Explain the performance consequence if the RDD does not fit
+        in \texttt{MEMORY\_ONLY} storage but the job uses
+        \texttt{MEMORY\_AND\_DISK} instead.
+\end{enumerate}
+
+\ap \textbf{Data Skew Diagnosis and Salting.}
+A retail company runs a Spark job that joins a 5\TB\ transactions table
+(partitioned by \texttt{store\_id}) with a 2\TB\ products table. The join
+key is \texttt{product\_id}. Analysis of the data reveals:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{product\_id} & \textbf{Transaction share} \\
+\midrule
+\texttt{IPHONE-15-PRO} & 28.3\% \\
+\texttt{SAMSUNG-S24}   & 11.7\% \\
+\texttt{AIRPODS-PRO}   & 6.2\% \\
+All other 4.2M products & 53.8\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{enumerate}[label=(\alph*)]
+  \item With 200 shuffle partitions, estimate the number of records
+        assigned to the task handling \texttt{IPHONE-15-PRO} vs.\ the
+        average task (the total dataset has 50 billion records).
+  \item The average task runs in 4 minutes. Estimate the stage
+        latency with and without skew mitigation.
+  \item Design a salting strategy for the top-3 skewed keys with a
+        salt factor of 30. Show the key before and after salting for
+        a sample record.
+  \item Explain the two-phase aggregation required after salting and
+        why it is necessary.
+  \item An alternative to salting for join skew is \emph{skew join
+        hint} (\texttt{SKEW JOIN} in Spark SQL). Explain conceptually
+        how the optimizer would handle a skew hint differently from a
+        standard sort-merge join.
+\end{enumerate}
+
+\bigskip
+\exercisesection{Design Problems}
+
+\dpr \textbf{Spark Architecture for a Real-Time Fraud Detection Platform.}
+A global payment network processes 30{,}000 transactions per second.
+Each transaction has 45 features (amount, merchant category, cardholder
+history, location, time-since-last-transaction, etc.). A fraud detection
+model must score each transaction within 200 milliseconds of arrival.
+The ML team retrains the model weekly on 90 days of historical
+transactions ($\approx$240\TB).
+
+Design the Spark architecture for both the training pipeline and the
+serving infrastructure. Your design must specify:
+
+\begin{enumerate}[label=(\alph*)]
+  \item The cluster topology for weekly model retraining: number of
+        executor nodes, memory per executor, and YARN queue configuration.
+        Justify the memory sizing based on the 240\TB\ dataset and the
+        10-iteration gradient boosting training algorithm.
+  \item The MLlib Pipeline stages for feature engineering: which
+        Estimators and Transformers are needed, and in what order.
+  \item How the trained model is exported from the Spark cluster to
+        the serving layer, given the 200-millisecond latency constraint
+        (Spark jobs take seconds to initialise; model serving cannot
+        invoke a Spark job per transaction).
+  \item The persistence strategy for the feature engineering pipeline:
+        which intermediate RDDs should be cached, at what storage level,
+        and why.
+  \item How the design changes if the retraining frequency is increased
+        from weekly to hourly, incorporating the most recent 6 hours of
+        transactions into the model on each run.
+\end{enumerate}
+
+\dpr \textbf{Spark SQL Migration from Hive-on-MapReduce.}
+A telecommunications company's analytics team runs 400 Hive-on-MapReduce
+queries per day against a 500\TB\ ORC warehouse. Average query latency
+is 45 minutes; the SLA for analyst-facing queries is 15 minutes; and
+50 queries (12.5\%) exceed 2 hours. The data engineering team proposes
+migrating to Spark SQL.
+
+Design the migration. Your design must address:
+
+\begin{enumerate}[label=(\alph*)]
+  \item The Catalyst optimisations (predicate pushdown, column pruning,
+        broadcast joins) that are most likely to reduce latency for
+        queries over an ORC table partitioned by date and region.
+        Estimate the I/O reduction for a query selecting 8 of 120
+        columns, filtering on a date range covering 5\% of the total
+        data, with an additional predicate that eliminates 70\% of the
+        remaining row groups.
+  \item The YARN queue configuration changes required to co-run Hive-on-MapReduce
+        (existing nightly ETL) and Spark SQL (new analyst workload) on the
+        same cluster without either workload starving the other.
+  \item A compatibility verification strategy: how to confirm that the
+        Spark SQL query results match the Hive-on-MapReduce results for
+        the 400 queries before switching production traffic.
+  \item The expected performance change for the 50 slow queries (currently
+        $>$2 hours). Which of the following root causes would be fixed
+        by Catalyst, and which would still require manual query rewriting:
+        (i) full-table scans that could use partition pruning;
+        (ii) \texttt{GROUP BY} on a column with extreme skew;
+        (iii) a three-table join where the smallest table is 400\MB.
+  \item A rollback plan if Spark SQL produces incorrect results for
+        a category of queries (e.g., NULL handling differences from Hive's
+        default behaviour).
+\end{enumerate}
+
+\bigskip
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Word Frequency with RDD API (PySpark).}
+Implement a word frequency counter using the Spark RDD API. The program
+must: (1) read a text file from HDFS; (2) tokenise each line into words
+(lowercase, strip punctuation); (3) count occurrences of each word; (4)
+return the top 20 most frequent words and their counts. Measure the
+performance difference between using \texttt{reduceByKey} and
+\texttt{groupByKey}.
+
+\begin{lstlisting}[style=pyspark, caption={PE6.1: Word frequency with RDD API}]
+import re
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("WordFreq").getOrCreate()
+sc    = spark.sparkContext
+
+def tokenize(line):
+    """Lower-case and split on non-alpha characters."""
+    return [w for w in re.split(r"[^a-z]+", line.lower()) if w]
+
+# Read text from HDFS (replace with actual path)
+text_rdd = sc.textFile("hdfs:///data/wikipedia_sample.txt")
+
+# --- Implementation using reduceByKey (correct approach) ---
+freq_rdd = (text_rdd
+    .flatMap(tokenize)
+    .map(lambda w: (w, 1))
+    .reduceByKey(lambda a, b: a + b)
+    .sortBy(lambda kv: kv[1], ascending=False)
+)
+
+top20 = freq_rdd.take(20)
+print("Top 20 words (reduceByKey):")
+for word, count in top20:
+    print(f"  {word:<20} {count:>8,}")
+
+# --- Implementation using groupByKey (anti-pattern for comparison) ---
+# TODO: implement using groupByKey and compare memory/time
+# groupby_rdd = (text_rdd
+#     .flatMap(tokenize)
+#     .groupBy(lambda w: w)
+#     .mapValues(lambda vals: sum(1 for _ in vals))
+#     ...
+# )
+
+# Cache and measure second-pass performance
+freq_rdd.persist()
+print(f"\nTotal unique words: {freq_rdd.count():,}")
+\end{lstlisting}
+
+\pe \textbf{Iterative $k$-Means with RDD Caching (PySpark).}
+Implement $k$-means clustering using the raw RDD API (not MLlib) to
+observe the effect of caching on iterative performance. The implementation
+must: (1) cache the input data RDD after the first iteration; (2) measure
+wall-clock time per iteration; (3) report the speedup of cached vs.\
+uncached iterations.
+
+\begin{lstlisting}[style=pyspark, caption={PE6.2: Iterative k-means with RDD caching}]
+import time
+import random
+import math
+from pyspark.sql import SparkSession
+from pyspark import StorageLevel
+
+spark = SparkSession.builder.appName("KMeans").getOrCreate()
+sc    = spark.sparkContext
+
+def parse_point(line):
+    return [float(x) for x in line.strip().split(",")]
+
+def distance(p, c):
+    return math.sqrt(sum((a - b)**2 for a, b in zip(p, c)))
+
+def closest_centroid(point, centroids):
+    dists = [distance(point, c) for c in centroids]
+    return dists.index(min(dists))
+
+def add_vectors(v1, v2):
+    return [a + b for a, b in zip(v1, v2)]
+
+def mean_vector(total, count):
+    return [x / count for x in total]
+
+K         = 10
+MAX_ITERS = 20
+SEED      = 42
+
+# Load data
+data = sc.textFile("hdfs:///data/clustering_input.csv").map(parse_point)
+
+# Cache the input data — this is the key optimisation
+data.persist(StorageLevel.MEMORY_ONLY)
+data.count()    # trigger caching (materialize into memory)
+
+# Initialise centroids randomly from the first partition
+centroids = data.takeSample(False, K, seed=SEED)
+
+iter_times = []
+for iteration in range(MAX_ITERS):
+    t_start = time.time()
+
+    # Assign each point to its nearest centroid
+    assignments = data.map(
+        lambda p: (closest_centroid(p, centroids),
+                   (p, 1))
+    )
+
+    # Sum vectors and counts per cluster
+    cluster_stats = (assignments
+        .reduceByKey(lambda a, b: (add_vectors(a[0], b[0]),
+                                   a[1] + b[1]))
+    )
+
+    # Compute new centroids
+    new_centroids_list = (cluster_stats
+        .mapValues(lambda vs: mean_vector(vs[0], vs[1]))
+        .collect()
+    )
+    new_centroids = {k: v for k, v in new_centroids_list}
+    centroids = [new_centroids.get(i, centroids[i]) for i in range(K)]
+
+    elapsed = time.time() - t_start
+    iter_times.append(elapsed)
+    print(f"Iteration {iteration+1:>2}: {elapsed:.2f}s")
+
+print(f"\nFirst iteration : {iter_times[0]:.2f}s  (HDFS read + compute)")
+print(f"Mean iter 2-20  : {sum(iter_times[1:])/len(iter_times[1:]):.2f}s  (cached)")
+print(f"Speedup from cache: {iter_times[0]/sum(iter_times[1:])*len(iter_times[1:]):.1f}x")
+\end{lstlisting}
+
+\pe \textbf{Salting Benchmark for Skew Mitigation (PySpark).}
+Simulate a skewed dataset and measure the performance difference between
+a naive \texttt{reduceByKey} (with skew) and a salted two-phase
+aggregation. Report per-task statistics to demonstrate that salting
+eliminates the long tail.
+
+\begin{lstlisting}[style=pyspark, caption={PE6.3: Salting benchmark for skew mitigation}]
+import random
+import time
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("SkewBenchmark") \
+    .config("spark.sql.shuffle.partitions", "50") \
+    .getOrCreate()
+sc = spark.sparkContext
+
+TOTAL_RECORDS  = 5_000_000
+SKEW_KEY       = "IPHONE-15-PRO"
+SKEW_FRACTION  = 0.35           # 35% of all records
+SALT_FACTOR    = 20             # number of salt buckets
+
+def generate_record(_):
+    """Generate (product_id, sale_amount) with skew."""
+    if random.random() < SKEW_FRACTION:
+        return (SKEW_KEY, random.randint(500, 1500))
+    products = [f"PROD-{i:06d}" for i in range(1, 1001)]
+    return (random.choice(products), random.randint(10, 500))
+
+data = sc.parallelize(range(TOTAL_RECORDS), 50).map(generate_record)
+data.persist()
+data.count()    # materialise
+
+# --- Approach 1: naive reduceByKey (skewed) ---
+t0 = time.time()
+naive_result = data.reduceByKey(lambda a, b: a + b).collect()
+t_naive = time.time() - t0
+print(f"Naive reduceByKey: {t_naive:.2f}s")
+
+# --- Approach 2: salted two-phase aggregation ---
+SKEWED_KEYS = {SKEW_KEY}
+
+def salt_key(record):
+    key, val = record
+    if key in SKEWED_KEYS:
+        return ((key, random.randint(0, SALT_FACTOR - 1)), val)
+    return ((key, 0), val)
+
+def desalt_key(record):
+    (key, _salt), val = record
+    return (key, val)
+
+t1 = time.time()
+salted_result = (data
+    .map(salt_key)
+    .reduceByKey(lambda a, b: a + b)
+    .map(desalt_key)
+    .reduceByKey(lambda a, b: a + b)
+    .collect()
+)
+t_salted = time.time() - t1
+print(f"Salted 2-phase  : {t_salted:.2f}s")
+
+print(f"Speedup         : {t_naive/t_salted:.2f}x")
+
+# Verify correctness: totals should match
+naive_dict  = dict(naive_result)
+salted_dict = dict(salted_result)
+assert abs(naive_dict.get(SKEW_KEY, 0) -
+           salted_dict.get(SKEW_KEY, 0)) < 1e-6, "Results differ!"
+print("Correctness check: PASSED")
+\end{lstlisting}

@@ -92,7 +92,7 @@ pdflatex main.tex
 ### Part IV — In-Memory Processing
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 6 | Apache Spark: In-Memory Distributed Computing | W06 | pending |
+| 6 | Apache Spark: In-Memory Distributed Computing | W06 | **DONE** |
 | 7 | SQL at Scale: HiveQL and the SQL-on-Hadoop Ecosystem | W07 | pending |
 
 ### Part V — Data Pipelines and Modern Integration
