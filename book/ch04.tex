@@ -382,7 +382,7 @@ for each key. This merge-sort is the ``sort'' in shuffle-and-sort, and
 it is what guarantees that the Reduce function sees values for a single
 key in a well-defined, contiguous iterator.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     phase/.style={rectangle, rounded corners=4pt, minimum width=2.5cm,
@@ -484,7 +484,7 @@ output; the other is killed. This has no correctness impact because
 both produce identical outputs (determinism), but can reduce job
 completion time by 40\% in practice.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{MapReduce fault tolerance mechanisms}
 \label{tab:mr-fault}
@@ -912,7 +912,7 @@ tool to use for a given problem. The selection matrix below provides
 a decision framework based on access pattern, latency requirement,
 user skill set, and data structure.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Hadoop processing stack tool selection matrix}
 \label{tab:tool-selection}

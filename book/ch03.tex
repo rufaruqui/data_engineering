@@ -103,7 +103,7 @@ exceptional events would be unavailable for recovery most of the time.
 The failure model must instead treat hardware failure as \emph{the
 expected case} and design accordingly.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Comparison of storage architectures for big data workloads}
 \label{tab:storage-comparison}
@@ -433,7 +433,7 @@ millions of metadata RPC calls per day but never touches a byte of block
 data; every byte of data is transferred directly between clients and
 DataNodes on independent TCP connections.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     nn/.style={rectangle, draw=DEBlue, fill=DELightBlue!50, rounded corners=5pt,
@@ -590,7 +590,7 @@ the same rack as Replica 2 (rather than a third rack) reduces cross-rack
 network traffic: reads can often be satisfied from within the same rack
 as the client, reducing the load on the inter-rack network bandwidth.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     server/.style={rectangle, draw=DEBlue!50, fill=DELightBlue,
@@ -726,7 +726,7 @@ Reading a file from HDFS involves the following sequence:
         stream is closed.
 \end{enumerate}
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     actor/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40, rounded corners=4pt,
@@ -880,7 +880,7 @@ ensuring consistency in the presence of potential DataNode failures.
         complete, releasing the write lease.
 \end{enumerate}
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     comp/.style={rectangle, rounded corners=3pt,
@@ -1004,7 +1004,7 @@ unreachable, forcibly terminates its ability to communicate with
 DataNodes using SSH-based remote kill commands or STONITH
 (``Shoot The Other Node In The Head'') hardware mechanisms.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{NameNode HA component summary}
 \label{tab:ha-components}
@@ -1022,7 +1022,7 @@ ZKFC               & Per-NameNode daemon that manages ZooKeeper session and trig
 \end{tabular}
 \end{table}
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     ann/.style={rectangle, draw=DEBlue, fill=DELightBlue!50, rounded corners=4pt,
@@ -1232,7 +1232,7 @@ or for OLTP workloads. This is why HDFS is used as the storage
 substrate for batch and near-batch systems (MapReduce, Spark, Hive),
 not as a replacement for relational databases or key-value stores.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{HDFS strengths, limitations, and engineering mitigations}
 \label{tab:hdfs-limits}

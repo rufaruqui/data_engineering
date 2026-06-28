@@ -186,7 +186,7 @@ need to restart the entire job. Instead, it consults the RDD's
 produced the lost partition---and \emph{recomputes only the lost partition}
 on a surviving executor.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     rdd/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!50,
@@ -307,7 +307,7 @@ common case in iterative algorithms---the programmer must explicitly call
 in executor memory after the first computation. Without persistence,
 each action triggers a full recomputation from the lineage root.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{RDD storage levels and their trade-offs}
 \label{tab:storage-levels}
@@ -461,7 +461,7 @@ briefly unavailable, the Task Scheduler waits a configurable period
 (default 3 seconds) before falling back to a rack-local or
 any-node assignment, maximising data locality.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     box/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40,
@@ -628,7 +628,7 @@ The most important wide transformations are:
         partitions, performing a full shuffle.
 \end{itemize}
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     part/.style={rectangle, draw=DEBlue!50, fill=DELightBlue!50,
@@ -994,7 +994,7 @@ model.save("hdfs:///models/news_classifier_v1")
 \label{subsec:mllib-algos}
 %--------------------------------------------------------------------
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Representative MLlib algorithms by category}
 \label{tab:mllib-algos}
