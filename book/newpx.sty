@@ -1,0 +1,133 @@
+\NeedsTeXFormat{LaTeX2e}
+
+%\traceon
+%Package to simplify loading of newpxmath with a text font family such as newpxtext for all LaTeX engines, or for newpxtext and an otf math package.
+\def\fileversion{1.551}
+\def\filedate{2025/10/30}
+\ProvidesPackage{newpx}[%
+\filedate\space v\fileversion\space  LaTeX and unicode LaTeX support for newpxmath and newpxtext, or for newpxtext and an otf math package (Michael Sharpe)]
+
+\message{`newpx'v\fileversion,\space\filedate\space Integrated\space loading\space of\space newpxmath\space and\space a\space text\space font
+\space for\space all\space latex\space engines\space (msharpe)}
+
+\RequirePackage{fontenc,fontaxes}
+\RequirePackage{ifthen,iftex,etoolbox,scalefnt,trimspaces}
+
+\forcsvlist{\listadd\zpl@mathlst}{vecsep,amsthm,nosubscriptcorrection,subscriptcorrection,varbb,vvarbb,nosymbolsc,noamssymbols,amssymbols,uprightscript,uprightGreek,slantedGreek,frenchmath,upint,smallerops,useBImacros,varg,varvw,noOT1,fracspacing,subscriptcorrectionfile,curlybraces,boldermath}
+
+\RequirePackage{kvoptions}
+\def\zpl@scale{1}
+\def\newpx@helvratio{1}
+\DeclareDefaultOption{
+\xifinlist{\CurrentOptionKey}{\zpl@mathlst}
+{% true branch for xifinlist
+\expandafter\PassOptionsToPackage\expandafter{\CurrentOption}{newpxmath}}
+{%  false branch for xifinlist
+%\xdef\zpl@Topt{\zpl@Topt \CurrentOption,}
+\expandafter\PassOptionsToPackage\expandafter%
+{\CurrentOption}{newpxtext}}
+\ifthenelse{\equal{scale}{\CurrentOptionKey} \OR \equal{scaled}{\CurrentOptionKey}}
+{% true branch for ifthenelse
+\xdef\zpl@scale{\CurrentOptionValue}
+\xdef\npxmath@scaled{\CurrentOptionValue}
+}{ % false branch for ifthenelse
+\ifthenelse{\equal{helvratio}{\CurrentOptionKey}}
+{% true branch
+\xdef\newpx@helvratio{\CurrentOptionValue}
+}{}}}
+  \def\zpl@scaled{s*[\zpl@scale]}% used in fd files
+
+%\newif\ifnewpx@otfmath %\zpl@otfmathfalse % default is type1 math
+\DeclareBoolOption{otfmath}% creates and inits \ifnewpx@otfmath 
+{\@nameuse{if#1}\iftutex\newpx@otfmathtrue\fi}
+\DeclareBoolOption{nohelv}% creates and inits \ifnewpx@nohelv 
+\DeclareBoolOption{nott}% creates and inits \ifnewpx@nott 
+
+\DeclareBoolOption{type1}%[true]{}% no effect now
+%{%\@nameuse{if#1}\zpl@otftextfalse\fi}
+
+\DeclareBoolOption{type1text}%[true]{} %no effect now
+%{% same as type1--use type1 for text
+%\@nameuse{if#1}\zpl@otftextfalse\fi}
+
+\DeclareBoolOption{nofontspec}%[true]{} % no effect
+%{\@nameuse{if#1}\zpl@nofontspectrue\fi}
+
+\ProcessKeyvalOptions{newpx}
+
+\RequirePackage{xstring}% must load this after \@for
+% Needed for \StrLeft and \StrRight
+
+%Enginecheck
+%iftex's \iftutex is true for LuaTeX and XeTeX
+\newif\ifzpl@otftext
+\iftutex\zpl@otftexttrue\fi 
+
+%\newcommand{\PassMathScale}{\ifzpl@iszero\gdef\zpltext@scale{\zplmath@scale}\gdef\zpltext@scaled{s*[\zpltext@scale]}\fi
+%\PassOptionsToPackage{scaled=\zpltext@scale}{\zpl@TF}
+%}
+
+\ifnewpx@otfmath
+\else % t1 math
+   \ifthenelse{\not\equal{\sfdefault}{cmss}}%
+      {\newpx@nohelvtrue}{}
+    \ifthenelse{\not\equal{\ttdefault}{cmtt}}%
+      {\newpx@notttrue}{}
+    \ifnewpx@nohelv
+    \else
+      \renewcommand*{\sfdefault}{qhv}
+      \@tempdima=\zpl@scale\p@
+      \@tempdima=\newpx@helvratio\@tempdima%
+      \edef\qhv@scale{\strip@pt\@tempdima}
+    \fi %\ifnewpx@nohelv
+    \ifnewpx@nott\else%
+      \renewcommand*{\ttdefault}{npxtt}
+    \fi
+\fi %\ifnewpx@otfmath
+
+\ifthenelse{\boolean{zpl@otftext}}
+	{%then clause ( otf text )
+	\ifthenelse{\boolean{newpx@otfmath}}
+		{% then clause (otf math and text)
+		\typeout{I}
+    	\usepackage[]{newpxtext} %may not load fontspec
+    	\usepackage{unicode-math} %loads amsmath
+		}
+		{% else clause (t1 math, otf text)
+		\typeout{II}
+    	\renewcommand*{\rmdefault}{minzpl} % Roman and Bold text for math
+    	\usepackage[]{newpxmath} % options will be as passed from newpx
+    	\usepackage[no-math]{fontspec}
+    	\usepackage{newpxtext}
+		}
+	}
+    {%else clause  (type1 text and math)
+    \typeout{IV}
+    \renewcommand*{\rmdefault}{minzpl}% Roman and Bold for math
+    \usepackage{newpxmath} % options will be as passed from newpx
+    \usepackage{newpxtext} % should load tt and sans math before newpx
+    }
+
+%\ifzpl@otftext\else % not otftext so type1 tex and math
+%    \typeout{IV}
+%    \renewcommand*{\rmdefault}{minzpl}% Roman and Bold for math
+%    \usepackage{newpxmath} % options will be as passed from newpx
+%    \usepackage{newpxtext} % should load tt and sans math before newpx
+%\fi
+%% The above covers the non-tutex case
+%\ifzpl@otftext
+%  \ifnewpx@otfmath %
+%    \typeout{I}
+%    \usepackage[]{newpxtext} %may not load fontspec
+%    \usepackage{unicode-math} %loads amsmath
+%  \else %II: type1 math, otftext
+%    \typeout{II}
+%    \renewcommand*{\rmdefault}{minzpl} % Roman and Bold text for math
+%    \usepackage[]{newpxmath} % options will be as passed from newpx
+%    \usepackage[no-math]{fontspec}
+%    \usepackage{newpxtext}
+%  \fi %ifzpl@otfmath
+%\fi %ifzpl@otftext
+
+
+\endinput

@@ -1,0 +1,1718 @@
+%% ch11.tex — Chapter 11: The Lakehouse, MLOps, and Emerging Architectures
+%% Part of "Data Engineering" textbook
+
+\chapter{The Lakehouse, MLOps, and Emerging Architectures}
+\label{ch:modern-stack}
+
+\epigraph{\textit{``The exciting thing about the Lakehouse is that it is
+not a compromise --- it is actually better than either a data warehouse
+or a data lake at their own jobs.''}}{Matei Zaharia,
+co-creator of Apache Spark and Delta Lake}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Describe the four eras of big data technology (2003--present),
+        explain the engineering problem that drove each transition,
+        and identify which era's infrastructure remains relevant in
+        modern production deployments.
+  \item Explain the Lakehouse architecture: how an open table format
+        (Delta Lake, Apache Iceberg, Apache Hudi) stored on cheap object
+        storage achieves ACID transactions via optimistic concurrency
+        control, time travel via a transaction log, and schema enforcement
+        at the storage layer.
+  \item Compare Delta Lake's transaction log mechanism against the
+        traditional data warehouse approach and the raw data lake approach
+        on dimensions of ACID compliance, open format, BI support, ML support,
+        time travel, and storage cost.
+  \item Explain Apache Iceberg's hidden partitioning and partition
+        evolution capabilities and identify the scenario where Iceberg
+        is preferred over Delta Lake.
+  \item Describe the four principles of the Data Mesh paradigm (domain
+        ownership, data as a product, self-serve platform, federated
+        computational governance) and explain which engineering bottleneck
+        each principle addresses.
+  \item Identify the seven components of an MLOps pipeline (ingestion,
+        feature engineering, feature store, model training, experiment
+        tracking, model registry, serving and monitoring), describe the
+        tool used for each, and explain what ``hidden technical debt'' each
+        component eliminates.
+  \item Describe the three-tier edge--cloud architecture for IoT analytics
+        (device, edge gateway, cloud) and explain what processing happens
+        at each tier and why.
+  \item Define $(\varepsilon, \delta)$-differential privacy formally,
+        explain the Laplace noise mechanism, and describe the accuracy--
+        privacy trade-off controlled by the privacy budget $\varepsilon$.
+  \item Describe the Dataflow Model's four questions (What, Where, When,
+        How), explain how batch processing is a special case of streaming
+        under this model, and explain how Apache Beam eliminates the Lambda
+        architecture's dual code path.
+  \item Apply Delta Lake's core operations (create, append, update, time
+        travel, DESCRIBE HISTORY) using PySpark and the \code{delta-spark}
+        library.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Every chapter in this book has described a layer of the data engineering
+stack as it existed at a specific moment in the field's development.
+Chapter~\ref{ch:hdfs} described HDFS and the assumption that storage
+and compute were co-located on-premise. Chapter~\ref{ch:mapreduce}
+described MapReduce's batch processing model. Chapter~\ref{ch:spark}
+described how Spark replaced MapReduce with in-memory processing.
+Chapter~\ref{ch:pipelines} described Kafka, streaming pipelines, and the
+Lambda architecture's attempt to unify batch and stream.
+
+This final chapter completes the arc. It describes the fourth era of
+big data technology---the \term{Lakehouse}---which resolves the central
+tension between data lakes (cheap, flexible, but unreliable) and data
+warehouses (reliable, fast, but expensive and closed). It also covers
+the organisational architecture (\term{Data Mesh}) that resolves the
+bottleneck created when a single platform team owns all data pipelines;
+the operational discipline (\term{MLOps}) that bridges the gap between
+a trained model and a deployed, monitored production system; the
+computational pattern (\term{edge analytics}) that extends distributed
+processing to IoT devices; and the theoretical framework
+(the \term{Dataflow Model}) that eliminates the Lambda architecture's
+fundamental complexity by treating batch as a special case of streaming.
+
+%%====================================================================
+\section{The Technology Evolution Arc}
+\label{sec:evolution}
+%%====================================================================
+
+Big data technology has evolved through four identifiable eras, each
+driven by a specific engineering bottleneck that the previous era's tools
+could not resolve.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{p{1.2cm}p{1.8cm}p{3.0cm}p{3.0cm}p{2.6cm}}
+  \toprule
+  \textbf{Era} & \textbf{Period}
+    & \textbf{Defining Tools} & \textbf{Key Innovation}
+    & \textbf{Bottleneck Resolved} \\
+  \midrule
+  1 & 2003--2011
+    & GFS, MapReduce, Hadoop, Hive
+    & Commodity hardware cluster replaces supercomputer
+    & Storage cost; single-machine limit \\
+  2 & 2011--2017
+    & Spark, Kafka, YARN, Parquet
+    & In-memory processing; persistent event log
+    & MapReduce latency; batch-only processing \\
+  3 & 2017--2022
+    & AWS EMR, S3, Dataproc, Snowflake
+    & Compute and storage separation; managed services
+    & On-premise hardware ops; cluster idle cost \\
+  4 & 2022--now
+    & Delta Lake, Iceberg, MLflow, Apache Beam
+    & ACID on object stores; unified BI+ML; batch=stream
+    & Data lake unreliability; Lambda complexity; ML ops debt \\
+  \bottomrule
+\end{tabular}
+\caption{Four eras of big data technology. Tools from earlier eras are
+         still running in production at large enterprises --- technologies
+         stratify into legacy tiers rather than disappearing.}
+\label{tab:eras}
+\end{table}
+
+\begin{keyinsight}{Technologies Stratify, They Do Not Die}
+HDFS and MapReduce from Era 1 are still running in production at
+legacy installations across banking, telecommunications, and government.
+A big data architect in 2025 must understand all four eras because they
+will encounter systems from each era in real deployments. Era 1 systems
+have often been running for 10+ years and cannot be migrated without
+significant business risk. The progression in Table~\ref{tab:eras} is
+not a replacement sequence---it is an accretion sequence. Each era added
+a new layer without fully eliminating the previous one.
+\end{keyinsight}
+
+%%====================================================================
+\section{Lakehouse Architecture}
+\label{sec:lakehouse}
+%%====================================================================
+
+The Lakehouse resolves the central architectural tension of the 2010s:
+organisations needed both the flexibility and cost-efficiency of a data
+lake \emph{and} the reliability and query performance of a data warehouse,
+but running both simultaneously doubled infrastructure cost and created
+data consistency problems.
+
+%--------------------------------------------------------------------
+\subsection{The Two-System Problem}
+\label{subsec:two-system}
+%--------------------------------------------------------------------
+
+By 2018, the standard enterprise architecture for big data analytics
+comprised two separate systems:
+
+\textbf{The data lake} (HDFS or Amazon S3 with Spark): raw data in
+Parquet or ORC format, accessible to ML frameworks (Spark MLlib, PyTorch)
+for model training. Cheap storage ($\sim$\$23/TB-month on S3). No ACID
+guarantees: concurrent writes could corrupt data; there was no schema
+enforcement to prevent malformed records from entering the lake; and
+deleting a specific record (required by GDPR's right to erasure) required
+reading and rewriting every Parquet file containing that record.
+
+\textbf{The data warehouse} (Amazon Redshift, Google BigQuery, Snowflake):
+ACID-compliant SQL tables, fast query performance, schema enforcement.
+Expensive proprietary storage ($\sim$\$200--250/TB-month). Closed format:
+ML frameworks could not read warehouse data directly, so data had to be
+extracted as CSV or Parquet and loaded into the lake---a nightly ETL
+copy that created a 12-hour freshness gap and a second copy of all data.
+
+The result was three compounding problems:
+\begin{enumerate}
+  \item \textbf{Cost}: two systems, two storage bills, two compute bills.
+  \item \textbf{Consistency}: analysts queried the warehouse; data scientists
+        queried the lake. They worked with different copies of the data
+        and frequently produced inconsistent results.
+  \item \textbf{Lambda complexity}: streaming workloads required maintaining
+        two code paths (one for the lake's batch processing, one for the
+        real-time layer) that had to be kept in sync.
+\end{enumerate}
+
+%--------------------------------------------------------------------
+\subsection{Delta Lake: ACID on Object Stores}
+\label{subsec:delta-lake}
+%--------------------------------------------------------------------
+
+\autocite{DeltaLake2020} introduced Delta Lake as an open-source storage
+layer that adds ACID transactions, scalable metadata handling, and audit
+history to data lakes on object stores. Its core mechanism is the
+\term{Delta Log}: a series of JSON files stored inside the table's
+directory in S3 that form a serialisable transaction log.
+
+\begin{defbox}{Delta Lake Transaction Log (Delta Log)}
+A \textbf{Delta table} on S3 consists of two components stored in the
+same S3 prefix:
+\begin{enumerate}
+  \item \textbf{Data files}: immutable Parquet files containing the actual
+        row data. They are never modified in place; instead, new files are
+        written and old files are logically deleted.
+  \item \textbf{Delta Log} (\texttt{\_delta\_log/}): a sequence of JSON
+        files (one per committed transaction: \texttt{00000.json},
+        \texttt{00001.json}, \ldots) each recording the set of files
+        \emph{added} and \emph{removed} by that transaction, plus schema
+        changes and metadata. Every 10 commits, a \emph{checkpoint} Parquet
+        file condenses the full current state of the table for fast reader
+        initialisation.
+\end{enumerate}
+\textbf{ACID properties:}
+\begin{itemize}
+  \item \textbf{Atomicity}: S3's PUT operation is atomic. A transaction
+        either appends its JSON entry completely or not at all. A partial
+        write has no effect because readers only follow committed log entries.
+  \item \textbf{Isolation (Optimistic Concurrency Control)}: writers read
+        the latest committed version, make their changes, and attempt to
+        write the next log entry. If two writers simultaneously attempt
+        to write the same log entry number, S3's conditional PUT ensures
+        only one succeeds; the other detects the conflict and either retries
+        or fails with a \texttt{ConcurrentModificationException}.
+  \item \textbf{Consistency}: the Delta Log is the single source of truth.
+        Readers always reconstruct the latest committed table state from
+        the log before scanning data files; they can never see a partial
+        write.
+  \item \textbf{Durability}: all committed log entries persist in S3
+        indefinitely. No in-memory coordinator holds state; the log is
+        self-contained.
+\end{itemize}
+\end{defbox}
+
+\textbf{Time travel.} Because every version of the table is preserved
+in the Delta Log, Delta Lake supports querying any past snapshot:
+
+\begin{lstlisting}[style=hiveql, caption={Delta Lake time travel queries}]
+-- Read table as of a specific version
+SELECT * FROM transactions VERSION AS OF 42;
+
+-- Read table as of a specific timestamp
+SELECT *
+FROM   transactions
+TIMESTAMP AS OF '2025-01-01 00:00:00';
+
+-- Inspect the full transaction history
+DESCRIBE HISTORY transactions;
+
+-- Roll back to a previous version (overwrites current version)
+RESTORE TABLE transactions TO VERSION AS OF 42;
+\end{lstlisting}
+
+Time travel enables: (a)~compliance audit trails (``what did the data look
+like on December 31?''); (b)~reproducible ML experiments (lock training
+data to a specific version, ensuring identical results on rerun);
+(c)~data recovery from accidental deletes or overwrites.
+
+\textbf{Schema enforcement and evolution.} Delta Lake rejects any write
+that does not conform to the table's declared schema---including new
+columns, missing columns, or type mismatches---unless schema evolution
+is explicitly enabled with the \code{mergeSchema} option. Schema enforcement
+eliminates the ``data swamp'' failure mode where successive writes from
+different teams gradually make the table's schema inconsistent.
+
+\textbf{Z-Ordering.} Delta Lake supports \term{Z-ordering}: a data
+locality optimisation that co-locates rows with similar values in the
+same Parquet files, reducing the number of files scanned for multi-column
+filter queries. A traditional Hive table partitioned by \texttt{date}
+still requires scanning all files for a query that filters by
+\texttt{(user\_id, date)}. Z-ordering on \texttt{(user\_id, date)}
+co-locates the data so that up to 95\% of files can be skipped.
+
+\begin{lstlisting}[style=pyspark, caption={Delta Lake core operations in PySpark}]
+from pyspark.sql import SparkSession
+from delta import configure_spark_with_delta_pip
+from pyspark.sql.functions import col
+
+# --- Session setup ---
+builder = (SparkSession.builder
+    .appName("DeltaLakeDemo")
+    .config("spark.sql.extensions",
+            "io.delta.sql.DeltaSparkSessionExtension")
+    .config("spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog"))
+
+spark = configure_spark_with_delta_pip(builder).getOrCreate()
+
+TABLE_PATH = "hdfs:///lakehouse/bkash/transactions"
+
+# --- 1. Create initial Delta table ---
+from pyspark.sql.types import StructType, StructField, \
+    StringType, DoubleType, TimestampType
+
+schema = StructType([
+    StructField("txn_id",     StringType(),    False),
+    StructField("sender",     StringType(),    True),
+    StructField("receiver",   StringType(),    True),
+    StructField("amount_bdt", DoubleType(),    True),
+    StructField("ts",         TimestampType(), True),
+    StructField("district",   StringType(),    True),
+])
+
+df_initial = spark.createDataFrame([
+    ("T001", "01711000001", "01711000002", 500.0,  None, "Dhaka"),
+    ("T002", "01711000003", "01711000004", 1200.0, None, "Chittagong"),
+], schema=schema)
+
+(df_initial.write
+    .format("delta")
+    .mode("overwrite")
+    .partitionBy("district")
+    .save(TABLE_PATH))
+
+# --- 2. Append new batch (transaction 2 — a new commit) ---
+df_new = spark.createDataFrame([
+    ("T003", "01711000005", "01711000001", 250.0, None, "Dhaka"),
+    ("T004", "01711000006", "01711000007", 750.0, None, "Sylhet"),
+], schema=schema)
+
+(df_new.write
+    .format("delta")
+    .mode("append")
+    .save(TABLE_PATH))
+
+# --- 3. UPDATE — raise a specific amount ---
+spark.sql(f"""
+    UPDATE delta.`{TABLE_PATH}`
+    SET    amount_bdt = amount_bdt * 1.10
+    WHERE  txn_id = 'T001'
+""")
+
+# --- 4. DELETE — GDPR right to erasure ---
+spark.sql(f"""
+    DELETE FROM delta.`{TABLE_PATH}`
+    WHERE  sender = '01711000003'
+""")
+
+# --- 5. Time travel: read state before DELETE ---
+v2 = (spark.read
+    .format("delta")
+    .option("versionAsOf", 2)   # version 0=create, 1=append, 2=update
+    .load(TABLE_PATH))
+print("State at version 2 (before DELETE):")
+v2.show()
+
+# --- 6. Inspect transaction history ---
+spark.sql(f"DESCRIBE HISTORY delta.`{TABLE_PATH}`").show(truncate=False)
+
+# --- 7. Z-ordering for faster multi-column queries ---
+spark.sql(f"""
+    OPTIMIZE delta.`{TABLE_PATH}`
+    ZORDER BY (sender, district)
+""")
+
+# --- 8. Schema enforcement: this will FAIL with AnalysisException
+try:
+    bad = spark.createDataFrame([(999,)], ["txn_id"])   # wrong type
+    bad.write.format("delta").mode("append").save(TABLE_PATH)
+except Exception as e:
+    print(f"Schema enforcement blocked write: {type(e).__name__}")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Apache Iceberg and Apache Hudi}
+\label{subsec:iceberg-hudi}
+%--------------------------------------------------------------------
+
+Delta Lake is not the only open table format. Two alternatives address
+different production requirements.
+
+\textbf{Apache Iceberg} (Netflix, open-sourced 2020) uses a \emph{manifest
+list} approach to the transaction log---a tree of JSON and Avro files
+that records which data files belong to each snapshot. Iceberg's key
+differentiating features are:
+\begin{itemize}
+  \item \textbf{Hidden partitioning}: partition columns are computed
+        automatically from data columns and stored in table metadata,
+        not exposed in SQL queries. A table partitioned by
+        \texttt{months(event\_time)} requires no changes to queries
+        when the partition scheme changes---contrast with Hive's explicit
+        partition column requirement.
+  \item \textbf{Partition evolution}: the partitioning scheme can change
+        without rewriting existing data. Old partitions are read under the
+        old scheme; new data uses the new scheme. This is impossible in Hive.
+  \item \textbf{Multi-engine support}: Iceberg tables can be read by
+        Spark, Trino, Flink, Dremio, and Presto simultaneously without
+        format conversion. Delta Lake (as of 2024) requires a compatibility
+        layer (UniForm) for non-Spark engines.
+\end{itemize}
+
+\textbf{Apache Hudi} (Uber, open-sourced 2019) is optimised for
+\emph{record-level upserts}: updating or deleting individual rows in a
+large Parquet dataset without rewriting entire files. Hudi is the natural
+choice when the primary workload is CDC (Change Data Capture)---streaming
+database change events from MySQL or PostgreSQL into the lake and applying
+them as upserts in near-real time.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{3.2cm}p{3.2cm}p{3.2cm}}
+  \toprule
+  \textbf{Feature} & \textbf{Delta Lake}
+    & \textbf{Apache Iceberg} & \textbf{Apache Hudi} \\
+  \midrule
+  Origin & Databricks & Netflix & Uber \\
+  Transaction log & JSON files & Manifest list (Avro) & Timeline (Avro) \\
+  Best for & Spark-native workloads & Multi-engine; partition evolution
+    & Record-level CDC upserts \\
+  Hidden partitioning & No & Yes & Partial \\
+  Time travel & Yes & Yes & Yes \\
+  Partition evolution & Limited & Full & Partial \\
+  Z-Ordering / Sort & Yes & Sort order (Puffin) & Clustering \\
+  Primary ecosystem & Databricks / Spark & Trino / Spark / Flink
+    & Spark / Flink \\
+  \bottomrule
+\end{tabular}
+\caption{Comparison of the three major open table formats. Delta Lake
+         is the default choice for Spark-centric shops; Iceberg is
+         preferred when multiple query engines must read the same tables;
+         Hudi is preferred for high-throughput CDC upsert workloads.}
+\label{tab:table-formats}
+\end{table}
+
+\begin{defbox}{Lakehouse Architecture (Zaharia et al., CIDR 2021)}
+A \textbf{Lakehouse} is a data management system with the following
+properties:
+\begin{enumerate}
+  \item \textbf{Cheap, open-format storage}: data is stored as Parquet
+        or ORC files on commodity object storage (S3, Azure Data Lake
+        Storage, Google Cloud Storage) at $\sim$\$23/TB-month.
+  \item \textbf{Metadata and governance layer}: an open table format
+        (Delta Lake, Iceberg, or Hudi) adds ACID transactions, schema
+        enforcement, time travel, and audit logging on top of the
+        object storage---without moving the data to a proprietary format.
+  \item \textbf{Unified query engine}: a single query engine (Spark SQL,
+        Trino, or DuckDB) serves both BI dashboards (interactive SQL)
+        and ML training jobs (DataFrame reads) from the \emph{same ACID-
+        consistent copy} of the data. There is no ETL copy between a
+        lake and a warehouse.
+  \item \textbf{Declarative access control}: a unified catalogue and
+        governance layer (Databricks Unity Catalog, Apache Atlas,
+        AWS Glue Data Catalog) applies column-level masking, row-level
+        filtering, and audit logging automatically for every query.
+\end{enumerate}
+\end{defbox}
+
+%%====================================================================
+\section{Data Mesh: Decentralised Domain Ownership}
+\label{sec:data-mesh}
+%%====================================================================
+
+The Lakehouse solves the technical problem of unreliable, expensive,
+fragmented data storage. The Data Mesh \autocite{Dehghani2022} addresses
+a different class of problem: the \emph{organisational} bottleneck created
+when a central data platform team is responsible for serving every business
+domain's data needs.
+
+%--------------------------------------------------------------------
+\subsection{The Central Platform Bottleneck}
+\label{subsec:mesh-problem}
+%--------------------------------------------------------------------
+
+In the traditional model, a central data engineering team:
+\begin{enumerate}
+  \item Ingests raw data from every business domain (sales, finance,
+        operations, marketing) into a centralised data lake.
+  \item Builds transformation pipelines to produce clean, curated datasets.
+  \item Publishes datasets for consumption by analysts and data scientists.
+\end{enumerate}
+
+At 200+ teams in a large enterprise, this creates a predictable bottleneck:
+\begin{itemize}
+  \item \textbf{Ownership mismatch}: the pipeline team does not understand
+        the domain semantics (what does a ``cancelled order'' mean in the
+        sales domain?); the domain team that understands the data cannot
+        fix the pipeline.
+  \item \textbf{Queue bottleneck}: 200 teams compete for 20 data engineers.
+        New dataset requests take weeks or months to fulfil.
+  \item \textbf{Quality degradation}: no single team is accountable for
+        downstream data correctness. When a dashboard shows incorrect
+        numbers, three teams blame each other.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{The Four Data Mesh Principles}
+\label{subsec:mesh-principles}
+%--------------------------------------------------------------------
+
+Dehghani proposed Data Mesh as a \emph{sociotechnical} paradigm---meaning
+it changes both the technology architecture and the organisational structure
+simultaneously. It has four principles.
+
+\begin{defbox}{Data Mesh: Four Principles (Dehghani, 2019/2022)}
+\begin{enumerate}
+  \item \textbf{Domain ownership}: each business domain (sales, finance,
+        logistics, marketing) owns, builds, operates, and is SLA-accountable
+        for its own data products. The sales team is responsible for the
+        quality of \texttt{sales\_events}; the logistics team is responsible
+        for \texttt{shipment\_records}. There is no central data team that
+        intermediates.
+  \item \textbf{Data as a product}: each domain's dataset is treated as
+        a product with explicit quality contracts. A \emph{data product}
+        is \textbf{discoverable} (findable in a catalogue), \textbf{addressable}
+        (accessible via a stable, versioned API or URI), \textbf{trustworthy}
+        (with documented SLAs on freshness, accuracy, and completeness),
+        and \textbf{self-describing} (with schema, lineage, and ownership
+        metadata).
+  \item \textbf{Self-serve data platform}: domain teams are not data
+        engineers. The central platform team's role changes from
+        \emph{owning pipelines} to \emph{providing infrastructure
+        abstractions} so that domain teams can build data products without
+        Spark or Kafka expertise. The Lakehouse is the natural storage
+        substrate for a self-serve data mesh.
+  \item \textbf{Federated computational governance}: global policies
+        (GDPR compliance, PDPA data localisation, HIPAA de-identification,
+        data retention limits) are enforced \emph{automatically} at the
+        platform level for all data products. Domain teams cannot opt out
+        of global policies, but retain local flexibility in how they
+        structure and process their data.
+\end{enumerate}
+\end{defbox}
+
+\begin{caution}{Data Mesh Is Not a Technology}
+Data Mesh is frequently misunderstood as a distributed storage architecture
+or a multi-cloud strategy. It is neither. It is an organisational design
+pattern for managing data responsibility. You can implement Data Mesh on
+a single cloud with a single Lakehouse. Conversely, building a distributed
+multi-cloud storage system does not give you a Data Mesh if the data
+ownership and accountability structure is still centralised. The
+transformation is primarily social (who is accountable for data quality?)
+and secondarily technical (how does the infrastructure enforce that
+accountability?).
+\end{caution}
+
+%%====================================================================
+\section{MLOps: Operationalising Machine Learning}
+\label{sec:mlops}
+%%====================================================================
+
+A trained machine learning model that exists only in a Jupyter notebook
+delivers zero business value. The discipline of \term{MLOps} (Machine
+Learning Operations) covers the engineering required to reliably deploy,
+monitor, and retrain models in production. The first paper to formalise
+this engineering gap was \autocite{MLTechnicalDebt2015}.
+
+%--------------------------------------------------------------------
+\subsection{Hidden Technical Debt in ML Systems}
+\label{subsec:technical-debt}
+%--------------------------------------------------------------------
+
+Sculley et al.\ identified a fundamental structural problem with production
+ML systems: the ML code itself---the model training loop---is only a tiny
+fraction of the total codebase. The surrounding infrastructure is vast,
+complex, and poorly understood.
+
+\begin{keyinsight}{Hidden Technical Debt (Sculley et al., NeurIPS 2015)}
+``Only a small fraction of real-world ML systems is composed of the ML
+code. The required surrounding infrastructure is vast and complex.''
+The paper identified nine categories of technical debt specific to ML
+systems:
+\begin{enumerate}
+  \item \textbf{Entanglement}: changing one input feature changes the
+        behaviour of all others (``Changing Anything Changes Everything'').
+  \item \textbf{Hidden feedback loops}: a model's predictions influence
+        the data it is next trained on---a source of instability invisible
+        to offline evaluation.
+  \item \textbf{Undeclared consumers}: other systems silently depend on
+        a model's output format; schema changes break them invisibly.
+  \item \textbf{Data dependency debt}: stale, underutilised, or
+        epsilon-feature dependencies accumulate and become expensive to
+        remove.
+  \item \textbf{Configuration debt}: hyperparameters, thresholds, and
+        pipeline configurations are not version-controlled.
+  \item \textbf{Fixed thresholds in dynamic worlds}: a fraud threshold
+        set in 2020 may be inappropriate in 2025 as transaction
+        distributions shift.
+  \item \textbf{Monitoring gaps}: the model trains on historical data
+        but serves live data; distribution drift goes undetected until
+        a business metric degrades.
+  \item \textbf{Training--serving skew}: the features computed at training
+        time use different code than the features computed at serving time,
+        producing silent prediction errors.
+  \item \textbf{Pipeline jungle}: ad-hoc data pipelines accumulate into
+        an unmaintainable collection of scripts.
+\end{enumerate}
+MLOps is the systematic response to this debt: a set of tools and
+practices that makes each failure mode visible, measurable, and preventable.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{The MLOps Pipeline}
+\label{subsec:mlops-pipeline}
+%--------------------------------------------------------------------
+
+A complete MLOps pipeline has seven components, each addressing a specific
+category of technical debt.
+
+\textbf{1. Data ingestion} (Kafka + Spark): reproducible, versioned data
+pipelines replace ad-hoc scripts. Data is written to the Lakehouse as a
+Delta table, providing immutable, versioned input to all downstream stages.
+
+\textbf{2. Feature engineering} (Apache Airflow DAGs): feature computation
+logic is expressed as versioned, tested Airflow DAGs rather than one-off
+notebook cells. A DAG that computes ``average transaction amount per user
+over the past 30 days'' runs on the same code path in both the training
+pipeline and the real-time serving pipeline, eliminating training--serving
+skew.
+
+\textbf{3. Feature store} (\tool{Feast}, \tool{Tecton}): a \term{feature
+store} is a centralised repository that stores pre-computed features and
+serves them to both training jobs (historical feature values for a training
+window) and inference services (real-time feature values for a prediction
+request). Without a feature store, different teams independently compute
+the same features with subtly different logic, creating inconsistent model
+inputs. The feature store also prevents \emph{point-in-time correctness}
+violations: a training example for a customer's state at time $t$ must
+use only feature values known at time $t$, not future values
+(``data leakage'').
+
+\textbf{4. Model training} (Spark MLlib, PyTorch, scikit-learn): the
+model training code reads features from the feature store, trains the
+model, and records all inputs (dataset version, feature set version,
+hyperparameters) and outputs (model artefacts, evaluation metrics) in
+an experiment tracker.
+
+\textbf{5. Experiment tracking} (\tool{MLflow}): MLflow's \code{mlflow.log\_param()},
+\code{mlflow.log\_metric()}, and \code{mlflow.log\_artifact()} API records
+every experiment run's configuration and output. The MLflow Tracking UI
+allows comparing runs by metric and reproducing any past result from
+its logged configuration.
+
+\textbf{6. Model registry} (MLflow Model Registry): trained models are
+registered in a version-controlled catalogue with stage labels
+(\texttt{Staging}, \texttt{Production}, \texttt{Archived}).
+A model transitions from \texttt{Staging} to \texttt{Production} only
+after passing automated integration tests and a manual approval step.
+A failing production model can be rolled back to a previous version in
+one command.
+
+\textbf{7. Serving and monitoring} (\tool{KServe}, \tool{Seldon},
+\tool{Evidently}): the model is deployed as a REST API endpoint with
+canary deployment (10\% of traffic goes to the new model; 90\% stays
+on the old model until the new model proves itself). \tool{Evidently}
+or \tool{Arize} monitors the live feature distribution against the training
+distribution, alerting when \term{data drift} is detected.
+
+\begin{lstlisting}[style=pyspark, caption={MLflow experiment tracking and
+  model registration in PySpark}]
+import mlflow
+import mlflow.spark
+from pyspark.sql import SparkSession
+from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+spark = SparkSession.builder.appName("MLflowDemo").getOrCreate()
+mlflow.set_tracking_uri("http://mlflow-server:5000")
+mlflow.set_experiment("bkash-fraud-detection-v2")
+
+# Load feature-engineered training data from Delta Lake
+train = spark.read.format("delta") \
+             .load("hdfs:///lakehouse/features/fraud_train/") \
+             .na.drop()
+
+feature_cols = ["amount_bdt", "txn_per_hour",
+                "avg_txn_30d", "is_new_receiver",
+                "hour_of_day", "day_of_week"]
+assembler = VectorAssembler(inputCols=feature_cols,
+                            outputCol="features")
+train_vec = assembler.transform(train)
+
+with mlflow.start_run(run_name="gbt_maxDepth5_lr01"):
+
+    # --- Hyperparameters ---
+    max_depth  = 5
+    lr         = 0.1
+    n_trees    = 100
+    mlflow.log_param("maxDepth",         max_depth)
+    mlflow.log_param("learningRate",     lr)
+    mlflow.log_param("numTrees",         n_trees)
+    mlflow.log_param("feature_set",      "v2.3")
+    mlflow.log_param("training_version", 47)    # Delta Lake version
+
+    # --- Train ---
+    gbt = GBTClassifier(
+        labelCol        = "is_fraud",
+        featuresCol     = "features",
+        maxDepth        = max_depth,
+        stepSize        = lr,
+        maxIter         = n_trees,
+    )
+    model = gbt.fit(train_vec)
+
+    # --- Evaluate ---
+    test    = assembler.transform(
+        spark.read.format("delta")
+             .load("hdfs:///lakehouse/features/fraud_test/").na.drop())
+    preds   = model.transform(test)
+    eval_   = BinaryClassificationEvaluator(labelCol="is_fraud")
+    auroc   = eval_.evaluate(preds)
+    mlflow.log_metric("auroc", auroc)
+    print(f"AUROC = {auroc:.4f}")
+
+    # --- Log model artefact ---
+    mlflow.spark.log_model(model, "gbt_fraud_model",
+                           registered_model_name="bkash-fraud-gbt")
+
+# --- Transition to Staging via Model Registry API ---
+client = mlflow.MlflowClient()
+latest = client.get_latest_versions("bkash-fraud-gbt",
+                                     stages=["None"])[0]
+client.transition_model_version_stage(
+    name    = "bkash-fraud-gbt",
+    version = latest.version,
+    stage   = "Staging",
+)
+print(f"Model v{latest.version} promoted to Staging")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Feature Stores and Training--Serving Skew}
+\label{subsec:feature-store}
+%--------------------------------------------------------------------
+
+\term{Training--serving skew} is the most common silent failure mode in
+production ML systems: the code that computes a feature at training time
+differs from the code that computes the same feature at serving time,
+because they were written by different teams at different times. The result
+is a model that performs well on the training and test sets but degrades
+mysteriously in production---because the features it sees during inference
+are not the same features it was trained on.
+
+A feature store eliminates this skew by maintaining a \emph{single}
+implementation of each feature that is called by both the training pipeline
+(to build the historical feature matrix) and the serving pipeline (to
+compute real-time features for an incoming prediction request).
+
+\begin{systemdesign}{Feature Store Architecture with Feast}
+\tool{Feast} is an open-source feature store with two stores:
+\begin{itemize}
+  \item \textbf{Offline store} (Delta Lake / BigQuery / Redshift):
+        stores the full historical record of each feature, indexed by
+        \texttt{entity\_id} and \texttt{event\_timestamp}. Training
+        jobs retrieve a point-in-time correct feature matrix by joining
+        the entity's label events to the offline store at the exact
+        timestamps of those events---preventing future data leakage.
+  \item \textbf{Online store} (Redis / DynamoDB): stores only the
+        \emph{latest} value of each feature for each entity. Inference
+        requests look up the online store in $<$5 milliseconds. The
+        offline store is periodically materialised to the online store
+        (``feature materialisation'').
+\end{itemize}
+Both stores share the same feature transformation code, guaranteeing
+that training and serving use identical feature values.
+\end{systemdesign}
+
+%%====================================================================
+\section{Edge Analytics and Cloud-Native Big Data}
+\label{sec:edge-cloud}
+%%====================================================================
+
+%--------------------------------------------------------------------
+\subsection{The Three-Tier Edge--Cloud Architecture}
+\label{subsec:three-tier}
+%--------------------------------------------------------------------
+
+IoT devices generate data at a rate that cannot economically be
+transmitted in full to a central cloud cluster. A DESCO power grid
+substation generates 100{,}000 voltage readings per second; a factory
+floor with 500 vibration sensors generates 10 million samples per second.
+Transmitting all this raw data to the cloud would require terabytes per
+day of bandwidth---prohibitively expensive and subject to network latency
+that makes real-time anomaly response impossible.
+
+\term{Edge analytics} solves this by placing computation at three tiers.
+
+\begin{defbox}{Three-Tier Edge--Cloud Architecture}
+\begin{enumerate}
+  \item \textbf{Tier 1: Device} (microcontroller, FPGA, SBC).
+        At the data source, lightweight models (TensorFlow Lite, ONNX
+        Runtime) perform preprocessing, filtering, and anomaly detection.
+        Only \emph{events} (anomalies detected, thresholds exceeded) are
+        forwarded upstream---not raw sensor readings. A cardiac monitor
+        runs a QRS peak detection algorithm on-device and transmits only
+        the detected heartbeat events, not the raw 500~Hz ECG waveform.
+  \item \textbf{Tier 2: Edge Gateway} (local server, AWS Greengrass,
+        Azure IoT Edge, NVIDIA Jetson).
+        The edge gateway runs pre-trained inference models and windowed
+        aggregation on the stream of device events from multiple devices.
+        It forwards only \emph{summary alerts} or \emph{windowed
+        aggregates} to the cloud. Typical data reduction ratio: $1000\times$
+        (from raw 100{,}000 readings/sec to $\sim$100 alerts/sec).
+        A factory's Greengrass gateway runs Isolation Forest on vibration
+        sensor events to detect bearing wear; it sends one alert per
+        anomalous 5-minute window rather than 30 million raw readings.
+  \item \textbf{Tier 3: Cloud Lakehouse} (AWS S3 + Delta Lake,
+        Azure ADLS + Iceberg).
+        The cloud receives the aggregated alerts and periodically batched
+        raw samples. It retrains global models on aggregated data from all
+        edge nodes; long-term historical storage enables trend analysis
+        and root-cause investigation. Updated models are pushed back
+        down to the edge gateways.
+\end{enumerate}
+The upstream data flow is \textbf{Kafka} or \textbf{MQTT} between tiers.
+The downstream model push is typically a CI/CD pipeline triggered by
+MLflow model registry promotion.
+\end{defbox}
+
+\textbf{Cloud-native big data.} On-premise Hadoop clusters are being
+replaced by \emph{managed cloud services} that decouple storage from
+compute:
+\begin{itemize}
+  \item \textbf{Storage}: Amazon S3, Azure Data Lake Storage (ADLS),
+        Google Cloud Storage (GCS) --- $\sim$\$23/TB-month, 11 nines
+        durability, no cluster to maintain.
+  \item \textbf{Compute}: AWS EMR (Elastic MapReduce), Google Dataproc,
+        Azure HDInsight --- ephemeral Spark clusters that start in 5
+        minutes, process the job, and terminate automatically (scaling
+        to zero when idle). A batch pipeline that previously required
+        a 100-node always-on cluster now runs on a 20-node cluster for
+        3 hours per day---a 60--80\% cost reduction.
+\end{itemize}
+
+The Lakehouse is the natural convergence of cloud-native storage and
+managed compute: Delta tables live on S3; ephemeral Spark clusters read
+them directly, without copying data to a warehouse.
+
+%%====================================================================
+\section{Privacy-Preserving Analytics}
+\label{sec:privacy}
+%%====================================================================
+
+Chapter~\ref{ch:domain-apps} introduced differential privacy and federated
+learning in the healthcare context. This section formalises both concepts
+and extends them to the general data engineering setting.
+
+%--------------------------------------------------------------------
+\subsection{Differential Privacy}
+\label{subsec:dp}
+%--------------------------------------------------------------------
+
+\begin{defbox}{$(\varepsilon, \delta)$-Differential Privacy}
+A randomised mechanism $\mathcal{M}: \mathcal{D} \to \mathcal{R}$ is
+\textbf{$(\varepsilon, \delta)$-differentially private} if for all pairs
+of neighbouring datasets $D, D'$ that differ in exactly one record, and
+for all subsets of outputs $S \subseteq \mathcal{R}$:
+\[
+  \Pr[\mathcal{M}(D) \in S]
+  \leq e^\varepsilon \cdot \Pr[\mathcal{M}(D') \in S] + \delta
+\]
+\textbf{Interpretation}: the probability that the mechanism's output
+changes when one individual's record is added or removed is bounded by
+$e^\varepsilon$ (multiplicatively) with probability $1 - \delta$.
+Smaller $\varepsilon$ is stronger privacy. $\varepsilon = 0$ means
+perfect privacy (the output reveals nothing about any individual);
+$\varepsilon = \infty$ means no privacy guarantee.
+
+\textbf{The Laplace mechanism}: for a real-valued function $f: \mathcal{D}
+\to \mathbb{R}$ with sensitivity $\Delta f = \max_{D, D'} |f(D) - f(D')|$,
+adding Laplace noise achieves $(\varepsilon, 0)$-differential privacy:
+\[
+  \mathcal{M}(D) = f(D) + \text{Lap}\!\left(\frac{\Delta f}{\varepsilon}\right)
+\]
+\textbf{The Gaussian mechanism}: adding Gaussian noise achieves
+$(\varepsilon, \delta)$-differential privacy, which is practically
+preferable for machine learning (gradient perturbation).
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={Differential privacy with the
+  Laplace mechanism: publishing district-level case counts}]
+import numpy as np
+
+def laplace_mechanism(true_count: int,
+                      sensitivity: float,
+                      epsilon: float,
+                      rng: np.random.Generator) -> float:
+    """Add Laplace noise to a count query."""
+    scale = sensitivity / epsilon
+    noise = rng.laplace(loc=0.0, scale=scale)
+    # Counts must be non-negative; clip to 0
+    return max(0.0, true_count + noise)
+
+rng     = np.random.default_rng(2024)
+epsilon = 1.0      # privacy budget
+sens    = 1.0      # sensitivity of a COUNT query
+
+# True dengue case counts by district (confidential)
+true_counts = {
+    "Dhaka":       1_402,
+    "Chittagong":  387,
+    "Rajshahi":    201,
+    "Sylhet":      94,
+    "Barisal":     47,
+}
+
+print(f"ε = {epsilon} (stronger privacy → larger noise)")
+print(f"{'District':<14} {'True':>8} {'Published':>12} {'Error':>8}")
+print("-" * 46)
+
+for district, count in true_counts.items():
+    published = laplace_mechanism(count, sens, epsilon, rng)
+    error     = abs(published - count)
+    print(f"{district:<14} {count:>8} {published:>12.1f} {error:>8.1f}")
+
+# Compare: tighter budget → more noise
+for eps in [0.1, 0.5, 1.0, 2.0, 5.0]:
+    noised = laplace_mechanism(1_402, 1.0, eps, rng)
+    print(f"  ε={eps:<4}: published Dhaka count = {noised:.1f}")
+\end{lstlisting}
+
+\textbf{Real-world deployments.}
+\begin{itemize}
+  \item \textbf{Apple}: uses local differential privacy (LDP) for
+        keyboard usage statistics on iOS---noise is added on the
+        device before any data leaves the phone.
+  \item \textbf{Google}: RAPPOR (Randomised Aggregatable Privacy-Preserving
+        Ordinal Response) for Chrome usage telemetry.
+  \item \textbf{US Census Bureau}: the 2020 US Census used differential
+        privacy (the TopDown algorithm) to prevent re-identification of
+        individuals in block-level population tables.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Federated Learning}
+\label{subsec:federated-learning}
+%--------------------------------------------------------------------
+
+\autocite{McMahan2017} introduced \term{federated learning} (FL) as a
+method for training a shared model on data held across multiple devices
+or institutions without centralising the raw data. The core algorithm,
+\emph{FedAvg}, works as follows:
+\begin{enumerate}
+  \item A \textbf{central server} initialises a global model $w_0$ and
+        distributes it to all participating nodes (hospitals, mobile devices,
+        banks).
+  \item Each node trains the model locally for $E$ epochs on its own data,
+        producing a locally updated model $w_i^{(t)}$.
+  \item Each node sends only its \emph{model weight update}
+        $\Delta w_i = w_i^{(t)} - w_0^{(t)}$---not its raw data---to
+        the server.
+  \item The server aggregates the updates using weighted averaging:
+        \[
+          w_0^{(t+1)} = \sum_{i=1}^{K} \frac{n_i}{N} \Delta w_i
+        \]
+        where $n_i$ is node $i$'s dataset size and $N = \sum n_i$.
+  \item Repeat for $T$ global rounds.
+\end{enumerate}
+
+The raw data never leaves the originating node. This enables model training
+across organisational boundaries where data sharing is legally prohibited.
+
+\begin{techdebt}{Federated Learning Limitations in Production}
+Despite its privacy advantages, federated learning introduces engineering
+challenges that must be addressed before production deployment:
+\begin{enumerate}
+  \item \textbf{Statistical heterogeneity (non-IID data)}: each node's
+        data reflects local conditions (a rural hospital's patient population
+        differs from an urban hospital's). Naive FedAvg converges slowly
+        or to a poor global model when data distributions are highly
+        non-IID. Techniques such as FedProx (adding a proximal term to
+        the local loss) and SCAFFOLD (correction of client drift) address
+        this.
+  \item \textbf{Communication cost}: transmitting full model weight vectors
+        (sometimes hundreds of millions of parameters) after every round
+        is expensive. Gradient compression, quantisation, and sparsification
+        reduce communication by $10$--$100\times$ at some accuracy cost.
+  \item \textbf{Gradient inversion attacks}: recent research has shown
+        that model weight updates can leak information about the training
+        data. Combining federated learning with differential privacy
+        (DP-SGD: adding noise to gradients before uploading) provides
+        formal privacy guarantees even against a malicious server.
+  \item \textbf{Partial participation}: in cross-device federated learning
+        (e.g., mobile phones), only a fraction of nodes are available at
+        each round (device is off, battery is low). The training algorithm
+        must be robust to arbitrary dropouts.
+\end{enumerate}
+\end{techdebt}
+
+%%====================================================================
+\section{The Dataflow Model and Apache Beam}
+\label{sec:dataflow}
+%%====================================================================
+
+Chapter~\ref{ch:pipelines} described the Lambda architecture as the
+practitioner's solution to the batch--stream unification problem: run a
+batch pipeline for accuracy and a stream pipeline for latency, then merge
+their outputs in a serving layer. The Lambda architecture's fundamental
+flaw is its \emph{dual code path}: identical business logic must be
+maintained in two separate codebases that gradually drift.
+
+\autocite{Dataflow2015} proposed a more principled solution: a single
+programming model that is expressive enough to describe both batch and
+streaming workloads, treating batch as a special case of streaming.
+
+%--------------------------------------------------------------------
+\subsection{The Four Questions}
+\label{subsec:four-questions}
+%--------------------------------------------------------------------
+
+Any data pipeline can be fully characterised by four questions:
+
+\begin{defbox}{The Dataflow Model's Four Ws (Akidau et al., VLDB 2015)}
+\begin{enumerate}
+  \item \textbf{What} results are computed?
+        The \emph{transformation} applied to the data: sum, count,
+        average, join, custom function. This is equivalent to the
+        \texttt{SELECT} clause in SQL.
+  \item \textbf{Where} in event time are results computed?
+        The \emph{windowing strategy} partitions the unbounded event
+        stream into finite chunks:
+        \begin{itemize}
+          \item \textbf{Tumbling window}: fixed, non-overlapping windows
+                (e.g., count transactions every 5 minutes).
+          \item \textbf{Sliding window}: fixed-size, overlapping windows
+                (e.g., 1-hour window updated every 5 minutes).
+          \item \textbf{Session window}: variable-size window defined by
+                activity---a window closes when there has been no event
+                for a specified gap duration.
+        \end{itemize}
+  \item \textbf{When} in processing time are results materialised?
+        The \emph{trigger} controls when the system emits a result for
+        a window:
+        \begin{itemize}
+          \item \textbf{Watermark trigger}: emit when the watermark
+                (the system's estimate of the latest event time it has
+                seen minus an allowance for late arrivals) passes the
+                window's end time.
+          \item \textbf{Periodic trigger}: emit every $n$ seconds
+                regardless of the watermark.
+          \item \textbf{Count trigger}: emit after $n$ events.
+          \item \textbf{Composite}: e.g., emit early every 10 seconds
+                AND emit a final result when the watermark passes.
+        \end{itemize}
+  \item \textbf{How} do refinements relate to previous results?
+        The \emph{accumulation mode} determines what happens when a
+        window fires multiple times (early trigger, then final):
+        \begin{itemize}
+          \item \textbf{Discarding}: each firing emits only the new data
+                arrived since the last firing.
+          \item \textbf{Accumulating}: each firing emits the full running
+                total since the window opened (overwrites previous output).
+          \item \textbf{Accumulating and retracting}: each firing emits
+                both the new value AND a retraction of the previous value
+                (for downstream systems that need to subtract the old value).
+        \end{itemize}
+\end{enumerate}
+\textbf{Batch as a special case of streaming}: in this model, a batch
+job is a streaming job with a single tumbling window covering the entire
+dataset, a watermark trigger set at the end of the input, and discarding
+accumulation. The same code expresses both.
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{Apache Beam: One Pipeline, Multiple Runners}
+\label{subsec:beam}
+%--------------------------------------------------------------------
+
+\tool{Apache Beam} (2016) is the open-source implementation of the
+Dataflow Model. A Beam pipeline is written in Python, Java, or Go using
+the Beam SDK. The same pipeline code then runs on multiple \emph{runners}:
+\begin{itemize}
+  \item \textbf{Apache Spark} runner: for batch processing on HDFS or S3.
+  \item \textbf{Apache Flink} runner: for low-latency streaming.
+  \item \textbf{Google Cloud Dataflow}: fully managed, auto-scaling stream
+        and batch processing on GCP.
+  \item \textbf{Direct runner}: for local testing without a cluster.
+\end{itemize}
+
+\begin{lstlisting}[style=pyspark, caption={Apache Beam: fraud detection
+  pipeline with tumbling windows (same code runs on Spark or Flink)}]
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.transforms.window import FixedWindows
+from apache_beam.transforms.trigger import (AfterWatermark,
+    AfterProcessingTime, AccumulationMode)
+import json
+
+# --- Configuration: change runner to switch between Spark / Flink / local ---
+options = PipelineOptions([
+    "--runner=FlinkRunner",
+    "--flink_master=flink-master:6123",
+    # Use SparkRunner for batch:
+    # "--runner=SparkRunner", "--spark_master=spark://...",
+])
+
+def parse_event(raw: bytes) -> dict:
+    """Deserialise a Kafka event bytes to dict."""
+    return json.loads(raw.decode("utf-8"))
+
+def extract_key_amount(record: dict):
+    """Emit (district, amount_bdt) pairs."""
+    return (record.get("district", "Unknown"),
+            float(record.get("amount_bdt", 0.0)))
+
+class SumValues(beam.CombineFn):
+    def create_accumulator(self): return 0.0
+    def add_input(self, acc, element): return acc + element
+    def merge_accumulators(self, accs): return sum(accs)
+    def extract_output(self, acc): return acc
+
+def format_output(kv) -> str:
+    district, total = kv
+    return f"{district}: BDT {total:,.0f}"
+
+with beam.Pipeline(options=options) as p:
+    result = (
+        p
+        # WHAT: read from Kafka
+        | "ReadKafka" >> beam.io.ReadFromKafka(
+            consumer_config={
+                "bootstrap.servers": "kafka:9092",
+                "group.id": "beam-fraud-pipeline",
+            },
+            topics=["bkash-transactions"],
+        )
+        | "ParseJSON"      >> beam.Map(parse_event)
+        | "ExtractPairs"   >> beam.Map(extract_key_amount)
+
+        # WHERE: 5-minute tumbling event-time windows
+        | "Window" >> beam.WindowInto(
+            FixedWindows(5 * 60),        # 5-minute windows
+            trigger=AfterWatermark(
+                early=AfterProcessingTime(30),   # emit every 30s early
+            ),
+            accumulation_mode=AccumulationMode.ACCUMULATING,
+            allowed_lateness=2 * 60,     # accept events up to 2 min late
+        )
+
+        # WHAT: aggregate amount per district per window
+        | "SumByDistrict"  >> beam.CombinePerKey(SumValues())
+        | "Format"         >> beam.Map(format_output)
+
+        # Output: write aggregates to the Lakehouse (or console for testing)
+        | "Write" >> beam.io.WriteToText("hdfs:///lakehouse/fraud/agg")
+    )
+\end{lstlisting}
+
+%%====================================================================
+\section{Research Spotlight}
+\label{sec:ch11-research}
+%%====================================================================
+
+\begin{researchspotlight}{Armbrust et al.\ (2020) · Armbrust, Ghodsi, Xin
+  \& Zaharia (2021) · Akidau et al.\ (2015) · Sculley et al.\ (2015) ---
+  The Modern Data Engineering Stack}
+
+\textbf{Work 1: Armbrust, M., et al.\ (2020). ``Delta Lake: High-Performance
+ACID Table Storage over Cloud Object Stores.'' \textit{Proceedings of the
+VLDB Endowment}, 13(12), 3411--3424.} (Databricks / Apache Foundation;
+Rank A* venue.)
+
+Delta Lake addresses a fundamental limitation of cloud object stores
+(S3, Azure ADLS, GCS): they provide no ACID semantics. A concurrent
+write from two Spark executors to the same S3 prefix produces undefined
+results; a partial write due to a job failure leaves the table in a
+corrupt state; there is no mechanism for rolling back a bad commit.
+
+The paper's solution is the \emph{Delta Log}: an ordered sequence of
+atomic JSON commits stored inside the table directory in S3. Each commit
+records added and removed Parquet files, schema changes, and metadata.
+Readers reconstruct the table state by reading the log; they always see
+a consistent snapshot. Writers implement optimistic concurrency control
+by racing to write the next log entry number---only one succeeds.
+Time travel is a consequence of the log's durability: any past version
+is recoverable by reading the log up to that version's commit.
+
+Three benchmarks from the paper:
+\begin{enumerate}
+  \item Write throughput equal to raw Parquet on S3 (the log adds $<$2\%
+        overhead for writes; checkpoint files amortise read cost).
+  \item Z-ordering reduces the number of files scanned by queries with
+        two-column filters by 95\% compared to Hive partitioning on
+        a single column.
+  \item MERGE INTO (upsert) is $10\times$ faster than the equivalent
+        read--filter--rewrite pattern on raw Parquet.
+\end{enumerate}
+
+\textbf{Impact}: Delta Lake is now the default table format for Databricks
+Lakehouse Platform, used by over 7{,}000 organisations. It has been
+adopted as a core component of AWS Lake Formation and Azure Synapse
+Analytics. Apache Iceberg (Netflix) and Apache Hudi (Uber) adopt the
+same transaction-log principle with different trade-offs.
+
+\medskip
+\textbf{Work 2: Armbrust, M., Ghodsi, A., Xin, R., \& Zaharia, M. (2021).
+``Lakehouse: A New Generation of Open Platforms That Unify Data
+Warehousing and Advanced Analytics.'' \textit{11th Annual Conference on
+Innovative Data Systems Research (CIDR 2021)}.} (Databricks; invited
+vision paper.)
+
+The Lakehouse paper formalises the observation that Delta Lake's ACID
+semantics make it possible to use a data lake as a data warehouse---without
+a separate copy of the data in a proprietary warehouse system.
+Zaharia et al.\ benchmark the Lakehouse architecture (Delta Lake + Spark
+SQL on S3) against the leading cloud data warehouses (Redshift, Snowflake,
+BigQuery) on the TPC-DS benchmark:
+\begin{itemize}
+  \item At the 3~TB scale factor, Databricks SQL on Delta Lake achieves
+        comparable performance to Redshift RA3 at 3--5$\times$ lower cost.
+  \item The ``no ETL copy'' property means analysts query data that is
+        minutes old, not 12 hours old as in the traditional lake-to-warehouse
+        pipeline.
+\end{itemize}
+The paper formally defines the Lakehouse using five properties (open
+storage, metadata layer, SQL performance, ML support, governance)
+and identifies DuckDB as an in-process analytical engine that further
+democratises Lakehouse query access without a Spark cluster.
+
+\textbf{Impact}: Snowflake, Google, and Microsoft have all published
+blog posts and white papers in response to the Lakehouse paper.
+Snowflake's Iceberg integration, Google's BigLake, and AWS Lake Formation
+are all responses to the competitive pressure created by this paper.
+
+\medskip
+\textbf{Work 3: Akidau, T., et al.\ (2015). ``The Dataflow Model: A
+Practical Approach to Balancing Correctness, Latency, and Cost in
+Massive-Scale, Unbounded, Out-of-Order Data Processing.''
+\textit{Proceedings of the VLDB Endowment}, 8(12), 1792--1803.}
+(Google; VLDB Best Paper Award.)
+
+Google's internal production streaming system (MillWheel, 2013) revealed
+two fundamental inadequacies of the Lambda architecture: maintaining dual
+code paths introduced synchronisation bugs; and the existing streaming
+model (Storm, early Spark Streaming) provided no principled way to handle
+out-of-order events---events that arrive at the processing system after
+the window covering their event time has already been emitted.
+
+Akidau et al.'s Dataflow Model answers four questions for any data pipeline
+(What, Where, When, How) and introduces the \emph{watermark} as a
+first-class primitive: the watermark is the system's estimate of the
+maximum event time for which all earlier events have been received.
+Triggers allow windows to emit early results (for latency) while
+waiting for late arrivals (for completeness). The accumulation mode
+controls how late-arriving events update previously emitted results.
+
+\textbf{Impact}: The Dataflow Model was open-sourced as Apache Beam in
+2016. Apache Flink adopted the Dataflow Model's event-time windowing
+semantics directly (the \texttt{EventTimeSessionWindows} and
+\texttt{EventTimeTrigger} APIs are direct implementations of the Four
+Ws). Google Cloud Dataflow is the managed production deployment.
+Spark Structured Streaming's \texttt{watermark} API
+(Chapter~\ref{ch:pipelines}) is an implementation of the same model.
+
+\medskip
+\textbf{Work 4: Sculley, D., et al.\ (2015). ``Hidden Technical Debt in
+Machine Learning Systems.'' \textit{Advances in Neural Information
+Processing Systems (NeurIPS 2015)}.} ($>$5{,}000 citations; Google.)
+
+Written by Google engineers managing internal ML production systems,
+this paper is one of the most practically influential papers of the
+2010s. Its central argument is that the visible ML code---the model
+training loop---is only a small fraction of the actual cost of a
+production ML system. Nine categories of hidden technical debt
+(entanglement, undeclared consumers, data dependency debt, configuration
+debt, fixed thresholds, monitoring gaps, training--serving skew,
+pipeline jungle, world changes) account for far more engineering
+effort than the ML code itself.
+
+The paper's impact was to crystallise the \emph{MLOps} discipline:
+toolmakers (Databricks MLflow, Tecton, Weights \& Biases, Evidently AI)
+built their entire product around eliminating specific categories of
+the debt described in this paper. Stanford's CS329S (ML Systems) assigns
+the paper as the first required reading and maps its debt taxonomy to
+every tool in the MLOps stack.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: Enterprise Lakehouse Migration in Production}
+\label{sec:lakehouse-case}
+%%====================================================================
+
+\begin{casestudy}{From Lambda Architecture to Lakehouse ---
+  Pinterest, Comcast, and the Production Engineering Lessons}
+
+\textbf{Context: Lambda Pain at Scale.}
+By 2018--2020, organisations running the Lambda architecture at petabyte
+scale were experiencing the same compounding pain:
+\begin{itemize}
+  \item \textbf{Pinterest (300+ PB stored, 10+ billion events/day)}: for
+        every business metric (engagement rate, recommendation click-through,
+        ad impression count), two separate codebases existed---a Spark batch
+        job for the weekly reports and a Flink streaming job for the
+        real-time dashboard. Engineers estimated they spent 40\% of their
+        time keeping the two code paths in sync. When business logic changed
+        (new definition of an ``engagement event''), both codebases had to
+        be updated simultaneously---and failures in synchronisation produced
+        inconsistent numbers that took days to diagnose.
+  \item \textbf{Comcast (100 TB of new data per day)}: data was ingested
+        into Amazon S3 (the data lake) via Spark batch jobs. Every night, a
+        separate ETL pipeline extracted the previous day's data from S3 and
+        loaded it into Amazon Redshift (the data warehouse). Business analysts
+        queried Redshift; ML teams queried S3. The copy introduced a 12-hour
+        data freshness lag for analysts, and the two stores inevitably diverged
+        as some records were cleaned in the ETL pipeline and others were not.
+\end{itemize}
+
+\textbf{Migration Architecture.}
+Both organisations migrated to a Lakehouse using Delta Lake on Amazon S3 +
+Databricks (Spark) as the unified query engine. The migration strategy
+was \emph{table-by-table}, not a big-bang cutover:
+\begin{enumerate}
+  \item Convert the highest-value, most-queried table first (e.g., the
+        daily active users table). Enable schema enforcement immediately.
+        Run the Delta version and the legacy version in parallel for two
+        weeks, comparing query results.
+  \item Migrate the Flink streaming pipeline to write to Delta using
+        Spark Structured Streaming with the Delta Lake sink. The streaming
+        table and the batch table are now the same Delta table---the same
+        Parquet files, the same ACID log.
+  \item Redirect BI tools (Tableau, Superset) from Redshift to Delta Lake
+        via Spark SQL. Validate dashboard numbers against the Redshift
+        baseline.
+  \item Decommission the Redshift cluster and the nightly ETL pipeline.
+\end{enumerate}
+
+\textbf{Measured Outcomes.}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Metric} & \textbf{Before (Lambda)} & \textbf{After (Lakehouse)} \\
+  \midrule
+  ETL pipeline count per metric  & 3--5 jobs   & 1 job \\
+  BI data freshness              & 12 hours    & $<$15 minutes \\
+  Storage cost per TB-month      & \$23 lake + \$230 DWH & \$23 (lake only) \\
+  ML training data access        & File copy from S3 & Direct Delta read \\
+  Schema violations detected     & After landing & Blocked at ingest \\
+  GDPR record deletion           & Rewrite all Parquet files & Single delta log entry \\
+  Analyst query latency (P95)    & 8 minutes (Hive) & 45 seconds (Delta) \\
+  Code paths per pipeline        & 2 (batch + stream) & 1 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Five Engineering Lessons.}
+\begin{enumerate}
+  \item \textbf{Enable schema enforcement on day one.}
+        Teams that enabled schema enforcement in the first week of migration
+        discovered and fixed 90\% of their data quality bugs within that
+        week. Teams that deferred schema enforcement ``until the migration
+        was stable'' spent months debugging corrupted tables that had
+        accumulated malformed records during the deferral period.
+  \item \textbf{Time travel replaced manual snapshot exports.}
+        Compliance teams had previously maintained a weekly manual export
+        of the Redshift table to a separate S3 folder as an ``audit snapshot.''
+        After migration, \texttt{VERSION AS OF} or \texttt{TIMESTAMP AS OF}
+        queries served this function automatically---eliminating 6~TB/month
+        of redundant storage.
+  \item \textbf{Z-ordering beats blanket partitioning.}
+        The legacy Hive tables were partitioned by \texttt{date}---reasonable
+        for time-range queries but inadequate for the common multi-column
+        filter \texttt{WHERE user\_id = X AND date BETWEEN Y AND Z}
+        (which still scanned the entire date partition). Z-ordering on
+        \texttt{(user\_id, date)} reduced scanned files by 78--85\% for
+        these queries.
+  \item \textbf{Migration, not replacement.}
+        The table-by-table migration strategy eliminated downtime and allowed
+        the team to validate each table independently. A big-bang migration
+        that switches all tables simultaneously produces a situation where
+        a bug in one table poisons all downstream consumers and is impossible
+        to roll back cleanly.
+  \item \textbf{The bottleneck shifted from storage to governance.}
+        After the technical migration, the dominant remaining challenge was
+        \emph{organisational}: who owns which Delta table? Which teams can
+        write to it? Who is responsible when a table's data quality degrades?
+        These questions---the subject of the Data Mesh paradigm---proved
+        harder to solve than the technical migration itself.
+\end{enumerate}
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch11-summary}
+%%====================================================================
+
+This chapter described the fourth era of big data technology and the
+architecture that defines it.
+
+The Lakehouse combines cheap open-format object storage with an open
+table format (Delta Lake, Apache Iceberg, or Apache Hudi) that provides
+ACID transactions via a transaction log, time travel via log durability,
+and schema enforcement at the storage layer. Delta Lake's optimistic
+concurrency control achieves serialisable writes on eventually-consistent
+S3 without a dedicated lock manager. The Lakehouse eliminates the
+lake--warehouse split: BI and ML workloads read the same ACID-consistent
+data, and the Lambda architecture's 12-hour freshness lag disappears.
+
+The Data Mesh addresses the organisational bottleneck created when a
+central platform team owns all data pipelines: it decentralises ownership
+to domain teams (domain ownership), standardises the interface of each
+dataset (data as a product), provides infrastructure abstractions that
+non-engineers can use (self-serve platform), and enforces global
+compliance policies automatically (federated governance).
+
+MLOps makes production ML reliable by addressing the hidden technical
+debt identified by Sculley et al.: feature stores eliminate training--serving
+skew; MLflow tracks experiment configurations and enables result reproduction;
+model registries provide versioned, staged deployment; and monitoring detects
+data drift before it degrades business outcomes.
+
+Edge analytics extends distributed processing to three tiers: lightweight
+on-device inference (TensorFlow Lite, ONNX), edge gateway aggregation
+(Greengrass, Azure IoT Edge), and cloud Lakehouse storage and model
+retraining. Cloud-native managed services (AWS EMR, Google Dataproc)
+decouple storage (S3, GCS) from compute, reducing cost by 60--80\%
+compared to always-on HDFS clusters.
+
+The Dataflow Model (Akidau et al., 2015) eliminates the Lambda
+architecture's dual code path by providing a single programming model
+with four dimensions: What (transformation), Where (windowing),
+When (triggering), and How (accumulation). Apache Beam implements this
+model and runs on Spark, Flink, and Google Cloud Dataflow---one pipeline
+code, multiple backends.
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch11-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq Describe the four eras of big data technology. For each era, state
+the primary engineering bottleneck that the previous era's tools could
+not address and the key innovation that resolved it.
+
+\sq What is the Delta Log in Delta Lake? How does it achieve atomicity,
+isolation, and durability on Amazon S3, which provides no native locking
+or atomic rename operations?
+
+\sq A Spark job writes to a Delta table at the same time as a second Spark
+job. Only one write succeeds; the other throws a \texttt{ConcurrentModificationException}.
+Explain the optimistic concurrency control mechanism that produced this outcome.
+
+\sq What is time travel in Delta Lake? Give two specific production use
+cases where the ability to query a past version of a Delta table provides
+direct business value.
+
+\sq Describe the difference between Delta Lake's \textbf{schema enforcement}
+and \textbf{schema evolution}. What problem does each solve, and what
+is the consequence of not having schema enforcement in a data lake?
+
+\sq What is Z-ordering? Explain why it outperforms single-column Hive
+partitioning for queries that filter on two columns simultaneously.
+
+\sq State the four principles of the Data Mesh paradigm. For each, identify
+the specific bottleneck of centralised data architecture that it addresses.
+
+\sq What is training--serving skew? Give a specific example from a fraud
+detection context, describe how it produces silent prediction errors,
+and explain how a feature store prevents it.
+
+\sq Define $(\varepsilon, \delta)$-differential privacy formally. If
+$\varepsilon = 0.1$ vs.\ $\varepsilon = 5.0$: which provides stronger
+privacy, which adds more noise, and which is more appropriate for a
+published aggregate statistic vs.\ an internal model training signal?
+
+\sq Describe the Dataflow Model's four Ws. Explain how a batch MapReduce
+job is a special case of the streaming model under this framework.
+
+\sq What is a watermark in the Dataflow Model? Why is a watermark necessary
+for correctly processing out-of-order streaming events?
+
+\sq What is the ``no ETL copy'' advantage of the Lakehouse? Describe
+the specific data freshness and cost problems it eliminates.
+
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Delta Lake Concurrency Analysis.}
+A bKash transaction table is stored as a Delta table on S3. Three
+concurrent Spark jobs attempt to write to the table simultaneously:
+\begin{itemize}
+  \item Job A: append 10 million new transactions (started first).
+  \item Job B: UPDATE 500 transactions where \texttt{district='Dhaka'}
+        (started 2 seconds after Job A).
+  \item Job C: DELETE all transactions where \texttt{amount\_bdt < 10}
+        (started 3 seconds after Job A).
+\end{itemize}
+\begin{enumerate}[(a)]
+  \item Which job writes the Delta Log entry numbered 00042.json if
+        the current latest version is 41? Which jobs conflict?
+  \item Under Delta Lake's OCC: if Job A succeeds, does Job B automatically
+        fail, or does it check whether its operation conflicts with Job A's
+        specific changes? Explain the conflict detection logic.
+  \item If Job C fails with a \texttt{ConcurrentModificationException},
+        what exactly does it retry? Does it re-read the data from scratch
+        or simply retry the log append?
+  \item After all three operations complete, how does a time-travel query
+        \texttt{VERSION AS OF 41} behave? What data does it return?
+\end{enumerate}
+
+\ap \textbf{MLOps Debt Taxonomy.}
+A DGHS team built a sepsis prediction model in 2022. It is deployed in
+production at Dhaka Medical College Hospital and makes predictions every
+15 minutes for each ICU patient. In 2025, the team notices the model's
+clinical alerts are being ignored by nurses, who say ``the model keeps
+false-alarming.'' An investigation reveals:
+\begin{itemize}
+  \item The model was trained on 2019--2021 ICU data. In 2023, the hospital
+        switched from manual vital-sign charting to an automated monitoring
+        system that records vitals every 1 minute instead of every 4 hours.
+        The model was not retrained.
+  \item The real-time feature computation at serving time uses a slightly
+        different rolling-window logic than the training pipeline (off-by-one
+        in window boundary calculation).
+  \item No monitoring was configured to detect feature distribution drift.
+\end{itemize}
+For each issue: (a)~identify the Sculley et al.\ technical debt category;
+(b)~describe the specific MLOps tool or practice that would have prevented it;
+(c)~estimate the severity of the clinical impact if the model's false positive
+rate has risen from 12\% to 45\%.
+
+\ap \textbf{Dataflow Model Design.}
+Design a Beam pipeline for a real-time Pathao driver location analytics
+system:
+\begin{itemize}
+  \item Source: GPS ping events arrive at Kafka at 10 events/second
+        per active driver (estimated 50{,}000 active drivers during
+        peak hour $\Rightarrow$ 500{,}000 events/second).
+  \item Events have a 5--30 second event-time lag (mobile network latency).
+  \item Required output: count of active drivers per district per
+        5-minute window, emitted every 30 seconds with an early result,
+        and a final result when the watermark passes the window end.
+\end{itemize}
+Answer the Four Ws:
+\begin{enumerate}[(a)]
+  \item \textbf{What}: specify the transformation. What is the key,
+        what is aggregated, and what is the output schema?
+  \item \textbf{Where}: specify the windowing strategy. Why is a tumbling
+        window preferable to a sliding window for this use case?
+  \item \textbf{When}: specify the trigger. Write the trigger configuration
+        in pseudocode (AfterWatermark / AfterProcessingTime / composite).
+        What allowed lateness should be set given the 5--30s event-time lag?
+  \item \textbf{How}: specify the accumulation mode. If the 30-second
+        early trigger emits ``Dhaka: 12{,}400 drivers'' and the final
+        watermark trigger emits ``Dhaka: 12{,}800 drivers'', what does the
+        downstream system receive under \emph{Accumulating} mode vs.\
+        \emph{Accumulating and Retracting} mode?
+\end{enumerate}
+
+\ap \textbf{Differential Privacy Budget Allocation.}
+The DGHS plans to publish monthly district-level disease statistics
+(dengue case counts, cholera hospitalisations, COVID-19 test positivity
+rate) for 64 districts. Each statistic is a COUNT or AVERAGE query over
+the patient records database. The total monthly privacy budget is
+$\varepsilon_{\text{total}} = 2.0$.
+\begin{enumerate}[(a)]
+  \item The DGHS wants to publish 5 statistics per district per month
+        (dengue count, cholera count, COVID count, COVID positivity rate,
+        and flu count). How should the budget be allocated across these
+        5 queries using \emph{sequential composition} (each query spends
+        from the budget independently)?
+  \item A statistician proposes using \emph{parallel composition} instead:
+        since the district-level counts are disjoint subsets of the total
+        population, the budget does not need to be divided across districts.
+        Explain why this is correct and what it implies for the per-district
+        noise level.
+  \item With $\varepsilon = 0.4$ per query (from part (a)), and a COUNT
+        query sensitivity of $\Delta f = 1$, compute the standard deviation
+        of the Laplace noise. Is this noise level acceptable for a district
+        with 1{,}400 dengue cases? For a district with 14 cases?
+        Discuss the small-count problem.
+  \item Propose a solution for the small-count problem that maintains
+        differential privacy while still publishing useful statistics for
+        low-incidence districts.
+\end{enumerate}
+
+\exercisesection{Design Problems}
+
+\dpr \textbf{National Mobile Payment Lakehouse (capstone design).}
+Design a complete Lakehouse-based data analytics platform for a nationwide
+mobile payment company in Bangladesh (bKash scale: 50 million transactions/day,
+5 years of historical data, 30 million registered users).
+
+\begin{enumerate}[(a)]
+  \item \textbf{Ingestion layer}: specify the Kafka topic structure
+        (topic, partition count, key, value schema), the Spark Structured
+        Streaming sink configuration for writing to Delta Lake, and the
+        trigger interval.
+  \item \textbf{Storage design}: design the Delta table schema for the
+        raw transaction table. Specify partitioning columns and Z-ordering
+        columns. Justify each choice with reference to the query patterns
+        (time-range queries for compliance, user-level queries for fraud,
+        district-level aggregations for dashboards).
+  \item \textbf{Analytical layers}: describe the curated table hierarchy
+        (bronze $\to$ silver $\to$ gold) using Delta Lake. What
+        transformations happen at each layer? What SLA (freshness,
+        accuracy) applies to each layer?
+  \item \textbf{MLOps}: design the fraud detection MLOps pipeline.
+        Specify: feature store features (at least 5), MLflow experiment
+        tracking configuration, model registry stages, serving endpoint
+        latency target, and drift monitoring metric.
+  \item \textbf{Governance}: specify the Data Mesh domain ownership
+        structure for three domains (Payments, Compliance, Marketing).
+        Which Delta tables does each domain own? What global governance
+        policies are enforced automatically?
+\end{enumerate}
+
+\dpr \textbf{Bangladesh National Health Lakehouse.}
+Design a Lakehouse for the DGHS national health analytics platform,
+integrating data from 300 hospitals (HL7 FHIR), pharmacy chains,
+and community health workers (mobile app events via Kafka).
+
+\begin{enumerate}[(a)]
+  \item \textbf{Ingestion}: specify the Kafka Connect configuration for
+        ingesting FHIR R4 Patient and Observation resources from 300
+        hospitals. How do you handle hospitals with different FHIR
+        versions (R3 vs R4)?
+  \item \textbf{Privacy}: specify the de-identification pipeline that
+        must run before any data enters the Lakehouse gold layer.
+        Which safe harbour identifiers are removed, and which are
+        generalised (e.g., date-of-birth $\to$ age-band)?
+  \item \textbf{Federated learning}: the DGHS wants to train a sepsis
+        prediction model without ever centralising individual patient
+        records from private hospitals. Design the federated learning
+        architecture: number of rounds, local epochs per round, FedAvg
+        aggregation, and validation strategy.
+  \item \textbf{Real-time alerting}: specify the Dataflow pipeline for
+        detecting a cholera outbreak: window type and size, trigger,
+        threshold (what counts as an alert), and output destination.
+\end{enumerate}
+
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Delta Lake ACID Operations.}
+Using PySpark and the \texttt{delta-spark} library locally, implement
+and verify Delta Lake's ACID properties:
+\begin{enumerate}[(a)]
+  \item Create a Delta table for DGHS hospital admissions:
+        \texttt{(patient\_id STRING, district STRING, diagnosis\_code STRING,
+        admit\_date DATE, los\_days INT)}.
+        Write 10{,}000 synthetic rows.
+  \item Append 2{,}000 new records (Batch 2).
+  \item Execute an UPDATE to add 2 to \texttt{los\_days} for all patients
+        where \texttt{district = 'Dhaka'}.
+  \item Execute a DELETE for all patients where \texttt{los\_days < 1}
+        (invalid records).
+  \item Query \texttt{VERSION AS OF 1} (after Batch 2 but before the
+        UPDATE) and count the Dhaka patients. Verify the count matches
+        what you expect.
+  \item Run \texttt{DESCRIBE HISTORY} and display all four transaction
+        entries. For each, identify the operation type.
+  \item Run \texttt{OPTIMIZE} with Z-ordering on \texttt{(district,
+        admit\_date)} and observe the reduction in the number of Parquet
+        files.
+\end{enumerate}
+
+\pe \textbf{MLflow Experiment Tracking and Model Registry.}
+Build a complete MLflow experiment for bKash fraud classification:
+\begin{enumerate}[(a)]
+  \item Generate 100{,}000 synthetic transaction records with
+        \texttt{(amount\_bdt, txn\_per\_hour, is\_new\_receiver,
+        hour\_of\_day, is\_fraud)}.
+  \item Train three models (Logistic Regression, Random Forest,
+        Gradient Boosted Trees) and log each as a separate MLflow run
+        with hyperparameters, AUROC, F1, and training duration.
+  \item Use the MLflow Tracking UI to compare the three runs. Identify
+        the best model by AUROC.
+  \item Register the best model in the MLflow Model Registry with the
+        name \texttt{bkash-fraud-v2}. Transition it to the
+        \texttt{Staging} stage.
+  \item Load the staged model using \texttt{mlflow.spark.load\_model()}
+        and run predictions on a 10{,}000-row test set. Verify the
+        AUROC matches the training-time AUROC.
+\end{enumerate}
+
+\pe \textbf{Apache Beam: Windowed Transaction Aggregation.}
+Implement an Apache Beam pipeline that aggregates bKash transaction events:
+\begin{enumerate}[(a)]
+  \item Generate a synthetic stream of 1 million transaction events with
+        \texttt{(txn\_id, district, amount\_bdt, event\_time)}. Introduce
+        random event-time lag of 0--30 seconds to simulate mobile network delay.
+  \item Write the pipeline using the Direct Runner (local execution).
+        Apply 5-minute tumbling event-time windows and sum
+        \texttt{amount\_bdt} per \texttt{district} per window.
+  \item Configure a composite trigger: emit an early result every 10 seconds
+        of processing time AND emit a final result when the watermark passes
+        the window end. Use accumulating mode.
+  \item Set \texttt{allowed\_lateness} to 60 seconds. Verify that events
+        arriving within 60 seconds after the window end are included in
+        the final result.
+  \item Compare the output of the 5-minute tumbling window against a
+        10-minute sliding window with a 5-minute slide. Which produces
+        more output records and why?
+\end{enumerate}
+
+%%====================================================================
+\section*{Further Reading}
+\label{sec:ch11-further}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{\cite{DeltaLake2020}} --- Open access on the VLDB
+        website. Read Sections 2 (motivation), 3 (transaction log design),
+        and 5 (performance evaluation). Section 4 (MERGE INTO) is worth
+        reading for the upsert use case.
+  \item \textbf{\cite{Lakehouse2021}} --- Four pages; reads quickly.
+        Section 3 (Lakehouse Architecture) and Section 4 (Performance
+        Evaluation) are most relevant to the course content. The final
+        paragraph on DuckDB is prescient: by 2024, DuckDB had become
+        a primary tool for in-process analytical queries on Delta tables.
+  \item \textbf{\cite{Dataflow2015}} --- The most technically dense
+        paper in the course. Read Section 1 (introduction) and Section 3
+        (The Dataflow Model) carefully; Sections 4--6 describe the
+        Google-internal execution system (MillWheel) which is less relevant
+        to open-source practitioners. The appendix examples (event-time
+        windowing with watermarks) are highly recommended.
+  \item \textbf{\cite{MLTechnicalDebt2015}} --- Five pages. Every
+        ML practitioner should read this. Map each of the nine debt
+        categories to a tool in the MLOps stack described in this chapter.
+  \item \textbf{\cite{Dehghani2022}} --- The definitive Data Mesh book.
+        Chapters 1--3 (the problem) and 7--9 (the data product) are
+        most relevant; Chapters 10--14 cover implementation which is
+        beyond this course's scope.
+  \item \textbf{Designing Data-Intensive Applications (Kleppmann, 2017)},
+        Chapter 11 (\textit{Stream Processing}). The clearest explanation
+        of event-time vs.\ processing time and watermarks for a
+        practitioner audience. Pairs perfectly with the Dataflow Model paper.
+  \item \textbf{Delta Lake documentation at \texttt{delta.io}}: the
+        Quickstart guide and the ``How Delta Lake Works'' deep-dive are
+        the best practical complement to the VLDB paper. The
+        Databricks Community Edition (free) allows running all code
+        examples in this chapter without a local Spark installation.
+\end{itemize}
