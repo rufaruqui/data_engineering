@@ -52,7 +52,7 @@ After completing this chapter, you will be able to:
   \item Explain three privacy-preserving techniques for healthcare analytics
         ---safe harbour de-identification, differential privacy, and
         federated learning---and identify which regulatory framework
-        (HIPAA, GDPR, or Bangladesh PDPA) mandates each.
+        (HIPAA, GDPR, or CCPA) mandates each.
 \end{enumerate}
 \end{chapterlearning}
 
@@ -131,9 +131,8 @@ and primary analytical tasks for the three domains covered in this chapter.
 Social media platforms are among the largest-scale data systems humans
 have ever built. Twitter (now X) processes 500 million posts per day;
 Facebook logs 100 billion interactions; TikTok serves 1 billion video
-views. In Bangladesh, Facebook is the dominant social platform with
-50 million users---making it the primary channel for crisis communication,
-political discourse, and commercial marketing. The data they generate is
+views. In many markets, Facebook remains the primary channel for crisis
+communication, political discourse, and commercial marketing. The data they generate is
 graph-structured, temporally indexed, linguistically complex, and at a
 scale that requires the full Hadoop/Spark stack to process.
 
@@ -531,10 +530,10 @@ modelling:
         Non-stationarity is typically removed by \emph{differencing}:
         $\nabla y_t = y_t - y_{t-1}$.
   \item \textbf{Irregularity (Holiday Effects)}: one-off events
-        (Eid, national elections, product launches, natural disasters)
-        cause sharp deviations from the seasonal pattern. These cannot
-        be captured by a Fourier seasonality model and must be encoded
-        explicitly.
+        (public holidays, national elections, product launches, natural
+        disasters) cause sharp deviations from the seasonal pattern.
+        These cannot be captured by a Fourier seasonality model and must
+        be encoded explicitly.
 \end{enumerate}
 \end{defbox}
 
@@ -609,10 +608,10 @@ interpretable components:
         Multiple periods (annual \emph{and} weekly) are summed additively.
         The order $N$ controls smoothness.
   \item \textbf{Holiday effects} $h(t)$: a user-specified table of
-        one-off events (Eid, Puja, national elections, cricket World Cup
-        finals) is encoded as indicator variables that absorb the effect
-        of each event. Events with multi-day impact (the three days
-        around Eid) are represented with a window.
+        one-off events (Black Friday, national elections, sporting finals,
+        bank holidays) is encoded as indicator variables that absorb the
+        effect of each event. Events with multi-day impact (e.g., a
+        long weekend) are represented with a window.
   \item \textbf{Noise} $\varepsilon(t)$: assumed i.i.d.\ Gaussian;
         the residual not captured by the three structural components.
 \end{itemize}
@@ -622,7 +621,7 @@ fast enough to fit thousands of series in parallel.
 \end{defbox}
 
 \begin{lstlisting}[style=pyspark, caption={Prophet on one time series:
-  bKash daily transaction volume with Eid holiday effect}]
+  e-commerce daily sales volume with Black Friday holiday effect}]
 import pandas as pd
 import numpy as np
 from prophet import Prophet
@@ -632,7 +631,7 @@ import matplotlib.pyplot as plt
 
 rng = np.random.default_rng(2024)
 
-# Simulate 3 years of daily bKash transaction volume
+# Simulate 3 years of daily e-commerce sales volume
 dates = pd.date_range("2021-01-01", periods=3*365, freq="D")
 t     = np.arange(len(dates))
 
@@ -644,16 +643,16 @@ y          = trend + weekly_s + annual_s + noise
 
 df = pd.DataFrame({"ds": dates, "y": y})
 
-# Define Eid holidays (bKash volume spikes during Eid shopping)
+# Define shopping holidays (volume spikes during Black Friday / Cyber Monday)
 holidays = pd.DataFrame({
-    "holiday":      "Eid",
+    "holiday":      "BlackFriday",
     "ds":           pd.to_datetime([
-                        "2021-05-13", "2021-07-21",
-                        "2022-05-03", "2022-07-10",
-                        "2023-04-22", "2023-06-29",
+                        "2021-11-26", "2021-11-29",
+                        "2022-11-25", "2022-11-28",
+                        "2023-11-24", "2023-11-27",
                     ]),
-    "lower_window": -2,   # 2 days before Eid
-    "upper_window":  3,   # 3 days after Eid
+    "lower_window": -1,   # 1 day before
+    "upper_window":  2,   # 2 days after
 })
 
 m = Prophet(
@@ -671,12 +670,12 @@ future   = m.make_future_dataframe(periods=90)
 forecast = m.predict(future)
 
 fig1 = m.plot(forecast)
-fig1.axes[0].set_title("bKash Daily Transaction Volume  --  Prophet Forecast")
-fig1.savefig("bkash_forecast.png", dpi=150, bbox_inches="tight")
+fig1.axes[0].set_title("E-commerce Daily Sales Volume  --  Prophet Forecast")
+fig1.savefig("sales_forecast.png", dpi=150, bbox_inches="tight")
 
 fig2 = m.plot_components(forecast)
-fig2.savefig("bkash_components.png", dpi=150, bbox_inches="tight")
-print("Saved: bkash_forecast.png and bkash_components.png")
+fig2.savefig("sales_components.png", dpi=150, bbox_inches="tight")
+print("Saved: sales_forecast.png and sales_components.png")
 \end{lstlisting}
 
 %--------------------------------------------------------------------
@@ -726,8 +725,8 @@ import pandas as pd
 
 spark = SparkSession.builder.appName("AnomalyDetection").getOrCreate()
 
-# Example: bKash agent hourly transaction counts
-df = spark.read.parquet("hdfs:///data/bkash/agent_hourly_txn/")
+# Example: payment agent hourly transaction counts
+df = spark.read.parquet("hdfs:///data/payments/agent_hourly_txn/")
 
 # Feature engineering: add lag features
 w = Window.partitionBy("agent_id").orderBy("hour_ts")
@@ -891,9 +890,9 @@ data (ICD-10 diagnosis codes, medication orders, laboratory results,
 vital signs), semi-structured data (HL7 FHIR resources, as covered in
 Chapter~\ref{ch:integration}), and unstructured data (clinical notes
 written by physicians in natural language). A typical hospital generates
-2--5~GB of new EHR data per day. At the national level, Bangladesh's
-DGHS has 15+ years of digitised records across national hospitals,
-representing sufficient scale for population-level clinical analytics.
+2--5~GB of new EHR data per day. At the national level, large healthcare
+systems such as the NHS (UK) or Kaiser Permanente (US) hold 15+ years of
+digitised records, representing sufficient scale for population-level clinical analytics.
 
 \textbf{2. Genomics.} A single whole-genome sequence at 30$\times$ coverage
 produces $\sim$200~GB of raw sequencing reads (FASTQ format), which compress
@@ -993,13 +992,13 @@ population characteristics and fail to generalise to patients with
 comorbidities not well-represented in the training data. Reliable
 generalisation requires 100{,}000+ patient records for common diagnoses
 (heart failure, pneumonia, sepsis) and 1{,}000{,}000+ for rare conditions.
-Bangladesh's DGHS national hospital network has $\sim$2 million
-digitised inpatient encounters per year across tertiary hospitals---if
-integrated, sufficient for mortality and readmission modelling.
+Large national health systems (NHS England, Kaiser Permanente, VA Health
+System) record tens of millions of inpatient encounters per year---if
+integrated and de-identified, sufficient for mortality and readmission modelling.
 \end{keyinsight}
 
 %--------------------------------------------------------------------
-\subsection{Privacy: HIPAA, GDPR, and the Bangladesh PDPA}
+\subsection{Privacy: HIPAA, GDPR, and the CCPA}
 \label{subsec:health-privacy}
 %--------------------------------------------------------------------
 
@@ -1023,14 +1022,13 @@ by law. Three regulatory frameworks govern its handling.
         right to erasure (the ``right to be forgotten'') apply. GDPR's
         $\in$20 million or 4\% of global revenue fines have made it the
         effective global standard.
-  \item \textbf{Bangladesh PDPA} — Personal Data Protection Act (under
-        development as of 2025): based on GDPR principles. National
-        Identification (NID) card numbers are uniquely identifying across
-        the population; records linked to NID numbers require explicit
-        consent under the draft act. Health records submitted to national
-        health information systems (DGHS) are governed by the Health
-        Data Policy of 2021, which mandates encryption at rest and in
-        transit for all patient-identifiable data.
+  \item \textbf{CCPA (California)} — California Consumer Privacy Act
+        (2020): grants residents the right to know what personal data is
+        collected, to opt out of its sale, and to request deletion.
+        Health data collected outside HIPAA-covered entities (e.g., by
+        consumer wellness apps) falls under CCPA rather than HIPAA.
+        Many US states are enacting similar legislation, and CCPA
+        serves as a model for comprehensive state-level privacy law.
 \end{itemize}
 \end{defbox}
 
@@ -1420,7 +1418,7 @@ per series across thousands of series simultaneously in Spark. STL and
 Isolation Forest address the anomaly detection problem.
 
 Healthcare big data combines four data modalities (EHR/FHIR, genomics,
-wearables, DICOM imaging), three privacy frameworks (HIPAA, GDPR, PDPA),
+wearables, DICOM imaging), three privacy frameworks (HIPAA, GDPR, CCPA),
 and four privacy-engineering techniques (safe harbour, differential
 privacy, federated learning, synthetic data). Clinical prediction models
 at scale outperform physician heuristics for ICU mortality, readmission,
@@ -1463,7 +1461,7 @@ causes the difference:
 
 \sq What is autocorrelation in a time series, and why does it invalidate
 standard regression's standard errors? Give an example from a business
-time series (e.g., daily bKash transactions) where strong autocorrelation
+time series (e.g., daily e-commerce transactions) where strong autocorrelation
 would be expected.
 
 \sq Describe each component of Prophet's model
@@ -1499,7 +1497,7 @@ federated averaging algorithm?
 \exercisesection{Analytical Problems}
 
 \ap \textbf{Influence Maximisation Calculation.}
-A Facebook group for a DGHS dengue alert campaign has 1 million users.
+A Facebook group for a CDC dengue alert campaign has 1 million users.
 The following-graph has a power-law degree distribution with exponent
 $\alpha = 2.3$. The campaign budget allows seeding $k = 5$ initial posts.
 
@@ -1523,8 +1521,8 @@ $\alpha = 2.3$. The campaign budget allows seeding $k = 5$ initial posts.
 \end{enumerate}
 
 \ap \textbf{Prophet Model Diagnostics.}
-A Prophet model was fitted to 3 years of weekly DGHS dengue case data
-for Dhaka. The fitted components show:
+A Prophet model was fitted to 3 years of weekly dengue case data
+for a tropical metropolitan region. The fitted components show:
 \begin{itemize}
   \item Trend $g(t)$: an increasing linear trend with two changepoints:
         at week 52 (slope increase) and week 130 (slope decrease).
@@ -1542,41 +1540,40 @@ for Dhaka. The fitted components show:
         by the seasonal component. What type of event would cause a
         3-week anomaly in dengue cases, and how would you modify the
         Prophet model to capture it in future forecasts?
-  \item The DGHS director asks whether the model can predict a dengue
-        surge 8 weeks in advance. Describe the specific uncertainty that
+  \item The public health director asks whether the model can predict a
+        dengue surge 8 weeks in advance. Describe the specific uncertainty that
         makes 8-week forecasts unreliable in a dengue context (not a
         general statistical argument---specific to dengue epidemiology).
 \end{enumerate}
 
 \ap \textbf{Healthcare Privacy Analysis.}
-A DGHS researcher wants to analyse 5 years of inpatient records
-(500{,}000 patients) from 10 national hospitals to build a 30-day
-readmission prediction model. The data includes: patient name, NID
-number, date of birth, home district, ICD-10 diagnosis codes, procedure
-codes, admission date, length of stay, and discharge outcome.
+A health system researcher wants to analyse 5 years of inpatient records
+(500{,}000 patients) from 10 hospitals to build a 30-day readmission
+prediction model. The data includes: patient name, national ID number,
+date of birth, home region, ICD-10 diagnosis codes, procedure codes,
+admission date, length of stay, and discharge outcome.
 \begin{enumerate}[label=(\alph*)]
   \item List all fields that would be removed under HIPAA's safe harbour
-        method. Which field in the Bangladesh context is most uniquely
-        identifying and why?
+        method. Which field is most uniquely identifying and why?
   \item The researcher wants to release a public version of the dataset
         for academic use. Under GDPR's data minimisation principle, which
         fields should be retained and which should be removed or generalised?
         Justify each decision.
-  \item A second researcher at BUET wants to train on their own 50{,}000-patient
-        dataset and combine insights with the DGHS model. Why would
-        federated learning be preferable to data centralisation in this
-        scenario? Describe the federated averaging protocol and identify
-        one risk.
-  \item The final deployed model has AUROC 0.82. The DGHS Chief Data
-        Officer asks: ``Is the model equally accurate for patients from
-        rural districts as for patients from Dhaka?'' Describe the
+  \item A second research team at a partner university wants to train on
+        their own 50{,}000-patient dataset and combine insights via
+        federation. Why would federated learning be preferable to data
+        centralisation? Describe the federated averaging protocol and
+        identify one risk.
+  \item The final deployed model has AUROC 0.82. The Chief Data Officer
+        asks: ``Is the model equally accurate for patients from rural
+        regions as for patients from urban centres?'' Describe the
         analysis you would run to answer this question and the corrective
         action if the answer is no.
 \end{enumerate}
 
 \ap \textbf{Vectorised Forecasting Performance Analysis.}
-A Bangladeshi telecom company needs to forecast daily call-drop rates
-for 6{,}000 cell towers, each with 2 years of daily measurements.
+A telecom company needs to forecast daily call-drop rates for 6{,}000
+cell towers, each with 2 years of daily measurements.
 \begin{enumerate}[label=(\alph*)]
   \item Design the Spark job using \code{applyInPandas}. Specify:
         the DataFrame schema, the partition key, the Pandas UDF signature,
@@ -1594,17 +1591,17 @@ for 6{,}000 cell towers, each with 2 years of daily measurements.
 
 \exercisesection{Design Problems}
 
-\dpr \textbf{Bangladesh Disease Surveillance System.}
-Design a big data disease surveillance system for Bangladesh analogous
-to the CDC BioSense platform. The system should detect outbreaks of
-dengue fever, influenza, cholera, and COVID-19 up to 7 days before
-the DGHS receives clinical confirmation.
+\dpr \textbf{National Disease Surveillance System.}
+Design a big data disease surveillance system analogous to the CDC
+BioSense platform. The system should detect outbreaks of dengue fever,
+influenza, and COVID-19 up to 7 days before the health authority
+receives clinical confirmation.
 
 \begin{enumerate}[label=(\alph*)]
   \item \textbf{Data sources}: identify four non-traditional data sources
-        analogous to the CDC's syndromic surveillance inputs (social media,
-        pharmacy, ER, search), specific to Bangladesh. For each, identify
-        the entity that controls the data and the access mechanism.
+        analogous to the CDC's syndromic surveillance inputs (social
+        media, pharmacy, ER, search). For each, identify the entity that
+        controls the data and the access mechanism.
   \item \textbf{Ingestion pipeline}: specify the Kafka topic structure
         (topic name, partition count, key, value format) for each source.
         Explain why Kafka is preferable to a direct database write for
@@ -1612,22 +1609,21 @@ the DGHS receives clinical confirmation.
   \item \textbf{Signal processing}: describe the Spark Structured Streaming
         window aggregation for the social media signal (window size, slide,
         output metric). Describe the Prophet model configuration for the
-        weekly DGHS hospitalization series.
+        weekly hospitalization series.
   \item \textbf{Alert logic}: specify the threshold that triggers an
         outbreak alert. Should the threshold be a fixed case count, a
         percentage above the Prophet forecast, or a combination? Justify.
   \item \textbf{Privacy safeguards}: the social media signal includes
         geotagged posts and the pharmacy signal includes named individuals'
         medication purchases. Specify the de-identification steps before
-        these signals enter the pipeline.
+        these signals enter the pipeline, citing GDPR Article~9 and
+        HIPAA Safe Harbour requirements.
 \end{enumerate}
 
 \dpr \textbf{Multi-Hospital Clinical ML Pipeline.}
-Chittagong Medical College Hospital (CMCH) wants to deploy a
-30-day readmission prediction model trained on data from five hospitals
-in the Chittagong division (CMCH, general hospitals in Cox's Bazar,
-Comilla, Noakhali, and Feni). Data sharing between hospitals is
-restricted by Bangladesh PDPA.
+A regional health authority wants to deploy a 30-day readmission
+prediction model trained on data from five hospitals in a metropolitan
+region. Data sharing between hospitals is restricted by HIPAA / GDPR.
 
 \begin{enumerate}[label=(\alph*)]
   \item Design a federated learning architecture: specify which component
@@ -1638,10 +1634,9 @@ restricted by Bangladesh PDPA.
         any PHI identifiers. Explain the trade-off between feature richness
         and privacy risk.
   \item The central model achieves AUROC 0.79 after 10 federated rounds.
-        Hospital A's local model (CMCH, 50{,}000 patients) achieves AUROC
-        0.84. The hospital director asks whether to use the global model
-        or the local model. Analyse the trade-offs and provide a
-        recommendation.
+        Hospital A's local model (50{,}000 patients) achieves AUROC 0.84.
+        The hospital director asks whether to use the global model or the
+        local model. Analyse the trade-offs and provide a recommendation.
   \item Describe two bias risks in the federated model arising from
         the dataset heterogeneity across five hospitals (e.g., different
         patient populations, different documentation practices) and
@@ -1672,20 +1667,21 @@ users and 15{,}000 directed following edges, then analyse its structure.
         as dashed grey lines.
 \end{enumerate}
 
-\pe \textbf{Prophet Forecasting with Eid Holiday Effects.}
-Using the Prophet library, build a demand forecasting model for a
-Bangladeshi retailer with strong Eid seasonality.
+\pe \textbf{Prophet Forecasting with Holiday Effects.}
+Using the Prophet library, build a demand forecasting model for an
+international retailer with strong year-end seasonal spikes.
 \begin{enumerate}[label=(\alph*)]
   \item Generate 3 years of synthetic weekly sales data with: an upward
-        linear trend, strong annual seasonality (peak at Eid-ul-Fitr in
-        May, secondary peak at Eid-ul-Adha in July), moderate weekly
-        seasonality (peak on Friday), and random Gaussian noise.
-  \item Fit two Prophet models: one without holidays and one with the
-        Eid dates for the 3 years explicitly encoded with a window of
-        $[-3, +3]$ days. Compare the MAPE on a 12-week holdout set.
+        linear trend, strong annual seasonality (peak in late November /
+        December holiday season), moderate weekly seasonality (peak on
+        Saturday), and random Gaussian noise.
+  \item Fit two Prophet models: one without holidays and one with
+        Black Friday, Cyber Monday, and Christmas dates explicitly encoded
+        with a window of $[-3, +3]$ days. Compare the MAPE on a 12-week
+        holdout set.
   \item Plot the component decomposition for the model with holidays.
         Identify the estimated holiday effect size (in sales units) for
-        Eid-ul-Fitr.
+        Black Friday.
   \item Change \texttt{changepoint\_prior\_scale} from 0.01 to 0.5 in
         steps. Plot how the fitted trend changes. At what value does the
         model begin to overfit to noise in the training data?
@@ -1697,19 +1693,19 @@ hospitals for a 30-day readmission prediction task.
 \begin{enumerate}[label=(\alph*)]
   \item Generate 100{,}000 synthetic patient records with fields:
         \texttt{patient\_id} (UUID), \texttt{admission\_date},
-        \texttt{district} (64 values), \texttt{primary\_icd10} (50 codes),
+        \texttt{region} (50 values), \texttt{primary\_icd10} (50 codes),
         \texttt{los\_days}, \texttt{readmitted\_30d} (binary label,
         15\% positive rate).
   \item Apply safe harbour de-identification: generate a surrogate
         \texttt{anon\_id} (SHA-256 hash of patient UUID), generalise
         \texttt{admission\_date} to \texttt{admission\_year\_month},
-        and group \texttt{district} into 8 divisions.
+        and group \texttt{region} into 10 macro-regions.
   \item Using Spark MLlib, train a Gradient Boosted Tree classifier
         on the de-identified features. Report AUROC, precision, recall,
         and F1 on a 20\% holdout set.
-  \item Stratify the AUROC by district. Identify the three districts
-        with the lowest AUROC and hypothesise (in 2--3 sentences)
-        why the model performs worse in those districts.
+  \item Stratify the AUROC by region. Identify the three regions with
+        the lowest AUROC and hypothesise (in 2--3 sentences) why the
+        model performs worse in those regions.
 \end{enumerate}
 
 %%====================================================================

@@ -450,9 +450,9 @@ import matplotlib.pyplot as plt
 
 rng = np.random.default_rng(42)
 
-# Simulate 5 million GPS coordinates around Dhaka
-x = rng.normal(90.41, 0.15, 5_000_000)   # longitude
-y = rng.normal(23.81, 0.10, 5_000_000)   # latitude
+# Simulate 5 million GPS coordinates around New York City
+x = rng.normal(-73.95, 0.15, 5_000_000)   # longitude
+y = rng.normal(40.75,  0.10, 5_000_000)   # latitude
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -470,8 +470,8 @@ axes[1].set_xlabel("Longitude")
 axes[1].set_ylabel("Latitude")
 
 plt.tight_layout()
-plt.savefig("dhaka_gps_hexbin.png", dpi=150, bbox_inches="tight")
-print("Saved dhaka_gps_hexbin.png")
+plt.savefig("nyc_gps_hexbin.png", dpi=150, bbox_inches="tight")
+print("Saved nyc_gps_hexbin.png")
 \end{lstlisting}
 
 \textbf{3. Kernel Density Estimation (KDE).} A \term{kernel density
@@ -492,8 +492,8 @@ import matplotlib
 matplotlib.use("Agg")
 
 rng = np.random.default_rng(0)
-x = rng.normal(90.41, 0.12, 200_000)
-y = rng.normal(23.81, 0.08, 200_000)
+x = rng.normal(-73.95, 0.12, 200_000)
+y = rng.normal(40.75,  0.08, 200_000)
 
 # KDE on a random subsample (full dataset is too large for naive KDE)
 idx    = rng.choice(len(x), size=50_000, replace=False)
@@ -508,11 +508,11 @@ zi     = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
 fig, ax = plt.subplots(figsize=(8, 6))
 cf = ax.contourf(xi, yi, zi, levels=15, cmap="Blues")
 fig.colorbar(cf, ax=ax, label="Density")
-ax.set_title("KDE Density Contour  --  Dhaka GPS Pings")
+ax.set_title("KDE Density Contour  --  NYC GPS Pings")
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 plt.tight_layout()
-plt.savefig("dhaka_kde.png", dpi=150)
+plt.savefig("nyc_kde.png", dpi=150)
 \end{lstlisting}
 
 %--------------------------------------------------------------------
@@ -521,7 +521,7 @@ plt.savefig("dhaka_kde.png", dpi=150)
 %--------------------------------------------------------------------
 
 A business analyst using Tableau expects a dashboard filter
-(``show Q1 2024, Dhaka region only'') to respond in under one second.
+(``show Q1 2024, North-East region only'') to respond in under one second.
 But the underlying fact table may contain 100 billion rows in Hive on HDFS.
 A Hive query over the full fact table takes minutes to complete, making
 interactive filtering impossible.
@@ -532,7 +532,7 @@ Two engineering solutions exist.
 an \emph{OLAP cube} or \emph{aggregate table}) materialises the results
 of all combinations of GROUP BY queries over a set of dimensions at
 ingest time. If the fact table has three dimensions---date,
-district, and product category---the data cube pre-computes eight
+region, and product category---the data cube pre-computes eight
 subtotals: one for each subset of the three dimensions (the
 \emph{power set} of dimensions, sometimes called the \emph{cuboid}).
 
@@ -564,11 +564,11 @@ fact = spark.read.parquet("hdfs:///data/curated/transactions/")
 # --- Materialise a data cube with GROUPING SETS ---
 # This one Spark job produces all 8 cuboids for 3 dimensions
 cube_df = (fact
-    .cube("txn_date", "district", "product_category")
+    .cube("txn_date", "region", "product_category")
     .agg(
-        _sum("amount_bdt").alias("total_bdt"),
+        _sum("amount_usd").alias("total_usd"),
         count("*").alias("txn_count"),
-        avg("amount_bdt").alias("avg_bdt"),
+        avg("amount_usd").alias("avg_usd"),
     ))
 
 # Write the cube as Parquet  --  millions of rows, not billions
@@ -578,15 +578,15 @@ cube_df = (fact
         .parquet("hdfs:///data/curated/txn_cube/"))
 
 # Tableau / Superset query: reads from cube (ms), not fact table (min)
-district_q1 = spark.read.parquet("hdfs:///data/curated/txn_cube/") \
+region_q1 = spark.read.parquet("hdfs:///data/curated/txn_cube/") \
     .filter(
         (col("txn_date").between("2024-01-01", "2024-03-31")) &
-        col("district").isNotNull() &
+        col("region").isNotNull() &
         col("product_category").isNull()
     ) \
-    .orderBy("total_bdt", ascending=False)
+    .orderBy("total_usd", ascending=False)
 
-district_q1.show(10)
+region_q1.show(10)
 \end{lstlisting}
 
 \textbf{2. Approximate query processing (AQP).} Rather than pre-computing
@@ -608,12 +608,12 @@ mandatory.
 Many big data applications require visualisations that update
 continuously as new events arrive:
 \begin{itemize}
-  \item An operations dashboard showing the number of active Pathao
-        drivers by district, updated every 5 seconds.
-  \item A bKash fraud operations centre showing transaction volume
+  \item An operations dashboard showing the number of active Uber
+        drivers by city zone, updated every 5 seconds.
+  \item A payment fraud operations centre showing transaction volume
         per minute and active alert count.
-  \item A DGHS disease surveillance dashboard showing new case reports
-        as hospitals submit their hourly returns.
+  \item A CDC / NHS disease surveillance dashboard showing new case
+        reports as hospitals submit their hourly returns.
 \end{itemize}
 
 Two delivery mechanisms exist for updating a browser chart with new data.
@@ -638,7 +638,7 @@ The standard streaming visualization architecture is:
   \item \textbf{Kafka}: receives events from producers in real time.
   \item \textbf{Spark Structured Streaming or Flink}: subscribes to
         Kafka topic; applies a tumbling or sliding window aggregation
-        (e.g., count of transactions per minute per district).
+        (e.g., count of transactions per minute per region).
   \item \textbf{Time-series database} (InfluxDB, Prometheus, TimescaleDB):
         stores the window aggregates; indexed by timestamp.
   \item \textbf{Grafana or Kibana}: polls the TSDB on a configured
@@ -655,7 +655,7 @@ The standard streaming visualization architecture is:
     arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
   ]
   \node[box, fill=DEGray!20] (prod) at (0, 6.2)
-        {Event Producers\\{\small bKash · Pathao · IoT}};
+        {Event Producers\\{\small PayPal · Uber · IoT}};
   \node[box, fill=DEBlue!75, text=white] (kaf) at (0, 5.0)
         {Apache Kafka\\{\small durable event log}};
   \node[box, fill=DEGreen!22] (sp)  at (0, 3.8)
@@ -793,11 +793,11 @@ SVG elements:
    No gridlines, no background, direct data labels, 0-based y-axis */
 
 const data = [
-  { district: "Dhaka",       cases: 4217 },
-  { district: "Chittagong",  cases: 1803 },
-  { district: "Khulna",      cases:  892 },
-  { district: "Sylhet",      cases:  671 },
-  { district: "Rajshahi",    cases:  544 },
+  { region: "New York",   cases: 4217 },
+  { region: "London",     cases: 1803 },
+  { region: "Berlin",     cases:  892 },
+  { region: "Sydney",     cases:  671 },
+  { region: "Toronto",    cases:  544 },
 ];
 
 const margin = { top: 20, right: 60, bottom: 40, left: 90 };
@@ -817,7 +817,7 @@ const x = d3.scaleLinear()
   .range([0, W]);
 
 const y = d3.scaleBand()
-  .domain(data.map(d => d.district))
+  .domain(data.map(d => d.region))
   .range([0, H])
   .padding(0.35);
 
@@ -827,7 +827,7 @@ svg.selectAll(".bar")
    .join("rect")
      .attr("class", "bar")
      .attr("x",       0)
-     .attr("y",       d => y(d.district))
+     .attr("y",       d => y(d.region))
      .attr("width",   d => x(d.cases))
      .attr("height",  y.bandwidth())
      .attr("fill",    "#003c78");   // DEBlue
@@ -837,12 +837,12 @@ svg.selectAll(".label")
    .data(data)
    .join("text")
      .attr("x",           d => x(d.cases) + 4)
-     .attr("y",           d => y(d.district) + y.bandwidth() / 2 + 4)
+     .attr("y",           d => y(d.region) + y.bandwidth() / 2 + 4)
      .text(d => d.cases.toLocaleString())
      .attr("font-size",   11)
      .attr("fill",        "#505050");
 
-// Minimal y-axis: district names only
+// Minimal y-axis: region names only
 svg.append("g").call(d3.axisLeft(y).tickSize(0));
 
 // Minimal x-axis: no domain line, light ticks only
@@ -863,7 +863,7 @@ const tooltip = d3.select("body").append("div")
 svg.selectAll(".bar")
    .on("mouseover", (event, d) => {
      tooltip.style("opacity", 1)
-            .html(`<b>${d.district}</b><br>Cases: ${d.cases.toLocaleString()}`);
+            .html(`<b>${d.region}</b><br>Cases: ${d.cases.toLocaleString()}`);
    })
    .on("mousemove", event => {
      tooltip.style("left",  (event.pageX + 10) + "px")
@@ -1161,7 +1161,7 @@ it typically become a problem in a standard scatterplot?
 it show that alpha transparency cannot?
 
 \sq What is a data cube? If a fact table has four dimensions---date,
-district, category, and channel---how many cuboids does the full data
+region, category, and channel---how many cuboids does the full data
 cube contain?
 
 \sq Explain the difference between a \emph{periodic poll} and a
@@ -1203,10 +1203,10 @@ heavy horizontal gridlines every 10{,}000 messages.
 \end{enumerate}
 
 \ap \textbf{Shneiderman Dashboard Design.}
-A Pathao data scientist needs to build an operations dashboard for the
-Dhaka fleet management team showing:
+A ride-sharing company data scientist needs to build an operations dashboard
+for the city fleet management team showing:
 \begin{itemize}
-  \item City-wide active driver count by district (64 districts)
+  \item City-wide active driver count by zone (20 city zones)
   \item Trip completion rate per hour over the past 7 days
   \item Distribution of trip duration (in minutes) for completed trips
   \item Geographic density of trip pickups (GPS coordinates)
@@ -1219,8 +1219,8 @@ For each requirement:
 applies and how to address it.
 
 \ap \textbf{Streaming Visualization Latency Budget.}
-A bKash fraud operations dashboard must update its fraud alert rate
-chart within 10 seconds of an event arriving at the source system.
+A mobile payment fraud operations dashboard must update its fraud alert
+rate chart within 10 seconds of an event arriving at the source system.
 The pipeline is: Mobile app $\to$ Kafka (1 partition, 50~MB/s)
 $\to$ Spark Structured Streaming (1-minute tumbling window)
 $\to$ InfluxDB $\to$ Grafana (WebSocket push).
@@ -1233,34 +1233,34 @@ of reducing it.
 \ap \textbf{Data Cube Design.}
 A national electricity utility has a 5-year fact table with 120 billion
 rows and four dimensions: \texttt{meter\_id} (10 million distinct values),
-\texttt{hour\_ts} (43{,}800 hours over 5 years), \texttt{district}
-(64 districts), and \texttt{tariff\_band} (5 bands).
+\texttt{hour\_ts} (43{,}800 hours over 5 years), \texttt{region}
+(50 regions), and \texttt{tariff\_band} (5 bands).
 \begin{enumerate}[label=(\alph*)]
   \item How many cuboids are in the full data cube? How many are practically
         useful for a dashboard (explain which dimensions are too high
         cardinality to materialise)?
   \item Design the materialised cuboids for a dashboard that must serve:
-        (i) hourly consumption per district for any 30-day window;
+        (i) hourly consumption per region for any 30-day window;
         (ii) monthly total consumption per tariff band; (iii) peak-hour
-        demand by district.
-  \item Estimate the storage size (in GB) of the hourly-by-district
+        demand by region.
+  \item Estimate the storage size (in GB) of the hourly-by-region
         cuboid assuming 30 bytes per row.
 \end{enumerate}
 
 \exercisesection{Design Problems}
 
-\dpr \textbf{DGHS Disease Surveillance Dashboard.}
-The Directorate General of Health Services (DGHS), Bangladesh, needs a
-public health dashboard communicating:
+\dpr \textbf{Public Health Surveillance Dashboard.}
+A national public health agency (e.g., CDC or NHS) needs a disease
+surveillance dashboard communicating:
 \begin{enumerate}[label=(\alph*)]
-  \item National COVID-19 confirmed case counts by district over 24 months,
+  \item National COVID-19 confirmed case counts by region over 24 months,
         using a 7-day rolling average.
   \item Real-time hospitalisation rate updated every 5 minutes from hospital
         daily reporting forms submitted via a REST API.
   \item Demographic breakdown (age group $\times$ gender) of confirmed cases
         as a proportion of population.
   \item A ``situation map'' showing the 7-day incidence rate per 100{,}000
-        population for all 64 districts.
+        population for all regions.
 \end{enumerate}
 Design the complete dashboard: specify the chart type and justification
 for each panel; describe how Shneiderman's mantra is implemented for each
@@ -1268,15 +1268,15 @@ panel; describe the data pipeline (ingestion, aggregation, storage, and
 rendering tools); identify and address the big data visualization challenge
 for each panel; and describe two accessibility requirements.
 
-\dpr \textbf{Streaming bKash Operations Dashboard.}
-Design a real-time operations dashboard for bKash (10 million transactions/day,
-peak 500 transactions/second) that shows:
+\dpr \textbf{Streaming Payment Operations Dashboard.}
+Design a real-time operations dashboard for a mobile payment platform
+(10 million transactions/day, peak 500 transactions/second) that shows:
 \begin{enumerate}[label=(\alph*)]
-  \item Total transaction volume (BDT) per minute, last 60 minutes,
+  \item Total transaction volume (USD) per minute, last 60 minutes,
         updated every 5 seconds.
   \item Number of active fraud alerts, updated every 30 seconds.
-  \item Geographic heatmap of transaction density across Dhaka (GPS
-        coordinates from merchant terminal locations).
+  \item Geographic heatmap of transaction density across a metro area
+        (GPS coordinates from merchant terminal locations).
   \item Top-5 error codes by frequency in the past 15 minutes.
 \end{enumerate}
 Specify: the Kafka topic structure and partition count for each stream;
@@ -1287,8 +1287,8 @@ and any pre-aggregation required to achieve the specified latency.
 \exercisesection{Programming Exercises}
 
 \pe \textbf{Overplotting Solutions in Python.}
-Given a simulated dataset of 2 million Pathao GPS trip origin points
-(longitude, latitude) distributed across five Dhaka zones:
+Given a simulated dataset of 2 million ride-sharing GPS trip origin points
+(longitude, latitude) distributed across five city zones:
 \begin{enumerate}[label=(\alph*)]
   \item Plot the raw scatterplot with $\alpha = 0.005$. Describe the
         overplotting effect observed.
@@ -1297,7 +1297,7 @@ Given a simulated dataset of 2 million Pathao GPS trip origin points
   \item Compute and plot a 2-D KDE contour using \texttt{scipy.stats.gaussian\_kde}
         on a 10{,}000-point random subsample. Identify the location of the
         three highest-density zones.
-  \item Create a 2$\times$2 panel figure (overview in panel 1; one Dhaka zone
+  \item Create a 2$\times$2 panel figure (overview in panel 1; one city zone
         zoomed in panels 2--4 with hexbin). Label each panel with its
         Shneiderman interaction level (overview, zoom, detail).
 \end{enumerate}
@@ -1311,13 +1311,13 @@ from scipy.stats import gaussian_kde
 
 rng = np.random.default_rng(2024)
 
-# Five Dhaka zones: (lon_center, lat_center, sigma, n_points)
+# Five NYC zones: (lon_center, lat_center, sigma, n_points)
 zones = [
-    (90.400, 23.810, 0.020, 600_000),  # Gulshan / Banani
-    (90.380, 23.740, 0.015, 500_000),  # Dhanmondi
-    (90.350, 23.790, 0.018, 400_000),  # Mirpur
-    (90.420, 23.870, 0.012, 300_000),  # Uttara
-    (90.410, 23.720, 0.010, 200_000),  # Motijheel
+    (-73.970, 40.785, 0.020, 600_000),  # Upper West Side
+    (-73.990, 40.730, 0.015, 500_000),  # Greenwich Village
+    (-73.940, 40.760, 0.018, 400_000),  # Midtown East
+    (-73.950, 40.820, 0.012, 300_000),  # Harlem
+    (-74.010, 40.710, 0.010, 200_000),  # Lower Manhattan
 ]
 
 lons, lats = [], []
@@ -1348,32 +1348,32 @@ cf = axes[1,0].contourf(xi, yi, zi, levels=12, cmap="Blues")
 fig.colorbar(cf, ax=axes[1,0], label="Density")
 axes[1,0].set_title("(c) KDE contour  --  shape revealed (Shneiderman: zoom)")
 
-# Panel 4  --  Detail: Gulshan zone only
-mask = (lons > 90.36) & (lons < 90.44) & (lats > 23.79) & (lats < 23.83)
+# Panel 4  --  Detail: Upper West Side zone only
+mask = (lons > -73.99) & (lons < -73.95) & (lats > 40.77) & (lats < 40.80)
 axes[1,1].hexbin(lons[mask], lats[mask], gridsize=60, cmap="Reds", mincnt=1)
-axes[1,1].set_title("(d) Gulshan zone detail (Shneiderman: detail)")
+axes[1,1].set_title("(d) Upper West Side detail (Shneiderman: detail)")
 
 for ax in axes.ravel():
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
 
 plt.tight_layout()
-plt.savefig("dhaka_overplotting.png", dpi=150, bbox_inches="tight")
-print("Saved: dhaka_overplotting.png")
+plt.savefig("nyc_overplotting.png", dpi=150, bbox_inches="tight")
+print("Saved: nyc_overplotting.png")
 \end{lstlisting}
 
 \pe \textbf{Pre-Aggregated Data Cube (PySpark).}
 Using PySpark, build a pre-aggregated data cube for a simulated 100
 million-row e-commerce fact table with columns: \texttt{order\_date},
-\texttt{district}, \texttt{category}, and \texttt{revenue\_bdt}.
+\texttt{region}, \texttt{category}, and \texttt{revenue\_usd}.
 \begin{enumerate}[label=(\alph*)]
   \item Generate 100 million synthetic rows using Spark's built-in
         random functions.
   \item Use \texttt{DataFrame.cube()} to materialise all cuboids for the
-        three dimensions \texttt{(order\_date, district, category)}.
+        three dimensions \texttt{(order\_date, region, category)}.
   \item Write the cube as Parquet, partitioned by \texttt{order\_date}.
   \item Simulate three Tableau/Superset queries (filter by date range,
-        filter by district, group by category) against the cube and
+        filter by region, group by category) against the cube and
         measure their execution time using \texttt{time.perf\_counter()}.
         Compare to the same queries against the raw fact table.
   \item Report the size of the materialised cube in MB and the speedup
@@ -1383,15 +1383,15 @@ million-row e-commerce fact table with columns: \texttt{order\_date},
 \pe \textbf{Streaming Dashboard Simulation (Python + InfluxDB).}
 Build a simulated streaming pipeline using Python threads:
 \begin{enumerate}[label=(\alph*)]
-  \item Thread 1 (``producer''): generates 100 synthetic bKash
+  \item Thread 1 (``producer''): generates 100 synthetic payment
         transaction events per second, writing them to a Python queue.
   \item Thread 2 (``stream processor''): reads from the queue; aggregates
-        over a 10-second tumbling window; computes total BDT, transaction
+        over a 10-second tumbling window; computes total USD, transaction
         count, and fraud flag count per window.
   \item Thread 3 (``TSDB writer''): writes each window's aggregates
         to an InfluxDB local instance (using the \texttt{influxdb-client}
-        Python library) with a \texttt{bkash\_metrics} measurement and
-        fields \texttt{total\_bdt}, \texttt{txn\_count},
+        Python library) with a \texttt{payment\_metrics} measurement and
+        fields \texttt{total\_usd}, \texttt{txn\_count},
         \texttt{fraud\_count}.
   \item Configure a local Grafana instance to display the three metrics
         as a time-series chart with a 10-second auto-refresh interval.
@@ -1408,7 +1408,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 INFLUX_URL    = "http://localhost:8086"
 INFLUX_TOKEN  = "mytoken"
 INFLUX_ORG    = "cse4345"
-INFLUX_BUCKET = "bkash_metrics"
+INFLUX_BUCKET = "payment_metrics"
 WINDOW_SEC    = 10
 
 event_queue: queue.Queue = queue.Queue(maxsize=5000)
@@ -1427,12 +1427,12 @@ def producer():
 def stream_processor(write_api):
     """Aggregates events in 10-second tumbling windows."""
     window_start = time.time()
-    total_bdt, txn_count, fraud_count = 0.0, 0, 0
+    total_usd, txn_count, fraud_count = 0.0, 0, 0
 
     while True:
         try:
             event = event_queue.get(timeout=0.05)
-            total_bdt   += event["amount"]
+            total_usd   += event["amount"]
             txn_count   += 1
             fraud_count += int(event["is_fraud"])
         except queue.Empty:
@@ -1441,16 +1441,16 @@ def stream_processor(write_api):
         now = time.time()
         if now - window_start >= WINDOW_SEC:
             # Write window aggregate to InfluxDB
-            point = (Point("bkash_metrics")
-                     .field("total_bdt",   total_bdt)
+            point = (Point("payment_metrics")
+                     .field("total_usd",   total_usd)
                      .field("txn_count",   txn_count)
                      .field("fraud_count", fraud_count)
                      .time(datetime.now(timezone.utc)))
             write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
             print(f"Window: {txn_count} txns | "
-                  f"BDT {total_bdt:,.0f} | "
+                  f"USD {total_usd:,.0f} | "
                   f"Fraud {fraud_count}")
-            total_bdt, txn_count, fraud_count = 0.0, 0, 0
+            total_usd, txn_count, fraud_count = 0.0, 0, 0
             window_start = now
 
 if __name__ == "__main__":

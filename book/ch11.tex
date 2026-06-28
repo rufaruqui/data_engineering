@@ -278,7 +278,7 @@ builder = (SparkSession.builder
 
 spark = configure_spark_with_delta_pip(builder).getOrCreate()
 
-TABLE_PATH = "hdfs:///lakehouse/bkash/transactions"
+TABLE_PATH = "hdfs:///lakehouse/payments/transactions"
 
 # --- 1. Create initial Delta table ---
 from pyspark.sql.types import StructType, StructField, \
@@ -288,26 +288,26 @@ schema = StructType([
     StructField("txn_id",     StringType(),    False),
     StructField("sender",     StringType(),    True),
     StructField("receiver",   StringType(),    True),
-    StructField("amount_bdt", DoubleType(),    True),
+    StructField("amount_usd", DoubleType(),    True),
     StructField("ts",         TimestampType(), True),
-    StructField("district",   StringType(),    True),
+    StructField("region",     StringType(),    True),
 ])
 
 df_initial = spark.createDataFrame([
-    ("T001", "01711000001", "01711000002", 500.0,  None, "Dhaka"),
-    ("T002", "01711000003", "01711000004", 1200.0, None, "Chittagong"),
+    ("T001", "user_a1b2c3", "user_d4e5f6", 500.0,  None, "Northeast"),
+    ("T002", "user_g7h8i9", "user_j0k1l2", 1200.0, None, "West"),
 ], schema=schema)
 
 (df_initial.write
     .format("delta")
     .mode("overwrite")
-    .partitionBy("district")
+    .partitionBy("region")
     .save(TABLE_PATH))
 
 # --- 2. Append new batch (transaction 2  --  a new commit) ---
 df_new = spark.createDataFrame([
-    ("T003", "01711000005", "01711000001", 250.0, None, "Dhaka"),
-    ("T004", "01711000006", "01711000007", 750.0, None, "Sylhet"),
+    ("T003", "user_m3n4o5", "user_a1b2c3", 250.0, None, "Northeast"),
+    ("T004", "user_p6q7r8", "user_s9t0u1", 750.0, None, "South"),
 ], schema=schema)
 
 (df_new.write
@@ -318,14 +318,14 @@ df_new = spark.createDataFrame([
 # --- 3. UPDATE  --  raise a specific amount ---
 spark.sql(f"""
     UPDATE delta.`{TABLE_PATH}`
-    SET    amount_bdt = amount_bdt * 1.10
+    SET    amount_usd = amount_usd * 1.10
     WHERE  txn_id = 'T001'
 """)
 
 # --- 4. DELETE  --  GDPR right to erasure ---
 spark.sql(f"""
     DELETE FROM delta.`{TABLE_PATH}`
-    WHERE  sender = '01711000003'
+    WHERE  sender = 'user_g7h8i9'
 """)
 
 # --- 5. Time travel: read state before DELETE ---
@@ -342,7 +342,7 @@ spark.sql(f"DESCRIBE HISTORY delta.`{TABLE_PATH}`").show(truncate=False)
 # --- 7. Z-ordering for faster multi-column queries ---
 spark.sql(f"""
     OPTIMIZE delta.`{TABLE_PATH}`
-    ZORDER BY (sender, district)
+    ZORDER BY (sender, region)
 """)
 
 # --- 8. Schema enforcement: this will FAIL with AnalysisException
@@ -506,7 +506,7 @@ simultaneously. It has four principles.
         Spark or Kafka expertise. The Lakehouse is the natural storage
         substrate for a self-serve data mesh.
   \item \textbf{Federated computational governance}: global policies
-        (GDPR compliance, PDPA data localisation, HIPAA de-identification,
+        (GDPR compliance, CCPA data minimisation, HIPAA de-identification,
         data retention limits) are enforced \emph{automatically} at the
         platform level for all data products. Domain teams cannot opt out
         of global policies, but retain local flexibility in how they
@@ -649,14 +649,14 @@ from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
 spark = SparkSession.builder.appName("MLflowDemo").getOrCreate()
 mlflow.set_tracking_uri("http://mlflow-server:5000")
-mlflow.set_experiment("bkash-fraud-detection-v2")
+mlflow.set_experiment("payment-fraud-detection-v2")
 
 # Load feature-engineered training data from Delta Lake
 train = spark.read.format("delta") \
              .load("hdfs:///lakehouse/features/fraud_train/") \
              .na.drop()
 
-feature_cols = ["amount_bdt", "txn_per_hour",
+feature_cols = ["amount_usd", "txn_per_hour",
                 "avg_txn_30d", "is_new_receiver",
                 "hour_of_day", "day_of_week"]
 assembler = VectorAssembler(inputCols=feature_cols,
@@ -697,14 +697,14 @@ with mlflow.start_run(run_name="gbt_maxDepth5_lr01"):
 
     # --- Log model artefact ---
     mlflow.spark.log_model(model, "gbt_fraud_model",
-                           registered_model_name="bkash-fraud-gbt")
+                           registered_model_name="payment-fraud-gbt")
 
 # --- Transition to Staging via Model Registry API ---
 client = mlflow.MlflowClient()
-latest = client.get_latest_versions("bkash-fraud-gbt",
+latest = client.get_latest_versions("payment-fraud-gbt",
                                      stages=["None"])[0]
 client.transition_model_version_stage(
-    name    = "bkash-fraud-gbt",
+    name    = "payment-fraud-gbt",
     version = latest.version,
     stage   = "Staging",
 )
@@ -878,28 +878,28 @@ rng     = np.random.default_rng(2024)
 epsilon = 1.0      # privacy budget
 sens    = 1.0      # sensitivity of a COUNT query
 
-# True dengue case counts by district (confidential)
+# True dengue case counts by region (confidential)
 true_counts = {
-    "Dhaka":       1_402,
-    "Chittagong":  387,
-    "Rajshahi":    201,
-    "Sylhet":      94,
-    "Barisal":     47,
+    "New York":    1_402,
+    "London":      387,
+    "Berlin":      201,
+    "Sydney":      94,
+    "Toronto":     47,
 }
 
 print(f"epsilon = {epsilon} (stronger privacy -> larger noise)")
-print(f"{'District':<14} {'True':>8} {'Published':>12} {'Error':>8}")
+print(f"{'Region':<14} {'True':>8} {'Published':>12} {'Error':>8}")
 print("-" * 46)
 
-for district, count in true_counts.items():
+for region, count in true_counts.items():
     published = laplace_mechanism(count, sens, epsilon, rng)
     error     = abs(published - count)
-    print(f"{district:<14} {count:>8} {published:>12.1f} {error:>8.1f}")
+    print(f"{region:<14} {count:>8} {published:>12.1f} {error:>8.1f}")
 
 # Compare: tighter budget -> more noise
 for eps in [0.1, 0.5, 1.0, 2.0, 5.0]:
     noised = laplace_mechanism(1_402, 1.0, eps, rng)
-    print(f"  epsilon={eps:<4}: published Dhaka count = {noised:.1f}")
+    print(f"  epsilon={eps:<4}: published New York count = {noised:.1f}")
 \end{lstlisting}
 
 \textbf{Real-world deployments.}
@@ -1082,9 +1082,9 @@ def parse_event(raw: bytes) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 def extract_key_amount(record: dict):
-    """Emit (district, amount_bdt) pairs."""
-    return (record.get("district", "Unknown"),
-            float(record.get("amount_bdt", 0.0)))
+    """Emit (region, amount_usd) pairs."""
+    return (record.get("region", "Unknown"),
+            float(record.get("amount_usd", 0.0)))
 
 class SumValues(beam.CombineFn):
     def create_accumulator(self): return 0.0
@@ -1093,8 +1093,8 @@ class SumValues(beam.CombineFn):
     def extract_output(self, acc): return acc
 
 def format_output(kv) -> str:
-    district, total = kv
-    return f"{district}: BDT {total:,.0f}"
+    region, total = kv
+    return f"{region}: USD {total:,.0f}"
 
 with beam.Pipeline(options=options) as p:
     result = (
@@ -1105,7 +1105,7 @@ with beam.Pipeline(options=options) as p:
                 "bootstrap.servers": "kafka:9092",
                 "group.id": "beam-fraud-pipeline",
             },
-            topics=["bkash-transactions"],
+            topics=["payment-events"],
         )
         | "ParseJSON"      >> beam.Map(parse_event)
         | "ExtractPairs"   >> beam.Map(extract_key_amount)
@@ -1120,8 +1120,8 @@ with beam.Pipeline(options=options) as p:
             allowed_lateness=2 * 60,     # accept events up to 2 min late
         )
 
-        # WHAT: aggregate amount per district per window
-        | "SumByDistrict"  >> beam.CombinePerKey(SumValues())
+        # WHAT: aggregate amount per region per window
+        | "SumByRegion"    >> beam.CombinePerKey(SumValues())
         | "Format"         >> beam.Map(format_output)
 
         # Output: write aggregates to the Lakehouse (or console for testing)
@@ -1461,13 +1461,13 @@ the specific data freshness and cost problems it eliminates.
 \exercisesection{Analytical Problems}
 
 \ap \textbf{Delta Lake Concurrency Analysis.}
-A bKash transaction table is stored as a Delta table on S3. Three
+A payment transaction table is stored as a Delta table on S3. Three
 concurrent Spark jobs attempt to write to the table simultaneously:
 \begin{itemize}
   \item Job A: append 10 million new transactions (started first).
-  \item Job B: UPDATE 500 transactions where \texttt{district='Dhaka'}
+  \item Job B: UPDATE 500 transactions where \texttt{region='Northeast'}
         (started 2 seconds after Job A).
-  \item Job C: DELETE all transactions where \texttt{amount\_bdt < 10}
+  \item Job C: DELETE all transactions where \texttt{amount\_usd < 0.50}
         (started 3 seconds after Job A).
 \end{itemize}
 \begin{enumerate}[label=(\alph*)]
@@ -1484,9 +1484,9 @@ concurrent Spark jobs attempt to write to the table simultaneously:
 \end{enumerate}
 
 \ap \textbf{MLOps Debt Taxonomy.}
-A DGHS team built a sepsis prediction model in 2022. It is deployed in
-production at Dhaka Medical College Hospital and makes predictions every
-15 minutes for each ICU patient. In 2025, the team notices the model's
+A hospital data science team built a sepsis prediction model in 2022.
+It is deployed in production at a large academic medical centre and makes
+predictions every 15 minutes for each ICU patient. In 2025, the team notices the model's
 clinical alerts are being ignored by nurses, who say ``the model keeps
 false-alarming.'' An investigation reveals:
 \begin{itemize}
@@ -1505,14 +1505,14 @@ For each issue: (a)~identify the Sculley et al.\ technical debt category;
 rate has risen from 12\% to 45\%.
 
 \ap \textbf{Dataflow Model Design.}
-Design a Beam pipeline for a real-time Pathao driver location analytics
+Design a Beam pipeline for a real-time ride-sharing driver location analytics
 system:
 \begin{itemize}
   \item Source: GPS ping events arrive at Kafka at 10 events/second
         per active driver (estimated 50{,}000 active drivers during
         peak hour $\Rightarrow$ 500{,}000 events/second).
   \item Events have a 5--30 second event-time lag (mobile network latency).
-  \item Required output: count of active drivers per district per
+  \item Required output: count of active drivers per city zone per
         5-minute window, emitted every 30 seconds with an early result,
         and a final result when the watermark passes the window end.
 \end{itemize}
@@ -1526,44 +1526,44 @@ Answer the Four Ws:
         in pseudocode (AfterWatermark / AfterProcessingTime / composite).
         What allowed lateness should be set given the 5--30s event-time lag?
   \item \textbf{How}: specify the accumulation mode. If the 30-second
-        early trigger emits ``Dhaka: 12{,}400 drivers'' and the final
-        watermark trigger emits ``Dhaka: 12{,}800 drivers'', what does the
+        early trigger emits ``Downtown: 12{,}400 drivers'' and the final
+        watermark trigger emits ``Downtown: 12{,}800 drivers'', what does the
         downstream system receive under \emph{Accumulating} mode vs.\
         \emph{Accumulating and Retracting} mode?
 \end{enumerate}
 
 \ap \textbf{Differential Privacy Budget Allocation.}
-The DGHS plans to publish monthly district-level disease statistics
-(dengue case counts, cholera hospitalisations, COVID-19 test positivity
-rate) for 64 districts. Each statistic is a COUNT or AVERAGE query over
-the patient records database. The total monthly privacy budget is
-$\varepsilon_{\text{total}} = 2.0$.
+A public health agency plans to publish monthly region-level disease
+statistics (dengue case counts, influenza hospitalisations, COVID-19 test
+positivity rate) for 50 regions. Each statistic is a COUNT or AVERAGE
+query over the patient records database. The total monthly privacy budget
+is $\varepsilon_{\text{total}} = 2.0$.
 \begin{enumerate}[label=(\alph*)]
-  \item The DGHS wants to publish 5 statistics per district per month
-        (dengue count, cholera count, COVID count, COVID positivity rate,
-        and flu count). How should the budget be allocated across these
-        5 queries using \emph{sequential composition} (each query spends
-        from the budget independently)?
+  \item The agency wants to publish 5 statistics per region per month
+        (dengue count, influenza count, COVID count, COVID positivity
+        rate, and RSV count). How should the budget be allocated across
+        these 5 queries using \emph{sequential composition} (each query
+        spends from the budget independently)?
   \item A statistician proposes using \emph{parallel composition} instead:
-        since the district-level counts are disjoint subsets of the total
-        population, the budget does not need to be divided across districts.
-        Explain why this is correct and what it implies for the per-district
+        since the region-level counts are disjoint subsets of the total
+        population, the budget does not need to be divided across regions.
+        Explain why this is correct and what it implies for the per-region
         noise level.
   \item With $\varepsilon = 0.4$ per query (from part (a)), and a COUNT
         query sensitivity of $\Delta f = 1$, compute the standard deviation
-        of the Laplace noise. Is this noise level acceptable for a district
-        with 1{,}400 dengue cases? For a district with 14 cases?
+        of the Laplace noise. Is this noise level acceptable for a region
+        with 1{,}400 dengue cases? For a region with 14 cases?
         Discuss the small-count problem.
   \item Propose a solution for the small-count problem that maintains
         differential privacy while still publishing useful statistics for
-        low-incidence districts.
+        low-incidence regions.
 \end{enumerate}
 
 \exercisesection{Design Problems}
 
 \dpr \textbf{National Mobile Payment Lakehouse (capstone design).}
 Design a complete Lakehouse-based data analytics platform for a nationwide
-mobile payment company in Bangladesh (bKash scale: 50 million transactions/day,
+mobile payment company (M-Pesa / PayPal scale: 50 million transactions/day,
 5 years of historical data, 30 million registered users).
 
 \begin{enumerate}[label=(\alph*)]
@@ -1575,7 +1575,7 @@ mobile payment company in Bangladesh (bKash scale: 50 million transactions/day,
         raw transaction table. Specify partitioning columns and Z-ordering
         columns. Justify each choice with reference to the query patterns
         (time-range queries for compliance, user-level queries for fraud,
-        district-level aggregations for dashboards).
+        region-level aggregations for dashboards).
   \item \textbf{Analytical layers}: describe the curated table hierarchy
         (bronze $\to$ silver $\to$ gold) using Delta Lake. What
         transformations happen at each layer? What SLA (freshness,
@@ -1590,10 +1590,11 @@ mobile payment company in Bangladesh (bKash scale: 50 million transactions/day,
         policies are enforced automatically?
 \end{enumerate}
 
-\dpr \textbf{Bangladesh National Health Lakehouse.}
-Design a Lakehouse for the DGHS national health analytics platform,
-integrating data from 300 hospitals (HL7 FHIR), pharmacy chains,
-and community health workers (mobile app events via Kafka).
+\dpr \textbf{National Health Analytics Lakehouse.}
+Design a Lakehouse for a national health analytics platform (e.g., NHS
+England or US Health and Human Services), integrating data from 300
+hospitals (HL7 FHIR), pharmacy chains, and community health workers
+(mobile app events via Kafka).
 
 \begin{enumerate}[label=(\alph*)]
   \item \textbf{Ingestion}: specify the Kafka Connect configuration for
@@ -1602,15 +1603,15 @@ and community health workers (mobile app events via Kafka).
         versions (R3 vs R4)?
   \item \textbf{Privacy}: specify the de-identification pipeline that
         must run before any data enters the Lakehouse gold layer.
-        Which safe harbour identifiers are removed, and which are
+        Which HIPAA safe harbour identifiers are removed, and which are
         generalised (e.g., date-of-birth $\to$ age-band)?
-  \item \textbf{Federated learning}: the DGHS wants to train a sepsis
-        prediction model without ever centralising individual patient
-        records from private hospitals. Design the federated learning
-        architecture: number of rounds, local epochs per round, FedAvg
-        aggregation, and validation strategy.
+  \item \textbf{Federated learning}: the health authority wants to train
+        a sepsis prediction model without ever centralising individual
+        patient records from private hospitals. Design the federated
+        learning architecture: number of rounds, local epochs per round,
+        FedAvg aggregation, and validation strategy.
   \item \textbf{Real-time alerting}: specify the Dataflow pipeline for
-        detecting a cholera outbreak: window type and size, trigger,
+        detecting an influenza outbreak: window type and size, trigger,
         threshold (what counts as an alert), and output destination.
 \end{enumerate}
 
@@ -1620,30 +1621,30 @@ and community health workers (mobile app events via Kafka).
 Using PySpark and the \texttt{delta-spark} library locally, implement
 and verify Delta Lake's ACID properties:
 \begin{enumerate}[label=(\alph*)]
-  \item Create a Delta table for DGHS hospital admissions:
-        \texttt{(patient\_id STRING, district STRING, diagnosis\_code STRING,
+  \item Create a Delta table for hospital admissions:
+        \texttt{(patient\_id STRING, region STRING, diagnosis\_code STRING,
         admit\_date DATE, los\_days INT)}.
         Write 10{,}000 synthetic rows.
   \item Append 2{,}000 new records (Batch 2).
   \item Execute an UPDATE to add 2 to \texttt{los\_days} for all patients
-        where \texttt{district = 'Dhaka'}.
+        where \texttt{region = 'Northeast'}.
   \item Execute a DELETE for all patients where \texttt{los\_days < 1}
         (invalid records).
   \item Query \texttt{VERSION AS OF 1} (after Batch 2 but before the
-        UPDATE) and count the Dhaka patients. Verify the count matches
+        UPDATE) and count the Northeast patients. Verify the count matches
         what you expect.
   \item Run \texttt{DESCRIBE HISTORY} and display all four transaction
         entries. For each, identify the operation type.
-  \item Run \texttt{OPTIMIZE} with Z-ordering on \texttt{(district,
+  \item Run \texttt{OPTIMIZE} with Z-ordering on \texttt{(region,
         admit\_date)} and observe the reduction in the number of Parquet
         files.
 \end{enumerate}
 
 \pe \textbf{MLflow Experiment Tracking and Model Registry.}
-Build a complete MLflow experiment for bKash fraud classification:
+Build a complete MLflow experiment for payment fraud classification:
 \begin{enumerate}[label=(\alph*)]
   \item Generate 100{,}000 synthetic transaction records with
-        \texttt{(amount\_bdt, txn\_per\_hour, is\_new\_receiver,
+        \texttt{(amount\_usd, txn\_per\_hour, is\_new\_receiver,
         hour\_of\_day, is\_fraud)}.
   \item Train three models (Logistic Regression, Random Forest,
         Gradient Boosted Trees) and log each as a separate MLflow run
@@ -1651,7 +1652,7 @@ Build a complete MLflow experiment for bKash fraud classification:
   \item Use the MLflow Tracking UI to compare the three runs. Identify
         the best model by AUROC.
   \item Register the best model in the MLflow Model Registry with the
-        name \texttt{bkash-fraud-v2}. Transition it to the
+        name \texttt{payment-fraud-v2}. Transition it to the
         \texttt{Staging} stage.
   \item Load the staged model using \texttt{mlflow.spark.load\_model()}
         and run predictions on a 10{,}000-row test set. Verify the
@@ -1659,14 +1660,14 @@ Build a complete MLflow experiment for bKash fraud classification:
 \end{enumerate}
 
 \pe \textbf{Apache Beam: Windowed Transaction Aggregation.}
-Implement an Apache Beam pipeline that aggregates bKash transaction events:
+Implement an Apache Beam pipeline that aggregates payment transaction events:
 \begin{enumerate}[label=(\alph*)]
   \item Generate a synthetic stream of 1 million transaction events with
-        \texttt{(txn\_id, district, amount\_bdt, event\_time)}. Introduce
+        \texttt{(txn\_id, region, amount\_usd, event\_time)}. Introduce
         random event-time lag of 0--30 seconds to simulate mobile network delay.
   \item Write the pipeline using the Direct Runner (local execution).
         Apply 5-minute tumbling event-time windows and sum
-        \texttt{amount\_bdt} per \texttt{district} per window.
+        \texttt{amount\_usd} per \texttt{region} per window.
   \item Configure a composite trigger: emit an early result every 10 seconds
         of processing time AND emit a final result when the watermark passes
         the window end. Use accumulating mode.

@@ -66,7 +66,7 @@ point-to-point connections between systems with a single, durable,
 append-only log. Apache Kafka, introduced by LinkedIn engineers in 2011,
 is the canonical implementation of that idea, and it has become the backbone
 of modern event-driven architecture at companies ranging from Netflix and
-Uber to bKash and Pathao.
+Uber to Grab and Revolut.
 
 The chapter covers the full pipeline picture: bulk batch transfer with
 Sqoop and Flume; real-time streaming with Kafka; the two competing
@@ -549,8 +549,8 @@ deliver durability, parallelism, and horizontal scalability.
 \begin{enumerate}
   \item \textbf{Topic.} A \term{topic} is a named, durable, append-only log
         for a category of events. Topics are analogous to database tables
-        but append-only: \texttt{bkash-transactions}, \texttt{pathao-gps-pings},
-        and \texttt{dhaka-weather-sensors} might each be a Kafka topic.
+        but append-only: \texttt{payment-events}, \texttt{rideshare-gps-pings},
+        and \texttt{city-weather-sensors} might each be a Kafka topic.
         Producers write to a topic; consumers read from it.
 
   \item \textbf{Partition.} Each topic is split into $P \geq 1$ ordered
@@ -600,7 +600,7 @@ deliver durability, parallelism, and horizontal scalability.
   ]
   %% Topic label
   \node[font=\normalsize\bfseries\sffamily, text=DEBlue] at (3.6, 6.4)
-        {Topic: \texttt{bkash-txns}\ \ (3 partitions, RF\,=\,2)};
+        {Topic: \texttt{payment-txns}\ \ (3 partitions, RF\,=\,2)};
 
   %% Brokers
   \node[brk] at (0.8, 4.6) {};
@@ -694,7 +694,7 @@ import json, random, time
 from kafka import KafkaProducer, KafkaConsumer
 
 BROKER = "localhost:9092"
-TOPIC  = "bkash-transactions"
+TOPIC  = "payment-events"
 
 # ---------- Producer ----------
 producer = KafkaProducer(
@@ -714,7 +714,7 @@ for i in range(10_000):
         "sender":    random.randint(1, 50_000),
         "receiver":  random.randint(1, 50_000),
         "amount":    round(random.uniform(10, 5000), 2),
-        "currency":  "BDT",
+        "currency":  "USD",
         "timestamp": int(time.time() * 1000),
     }
     # key = str(sender): ensures all transactions from the same
@@ -741,7 +741,7 @@ for record in consumer:
     # Simple heuristic: flag large transactions for review
     if txn["amount"] > 4500:
         print(f"[ALERT] Large txn {txn['txn_id']}: "
-              f"BDT {txn['amount']:.2f} "
+              f"USD {txn['amount']:.2f} "
               f"(partition={record.partition}, offset={record.offset})")
 \end{lstlisting}
 
@@ -1149,11 +1149,11 @@ favour Lambda:
         the data to a queryable store---effectively recreating the
         batch layer.
   \item \textbf{Regulatory requirement mandates independent batch
-        reconciliation.} Bangladesh Bank Circular~8 (2022) requires
-        that all mobile financial service transactions be reconciled in
-        a separate batch system to detect discrepancies between the
-        real-time ledger and the daily settlement---a process that cannot
-        be replaced by a streaming job.
+        reconciliation.} EU PSD2 Article~94 and equivalent national
+        payment regulations require that all electronic payment
+        transactions be reconciled in a separate batch system to detect
+        discrepancies between the real-time ledger and the daily
+        settlement---a process that cannot be replaced by a streaming job.
 \end{enumerate}
 \end{caution}
 
@@ -1302,9 +1302,9 @@ Data swamp symptoms are predictable:
         a shared schema registry.
   \item \textbf{Privacy leakage.} Personally identifiable information
         (PII) mixes with non-sensitive data because ingest bypassed
-        the governance layer. Under Bangladesh's Digital Security Act and
-        Bangladesh Bank regulations on data localisation, this can result
-        in regulatory penalties.
+        the governance layer. Under GDPR Article~83(5) and equivalent
+        data-protection frameworks worldwide, this can result in
+        significant regulatory penalties and mandatory breach notification.
   \item \textbf{Unreliable quality.} Without automated quality checks
         at ingest time, downstream ML models silently train on corrupted
         or incomplete data.
@@ -1722,7 +1722,7 @@ data lake.
 \exercisesection{Analytical Problems}
 
 \ap \textbf{Kafka Partition Sizing.}
-A mobile payment company (similar to bKash) expects the following workload
+A mobile payment company expects the following workload
 on its \texttt{wallet-transactions} Kafka topic:
 \begin{itemize}
   \item Peak producer throughput: 80{,}000 transactions/second
@@ -1739,14 +1739,14 @@ Kafka cluster for 14-day retention (assuming average rate, before replication).
 broker node has 12~TB of usable disk, how many brokers are needed?
 
 \ap \textbf{Lambda vs.\ Kappa Architecture Selection.}
-A Bangladeshi commercial bank is designing a data pipeline for three
+An international commercial bank is designing a data pipeline for three
 workloads:
 \begin{enumerate}
   \item Real-time fraud detection: flag suspicious card-swipe transactions
         within 200~ms with a rolling 24-hour transaction history per card.
   \item Monthly regulatory capital report: aggregates 36 months of
-        transaction data into 47 statutory metrics as required by
-        Bangladesh Bank Circular BRPD~18.
+        transaction data into statutory metrics as required by
+        Basel~III / EU CRR capital adequacy reporting rules.
   \item Live risk dashboard: shows current total exposure per counterparty
         updated every 30 seconds, combining live transactions (from the
         past 5 minutes) with a settled position snapshot from the previous
@@ -1772,10 +1772,10 @@ each processing 2 partitions.
 \end{enumerate}
 
 \ap \textbf{Data Lake Zone Design.}
-Design the zone structure for a national healthcare data lake that will
+Design the zone structure for a regional healthcare data lake that will
 store:
 \begin{itemize}
-  \item Patient records from 64 district hospitals (structured, RDBMS)
+  \item Patient records from 80 regional hospitals (structured, RDBMS)
   \item Doctor appointment audio recordings (unstructured, MP3)
   \item Lab result CSV uploads from 200 diagnostic centres
   \item Real-time vital signs from 1{,}000 ICU monitoring devices (Kafka)
@@ -1784,14 +1784,14 @@ For each data source: (a) identify which ingestion tool to use (Sqoop,
 Flume, Kafka, NiFi); (b) specify the landing zone (raw, processed, or
 curated); (c) identify the format in the processed zone; (d) describe
 which governance controls are mandatory given that patient records are
-PII under the National Health Policy 2011 (Bangladesh).
+sensitive health data under HIPAA (US) or GDPR Article~9 (EU).
 
 \exercisesection{Design Problems}
 
-\dpr \textbf{bKash Real-Time Fraud Pipeline.}
-Design a complete Kafka-based data pipeline for bKash (Bangladesh's
-largest mobile financial service, 50 million users, 10 million
-transactions/day) that must:
+\dpr \textbf{Mobile Money Real-Time Fraud Pipeline.}
+Design a complete Kafka-based data pipeline for a mobile financial service
+(e.g., M-Pesa Kenya, 30+ million users, 10 million transactions/day)
+that must:
 \begin{enumerate}[label=(\alph*)]
   \item Detect fraudulent transactions in real time ($<$200~ms decision
         latency) using velocity checks (more than 5 transactions from
@@ -1799,9 +1799,9 @@ transactions/day) that must:
   \item Power a live operations dashboard showing total transaction
         volume and flagged transactions per minute, updated every 30
         seconds.
-  \item Provide a daily reconciliation file to Bangladesh Bank containing
-        all flagged transactions and final dispositions (confirmed fraud
-        vs.\ false positive).
+  \item Provide a daily reconciliation file to the financial regulator
+        containing all flagged transactions and final dispositions
+        (confirmed fraud vs.\ false positive).
   \item Allow the fraud detection rules to be updated and back-tested
         against 30 days of historical transactions without re-ingesting
         from the source database.
@@ -1813,21 +1813,21 @@ fits each requirement and why; and the serving layer technology for the
 dashboard and the reconciliation file.
 
 \dpr \textbf{University Data Lake Design.}
-Premier University, Chittagong, wishes to build a data lake to unify
-its operational data for academic analytics, student counselling, and
-research reporting. Data sources include: student RDBMS (Oracle, 50K
-student records), LMS (Moodle, JSON event logs), library system (MySQL,
-book borrowing records), exam results (Excel uploads by faculty), and
-Wi-Fi access logs (syslog, 100K events/day).
+A mid-size university wishes to build a data lake to unify its operational
+data for academic analytics, student counselling, and research reporting.
+Data sources include: student RDBMS (Oracle, 50K student records), LMS
+(Moodle, JSON event logs), library system (MySQL, book borrowing records),
+exam results (Excel uploads by faculty), and Wi-Fi access logs (syslog,
+100K events/day).
 \begin{enumerate}[label=(\alph*)]
   \item Design the ingestion pipeline for each source.
   \item Define the zone structure and the schema for the curated zone
         \texttt{student\_engagement} table (columns, types, partitioning).
   \item Describe three data quality checks that must pass before a dataset
         is promoted from raw to processed zone.
-  \item Identify which datasets contain PII under the Bangladesh
-        Digital Security Act and describe the access control policies
-        (who can see what, in what form) to be enforced by Apache Ranger.
+  \item Identify which datasets contain PII under FERPA (US) or GDPR
+        (EU) and describe the access control policies (who can see what,
+        in what form) to be enforced by Apache Ranger.
 \end{enumerate}
 
 \exercisesection{Programming Exercises}
@@ -1838,11 +1838,11 @@ Docker container:
 \begin{enumerate}[label=(\alph*)]
   \item Implement a producer that generates 50{,}000 synthetic mobile
         payment events (fields: \texttt{txn\_id}, \texttt{sender},
-        \texttt{receiver}, \texttt{amount\_bdt}, \texttt{timestamp\_ms}).
+        \texttt{receiver}, \texttt{amount\_usd}, \texttt{timestamp\_ms}).
         Key each message by \texttt{sender} to ensure all transactions
         from a given sender land in the same partition.
   \item Implement a consumer in group \texttt{analytics-v1} that reads
-        all messages and computes: (i) total transaction volume in BDT;
+        all messages and computes: (i) total transaction volume in USD;
         (ii) top-10 senders by count; (iii) average transaction amount
         per minute over the message timestamps.
   \item Reset the consumer offset to the beginning and re-run the
@@ -1867,7 +1867,8 @@ producer = KafkaProducer(
     retries=3,
 )
 
-SENDERS = [f"01{random.randint(3,9)}{random.randint(10000000,99999999)}"
+COUNTRY_CODES = ["+1", "+44", "+49", "+33", "+81", "+61"]
+SENDERS = [f"{random.choice(COUNTRY_CODES)}{random.randint(2000000000,9999999999)}"
            for _ in range(1000)]
 
 for _ in range(50_000):
@@ -1876,7 +1877,7 @@ for _ in range(50_000):
         "txn_id":       str(uuid.uuid4()),
         "sender":       sender,
         "receiver":     random.choice(SENDERS),
-        "amount_bdt":   round(random.uniform(10, 10_000), 2),
+        "amount_usd":   round(random.uniform(1.00, 5_000.00), 2),
         "timestamp_ms": int(time.time() * 1000),
     }
     producer.send(TOPIC, key=sender, value=event)
@@ -1886,12 +1887,12 @@ print("Done: 50,000 events produced")
 \end{lstlisting}
 
 \pe \textbf{Lambda Architecture Simulator (PySpark).}
-Simulate a Lambda architecture for a ride-sharing app (similar to Pathao)
+Simulate a Lambda architecture for a ride-sharing app (e.g., Uber or Grab)
 using PySpark and local files:
 \begin{enumerate}[label=(\alph*)]
   \item \textbf{Batch layer:} Read a 1-million-row Parquet file of
         historical ride events (columns: \texttt{ride\_id},
-        \texttt{driver\_id}, \texttt{pickup\_zone}, \texttt{fare\_bdt},
+        \texttt{driver\_id}, \texttt{pickup\_zone}, \texttt{fare\_usd},
         \texttt{ride\_date}). Compute the hourly fare total per pickup
         zone and write as a batch view Parquet file.
   \item \textbf{Speed layer:} Generate 10{,}000 synthetic ``live'' events
@@ -1914,7 +1915,7 @@ spark = SparkSession.builder.appName("LambdaSim").getOrCreate()
 
 # --- Batch layer view (pre-computed) ---
 batch_view = spark.read.parquet("data/batch_views/fare_by_zone_hour/")
-# Schema: pickup_zone, hour_ts, total_fare_bdt, source='batch'
+# Schema: pickup_zone, hour_ts, total_fare_usd, source='batch'
 
 # --- Speed layer (in-memory simulation) ---
 import random
@@ -1923,9 +1924,9 @@ live_events = spark.createDataFrame([
     {
         "ride_id":      f"R{i:06d}",
         "driver_id":    random.randint(1, 5000),
-        "pickup_zone":  random.choice(["Gulshan","Dhanmondi","Mirpur",
-                                       "Uttara","Motijheel","Wari"]),
-        "fare_bdt":     round(random.uniform(50, 800), 2),
+        "pickup_zone":  random.choice(["Downtown","Midtown","Airport",
+                                       "Suburbs","University","Harbour"]),
+        "fare_usd":     round(random.uniform(5.00, 80.00), 2),
         "ride_ts":      datetime.now() - timedelta(seconds=random.randint(0, 3599)),
     }
     for i in range(10_000)
@@ -1933,7 +1934,7 @@ live_events = spark.createDataFrame([
 
 real_time_view = (live_events
     .groupBy("pickup_zone")
-    .agg(_sum("fare_bdt").alias("total_fare_bdt"))
+    .agg(_sum("fare_usd").alias("total_fare_usd"))
     .withColumn("hour_ts", lit(datetime.now().replace(minute=0, second=0,
                                                        microsecond=0)))
     .withColumn("source", lit("realtime")))
@@ -1951,17 +1952,19 @@ Implement an automated data quality gate that must pass before a dataset
 is promoted from the raw zone to the processed zone of a data lake:
 \begin{enumerate}[label=(\alph*)]
   \item Load a CSV file of customer records (fields: \texttt{customer\_id},
-        \texttt{mobile}, \texttt{name}, \texttt{district}, \texttt{balance\_bdt},
+        \texttt{mobile}, \texttt{name}, \texttt{region}, \texttt{balance\_usd},
         \texttt{account\_opened}).
   \item Using the \texttt{great\_expectations} library, define and run
         the following expectations:
         \begin{itemize}
           \item \texttt{customer\_id} must not be null and must be unique.
-          \item \texttt{mobile} must match the regex
-                \texttt{\textasciicircum{}01[3-9]\textbackslash d\{8\}\$}
-                (Bangladeshi mobile number format).
-          \item \texttt{balance\_bdt} must be between 0 and 10{,}000{,}000.
-          \item \texttt{district} must be one of the 64 districts of Bangladesh.
+          \item \texttt{mobile} must match the E.164 international format
+                regex \texttt{\textasciicircum{}\textbackslash +[1-9]\textbackslash
+                d\{7,14\}\$}.
+          \item \texttt{balance\_usd} must be between 0 and 10{,}000{,}000.
+          \item \texttt{region} must be one of the values in a reference
+                catalogue (e.g., ISO~3166-2 region codes for the country
+                of operation).
           \item No more than 1\% of rows may have a null \texttt{name}.
         \end{itemize}
   \item If all expectations pass, write the dataset to the processed zone
