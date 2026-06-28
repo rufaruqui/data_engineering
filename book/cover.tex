@@ -1,0 +1,237 @@
+%% cover.tex — Standalone front cover for "Data Engineering" textbook
+%% Compile: pdflatex cover.tex
+%% B5 = 176 mm wide × 250 mm tall
+%%
+%% To use in main.tex: \usepackage{pdfpages} in preamble, then
+%%   \includepdf{cover.pdf}   before \frontmatter
+
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{newpxtext}
+\usepackage[expansion=false]{microtype}
+\usepackage[b5paper, margin=0pt, noheadfoot]{geometry}
+\usepackage[dvipsnames,svgnames]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{calc,backgrounds}
+
+%-- palette --%
+\definecolor{DEBlue}{RGB}{0,60,120}
+\definecolor{DEAccent}{RGB}{210,120,0}
+\definecolor{DEGreen}{RGB}{0,110,70}
+\definecolor{DEGray}{RGB}{80,80,80}
+\definecolor{DELightBlue}{RGB}{228,240,255}
+
+\pagestyle{empty}
+
+\begin{document}
+\noindent
+\begin{tikzpicture}[remember picture, overlay, shift={(current page.south west)}]
+
+  %% B5: width=176mm, height=250mm
+  %% Blue header block: from y=118mm to y=250mm  (top 132mm, ~53%)
+  %% Accent stripe:     from y=115mm to y=118mm
+  %% Body (white):      from y=0    to y=115mm
+
+  %==============================================================
+  % BACKGROUND FILLS
+  %==============================================================
+  \fill[white]        (0,0)         rectangle (176mm,250mm);
+  \fill[DEBlue]       (0,118mm)     rectangle (176mm,250mm);
+  \fill[DEAccent]     (0,115mm)     rectangle (176mm,118mm);
+  \fill[DEGreen!60]   (0,113.5mm)   rectangle (176mm,115mm);
+  \fill[DEBlue]       (0,0)         rectangle (176mm,11mm);
+
+  %==============================================================
+  % NETWORK PATTERN inside blue block (subtle)
+  % Nodes on a staggered grid; edges selected manually
+  %==============================================================
+  \begin{scope}
+    \clip (0,118mm) rectangle (176mm,250mm);
+
+    % node positions (x mm, y mm from page bottom)
+    % rows at y = 127, 138, 149, 160, 171, 182, 193, 204, 215, 226, 237
+    % cols at x = 11, 27, 43, 59, 75, 91, 107, 123, 139, 155, 171
+    \foreach \px/\py in {
+      11/127, 27/127, 43/127, 59/127, 75/127, 91/127, 107/127, 123/127, 139/127, 155/127,
+      11/142, 27/142, 43/142, 59/142, 75/142, 91/142, 107/142, 123/142, 139/142, 155/142, 171/142,
+      11/157, 27/157, 43/157, 59/157, 75/157, 91/157, 107/157, 123/157, 139/157, 155/157,
+      11/172, 27/172, 43/172, 59/172, 75/172, 91/172, 107/172, 123/172, 139/172, 155/172, 171/172,
+      11/187, 27/187, 43/187, 59/187, 75/187, 91/187, 107/187, 123/187, 139/187, 155/187,
+      11/202, 27/202, 43/202, 59/202, 75/202, 91/202, 107/202, 123/202, 139/202, 155/202, 171/202,
+      11/217, 27/217, 43/217, 59/217, 75/217, 91/217, 107/217, 123/217, 139/217, 155/217,
+      27/232, 59/232, 91/232, 123/232, 155/232
+    }{
+      \fill[DEBlue!52] (\px mm,\py mm) circle (1.5pt);
+    }
+
+    % horizontal edges
+    \foreach \ax/\ay/\bx/\by in {
+      11/127/27/127, 27/127/43/127, 59/127/75/127, 91/127/107/127, 123/127/139/127,
+      11/142/27/142, 43/142/59/142, 75/142/91/142, 107/142/123/142, 139/142/155/142,
+      27/157/43/157, 59/157/75/157, 91/157/107/157, 139/157/155/157,
+      11/172/27/172, 43/172/59/172, 75/172/91/172, 107/172/123/172, 155/172/171/172,
+      27/187/43/187, 59/187/75/187, 91/187/107/187, 123/187/139/187,
+      11/202/27/202, 43/202/59/202, 75/202/91/202, 107/202/123/202, 139/202/155/202,
+      27/217/43/217, 75/217/91/217, 107/217/123/217
+    }{
+      \draw[DEBlue!48, line width=0.35pt] (\ax mm,\ay mm) -- (\bx mm,\by mm);
+    }
+
+    % diagonal / vertical edges
+    \foreach \ax/\ay/\bx/\by in {
+      27/127/11/142, 59/127/75/142, 91/127/107/142, 139/127/155/142,
+      43/142/27/157, 75/142/91/157, 107/142/123/157, 155/142/139/157,
+      11/157/27/172, 59/157/43/172, 91/157/107/172, 139/157/155/172,
+      27/172/11/187, 75/172/91/187, 107/172/123/187, 155/172/171/172,
+      43/187/27/202, 75/187/91/202, 107/187/123/202, 155/187/139/202,
+      11/202/27/217, 59/202/43/217, 91/202/107/217, 139/202/123/217,
+      27/217/59/232, 91/217/123/232
+    }{
+      \draw[DEBlue!44, line width=0.3pt] (\ax mm,\ay mm) -- (\bx mm,\by mm);
+    }
+
+    % three highlight circles (suggest clusters)
+    \draw[DEBlue!45, line width=0.7pt, dashed] (45mm,165mm) circle (18mm);
+    \draw[DEBlue!45, line width=0.7pt, dashed] (107mm,185mm) circle (22mm);
+    \draw[DEBlue!40, line width=0.5pt, dashed] (155mm,155mm) circle (14mm);
+
+    % a few brighter "active" nodes
+    \foreach \px/\py in {43/157, 75/172, 107/187, 91/202, 123/172, 59/187}{
+      \fill[DEAccent!55] (\px mm,\py mm) circle (2.5pt);
+    }
+  \end{scope}
+
+  %==============================================================
+  % TITLE TEXT
+  %==============================================================
+
+  % "DATA" — large, white, top of blue block
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{54}{54}\sffamily\bfseries,
+        text=white]
+    at (13mm, 228mm) {DATA};
+
+  % "ENGINEERING" — medium weight, tracked out
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{31}{31}\sffamily\bfseries,
+        text=white]
+    at (13mm, 210mm) {ENGINEERING};
+
+  % orange rule under title
+  \draw[DEAccent, line width=2.5pt] (13mm,204mm) -- (152mm,204mm);
+
+  % subtitle lines
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{10.5}{15}\sffamily,
+        text=white!80,
+        text width=148mm, align=left]
+    at (13mm, 201mm)
+    {Distributed Systems,\enspace Scalable Processing,\enspace
+     and Modern Architectures};
+
+  %==============================================================
+  % COURSE BADGE (upper-right)
+  %==============================================================
+  \fill[DEAccent, rounded corners=3pt]
+    (130mm,231mm) rectangle (173mm,246mm);
+  \node[anchor=center,
+        font=\fontsize{8}{11}\sffamily\bfseries,
+        text=white, align=center, text width=40mm]
+    at (151.5mm, 238.5mm) {CSE 4345\\Big Data Analytics};
+
+  %==============================================================
+  % EDITION TAG (left margin, vertical)
+  %==============================================================
+  \node[rotate=90, anchor=south,
+        font=\fontsize{6.5}{6.5}\sffamily,
+        text=white!38, inner sep=0pt]
+    at (5.5mm, 175mm) {FIRST EDITION · 2026};
+
+  %==============================================================
+  % BODY SECTION — part overview (left column)
+  %==============================================================
+
+  % left accent bar
+  \fill[DEAccent!22] (7.5mm,14mm) rectangle (9.5mm,112mm);
+
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{7}{11}\sffamily,
+        text=DEBlue, text width=72mm, align=left]
+    at (13mm, 109mm) {%
+      {\color{DEAccent}\bfseries PART\,I}\enspace
+        The Data Engineering Landscape\\[2pt]
+      {\color{DEAccent}\bfseries PART\,II}\enspace
+        Distributed File Systems\\[2pt]
+      {\color{DEAccent}\bfseries PART\,III}\enspace
+        Batch Processing at Scale\\[2pt]
+      {\color{DEAccent}\bfseries PART\,IV}\enspace
+        In-Memory Processing\\[2pt]
+      {\color{DEAccent}\bfseries PART\,V}\enspace
+        Data Pipelines \& Integration\\[2pt]
+      {\color{DEAccent}\bfseries PART\,VI}\enspace
+        Insight Delivery\\[2pt]
+      {\color{DEAccent}\bfseries PART\,VII}\enspace
+        The Modern Data Stack%
+    };
+
+  %==============================================================
+  % KEYWORD TAGS (right column of body)
+  %==============================================================
+  \foreach \kw/\xpos/\ypos in {
+    {Hadoop}/97/107,
+    {HDFS}/131/107,
+    {MapReduce}/97/97,
+    {Apache\ Spark}/130/97,
+    {Kafka}/97/87,
+    {Delta\ Lake}/131/87,
+    {HiveQL}/97/77,
+    {MLOps}/132/77,
+    {Data\ Mesh}/97/67,
+    {Apache\ Beam}/131/67,
+    {Lakehouse}/97/57,
+    {Diff.\ Privacy}/131/57
+  }{
+    \node[fill=DELightBlue, rounded corners=2pt,
+          text=DEBlue,
+          font=\fontsize{6.5}{6.5}\sffamily,
+          inner xsep=4pt, inner ysep=3pt]
+      at (\xpos mm, \ypos mm) {\kw};
+  }
+
+  %==============================================================
+  % DIVIDER RULE
+  %==============================================================
+  \draw[DEGray!30, line width=0.5pt] (8mm,33mm) -- (168mm,33mm);
+
+  %==============================================================
+  % AUTHOR / INSTITUTION
+  %==============================================================
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{13}{13}\sffamily\bfseries,
+        text=DEBlue]
+    at (13mm, 27mm) {Rokan Uddin Faruqui};
+
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{8}{12}\sffamily,
+        text=DEGray, text width=120mm, align=left]
+    at (13mm, 22.5mm)
+    {Professor, Department of Computer Science \& Engineering\\
+     University of Chittagong};
+
+  %==============================================================
+  % BOTTOM BAR
+  %==============================================================
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{7.5}{7.5}\sffamily,
+        text=white!55]
+    at (13mm, 5.5mm) {2026 · First Edition};
+
+  \node[anchor=east, inner sep=0pt,
+        font=\fontsize{7.5}{7.5}\sffamily,
+        text=white!55]
+    at (163mm, 5.5mm) {rufaruqui@cu.ac.bd};
+
+\end{tikzpicture}
+\end{document}

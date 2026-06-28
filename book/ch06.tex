@@ -467,7 +467,7 @@ any-node assignment, maximising data locality.
     box/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40,
                 rounded corners=4pt, minimum width=3.2cm, minimum height=0.75cm,
                 font=\small\bfseries\sffamily, align=center},
-    cm/.style={rectangle, draw=DEAccent!70, fill=DELightAccent,
+    cmanager/.style={rectangle, draw=DEAccent!70, fill=DELightAccent,
                rounded corners=4pt, minimum width=3.2cm, minimum height=0.75cm,
                font=\small\bfseries\sffamily, align=center},
     exec/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
@@ -486,7 +486,7 @@ any-node assignment, maximising data locality.
   \node[box] (ts)  at (0, 4.4) {Task Scheduler};
 
   % Cluster Manager (center-right)
-  \node[cm]  (cm)  at (5.0, 5.7) {Cluster Manager\\(YARN / K8s)};
+  \node[cmanager]  (cm)  at (5.0, 5.7) {Cluster Manager\\(YARN / K8s)};
 
   % Worker nodes
   \node[exec] (e1) at (3.2, 2.8) {Executor 1};
@@ -639,7 +639,7 @@ The most important wide transformations are:
                     font=\tiny\sffamily, align=center},
     stage/.style={font=\small\bfseries\sffamily, text=DEBlue},
     arr/.style={-{Stealth[length=3.5pt,width=3.5pt]}, thick},
-    lbl/.style={font=\scriptsize\sffamily}
+    lbl/.style={font=\scriptsize\sffamily, align=center}
   ]
 
   % Stage 1
@@ -1806,7 +1806,7 @@ SEED      = 42
 # Load data
 data = sc.textFile("hdfs:///data/clustering_input.csv").map(parse_point)
 
-# Cache the input data — this is the key optimisation
+# Cache the input data  --  this is the key optimisation
 data.persist(StorageLevel.MEMORY_ONLY)
 data.count()    # trigger caching (materialize into memory)
 

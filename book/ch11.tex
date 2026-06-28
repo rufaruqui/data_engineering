@@ -304,7 +304,7 @@ df_initial = spark.createDataFrame([
     .partitionBy("district")
     .save(TABLE_PATH))
 
-# --- 2. Append new batch (transaction 2 — a new commit) ---
+# --- 2. Append new batch (transaction 2  --  a new commit) ---
 df_new = spark.createDataFrame([
     ("T003", "01711000005", "01711000001", 250.0, None, "Dhaka"),
     ("T004", "01711000006", "01711000007", 750.0, None, "Sylhet"),
@@ -315,14 +315,14 @@ df_new = spark.createDataFrame([
     .mode("append")
     .save(TABLE_PATH))
 
-# --- 3. UPDATE — raise a specific amount ---
+# --- 3. UPDATE  --  raise a specific amount ---
 spark.sql(f"""
     UPDATE delta.`{TABLE_PATH}`
     SET    amount_bdt = amount_bdt * 1.10
     WHERE  txn_id = 'T001'
 """)
 
-# --- 4. DELETE — GDPR right to erasure ---
+# --- 4. DELETE  --  GDPR right to erasure ---
 spark.sql(f"""
     DELETE FROM delta.`{TABLE_PATH}`
     WHERE  sender = '01711000003'
@@ -887,7 +887,7 @@ true_counts = {
     "Barisal":     47,
 }
 
-print(f"ε = {epsilon} (stronger privacy → larger noise)")
+print(f"epsilon = {epsilon} (stronger privacy -> larger noise)")
 print(f"{'District':<14} {'True':>8} {'Published':>12} {'Error':>8}")
 print("-" * 46)
 
@@ -896,10 +896,10 @@ for district, count in true_counts.items():
     error     = abs(published - count)
     print(f"{district:<14} {count:>8} {published:>12.1f} {error:>8.1f}")
 
-# Compare: tighter budget → more noise
+# Compare: tighter budget -> more noise
 for eps in [0.1, 0.5, 1.0, 2.0, 5.0]:
     noised = laplace_mechanism(1_402, 1.0, eps, rng)
-    print(f"  ε={eps:<4}: published Dhaka count = {noised:.1f}")
+    print(f"  epsilon={eps:<4}: published Dhaka count = {noised:.1f}")
 \end{lstlisting}
 
 \textbf{Real-world deployments.}
@@ -1470,7 +1470,7 @@ concurrent Spark jobs attempt to write to the table simultaneously:
   \item Job C: DELETE all transactions where \texttt{amount\_bdt < 10}
         (started 3 seconds after Job A).
 \end{itemize}
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Which job writes the Delta Log entry numbered 00042.json if
         the current latest version is 41? Which jobs conflict?
   \item Under Delta Lake's OCC: if Job A succeeds, does Job B automatically
@@ -1517,7 +1517,7 @@ system:
         and a final result when the watermark passes the window end.
 \end{itemize}
 Answer the Four Ws:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item \textbf{What}: specify the transformation. What is the key,
         what is aggregated, and what is the output schema?
   \item \textbf{Where}: specify the windowing strategy. Why is a tumbling
@@ -1538,7 +1538,7 @@ The DGHS plans to publish monthly district-level disease statistics
 rate) for 64 districts. Each statistic is a COUNT or AVERAGE query over
 the patient records database. The total monthly privacy budget is
 $\varepsilon_{\text{total}} = 2.0$.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item The DGHS wants to publish 5 statistics per district per month
         (dengue count, cholera count, COVID count, COVID positivity rate,
         and flu count). How should the budget be allocated across these
@@ -1566,7 +1566,7 @@ Design a complete Lakehouse-based data analytics platform for a nationwide
 mobile payment company in Bangladesh (bKash scale: 50 million transactions/day,
 5 years of historical data, 30 million registered users).
 
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item \textbf{Ingestion layer}: specify the Kafka topic structure
         (topic, partition count, key, value schema), the Spark Structured
         Streaming sink configuration for writing to Delta Lake, and the
@@ -1595,7 +1595,7 @@ Design a Lakehouse for the DGHS national health analytics platform,
 integrating data from 300 hospitals (HL7 FHIR), pharmacy chains,
 and community health workers (mobile app events via Kafka).
 
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item \textbf{Ingestion}: specify the Kafka Connect configuration for
         ingesting FHIR R4 Patient and Observation resources from 300
         hospitals. How do you handle hospitals with different FHIR
@@ -1619,7 +1619,7 @@ and community health workers (mobile app events via Kafka).
 \pe \textbf{Delta Lake ACID Operations.}
 Using PySpark and the \texttt{delta-spark} library locally, implement
 and verify Delta Lake's ACID properties:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Create a Delta table for DGHS hospital admissions:
         \texttt{(patient\_id STRING, district STRING, diagnosis\_code STRING,
         admit\_date DATE, los\_days INT)}.
@@ -1641,7 +1641,7 @@ and verify Delta Lake's ACID properties:
 
 \pe \textbf{MLflow Experiment Tracking and Model Registry.}
 Build a complete MLflow experiment for bKash fraud classification:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate 100{,}000 synthetic transaction records with
         \texttt{(amount\_bdt, txn\_per\_hour, is\_new\_receiver,
         hour\_of\_day, is\_fraud)}.
@@ -1660,7 +1660,7 @@ Build a complete MLflow experiment for bKash fraud classification:
 
 \pe \textbf{Apache Beam: Windowed Transaction Aggregation.}
 Implement an Apache Beam pipeline that aggregates bKash transaction events:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate a synthetic stream of 1 million transaction events with
         \texttt{(txn\_id, district, amount\_bdt, event\_time)}. Introduce
         random event-time lag of 0--30 seconds to simulate mobile network delay.

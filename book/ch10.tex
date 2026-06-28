@@ -403,7 +403,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 spark = SparkSession.builder.appName("TwitterSentiment").getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 
-# Broadcast the VADER analyser — one object reused per executor
+# Broadcast the VADER analyser  --  one object reused per executor
 sid_broadcast = spark.sparkContext.broadcast(SentimentIntensityAnalyzer())
 
 @udf(returnType=FloatType())
@@ -671,7 +671,7 @@ future   = m.make_future_dataframe(periods=90)
 forecast = m.predict(future)
 
 fig1 = m.plot(forecast)
-fig1.axes[0].set_title("bKash Daily Transaction Volume — Prophet Forecast")
+fig1.axes[0].set_title("bKash Daily Transaction Volume  --  Prophet Forecast")
 fig1.savefig("bkash_forecast.png", dpi=150, bbox_inches="tight")
 
 fig2 = m.plot_components(forecast)
@@ -1503,7 +1503,7 @@ A Facebook group for a DGHS dengue alert campaign has 1 million users.
 The following-graph has a power-law degree distribution with exponent
 $\alpha = 2.3$. The campaign budget allows seeding $k = 5$ initial posts.
 
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Under the independent cascade model with $p_{uv} = 0.05$ on each
         edge, estimate (qualitatively) whether seeding at the 5 users with
         the highest follower count or the 5 users with the highest PageRank
@@ -1534,7 +1534,7 @@ for Dhaka. The fitted components show:
         89, and 90, where residuals are $+150$, $+220$, and $+180$ cases
         above the seasonal expected value.
 \end{itemize}
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item What real-world events might explain the two changepoints at
         weeks 52 and 130? (Hint: consider vector control interventions,
         climate events, and reporting system changes.)
@@ -1554,7 +1554,7 @@ A DGHS researcher wants to analyse 5 years of inpatient records
 readmission prediction model. The data includes: patient name, NID
 number, date of birth, home district, ICD-10 diagnosis codes, procedure
 codes, admission date, length of stay, and discharge outcome.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item List all fields that would be removed under HIPAA's safe harbour
         method. Which field in the Bangladesh context is most uniquely
         identifying and why?
@@ -1577,7 +1577,7 @@ codes, admission date, length of stay, and discharge outcome.
 \ap \textbf{Vectorised Forecasting Performance Analysis.}
 A Bangladeshi telecom company needs to forecast daily call-drop rates
 for 6{,}000 cell towers, each with 2 years of daily measurements.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Design the Spark job using \code{applyInPandas}. Specify:
         the DataFrame schema, the partition key, the Pandas UDF signature,
         and the output schema for 30-day forecasts.
@@ -1600,7 +1600,7 @@ to the CDC BioSense platform. The system should detect outbreaks of
 dengue fever, influenza, cholera, and COVID-19 up to 7 days before
 the DGHS receives clinical confirmation.
 
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item \textbf{Data sources}: identify four non-traditional data sources
         analogous to the CDC's syndromic surveillance inputs (social media,
         pharmacy, ER, search), specific to Bangladesh. For each, identify
@@ -1629,7 +1629,7 @@ in the Chittagong division (CMCH, general hospitals in Cox's Bazar,
 Comilla, Noakhali, and Feni). Data sharing between hospitals is
 restricted by Bangladesh PDPA.
 
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Design a federated learning architecture: specify which component
         runs at each hospital, what is transmitted to the central server,
         and how the federated averaging step works.
@@ -1653,7 +1653,7 @@ restricted by Bangladesh PDPA.
 \pe \textbf{Social Network Analysis with NetworkX and Louvain.}
 Construct a social network from a synthetic dataset of 1{,}000 Twitter
 users and 15{,}000 directed following edges, then analyse its structure.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate the synthetic directed graph using \texttt{networkx}
         with a preferential attachment model (\texttt{barabasi\_albert\_graph}).
         Compute: number of nodes, number of edges, average in-degree,
@@ -1675,7 +1675,7 @@ users and 15{,}000 directed following edges, then analyse its structure.
 \pe \textbf{Prophet Forecasting with Eid Holiday Effects.}
 Using the Prophet library, build a demand forecasting model for a
 Bangladeshi retailer with strong Eid seasonality.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate 3 years of synthetic weekly sales data with: an upward
         linear trend, strong annual seasonality (peak at Eid-ul-Fitr in
         May, secondary peak at Eid-ul-Adha in July), moderate weekly
@@ -1694,7 +1694,7 @@ Bangladeshi retailer with strong Eid seasonality.
 \pe \textbf{Healthcare Data Pipeline (FHIR + Spark).}
 Build a Spark pipeline that simulates processing EHR data from multiple
 hospitals for a 30-day readmission prediction task.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate 100{,}000 synthetic patient records with fields:
         \texttt{patient\_id} (UUID), \texttt{admission\_date},
         \texttt{district} (64 values), \texttt{primary\_icd10} (50 codes),

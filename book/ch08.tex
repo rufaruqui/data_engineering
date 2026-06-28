@@ -640,7 +640,7 @@ deliver durability, parallelism, and horizontal scalability.
   \draw[arr, DEGreen!50]  (-1.4,4.5)--(0.0,4.5);
 
   %% Consumer Group
-  \node[font=\small\bfseries\sffamily] at (9.4, 5.2) {Consumer\\Group};
+  \node[font=\small\bfseries\sffamily, align=center] at (9.4, 5.2) {Consumer\\Group};
   \draw[arr, DEBlue!60] (7.2,5.2)--(8.6,5.2)
         node[midway,above,font=\scriptsize\sffamily]{analytics};
   \draw[arr, DEBlue!60] (7.2,4.5)--(8.6,4.5);
@@ -701,7 +701,7 @@ producer = KafkaProducer(
     bootstrap_servers=BROKER,
     key_serializer=lambda k: k.encode(),
     value_serializer=lambda v: json.dumps(v).encode(),
-    # batch.size=16384 (16 KB), linger.ms=5 — trade latency for throughput
+    # batch.size=16384 (16 KB), linger.ms=5  --  trade latency for throughput
     batch_size=16384,
     linger_ms=5,
     acks='all',          # wait for all in-sync replicas
@@ -1759,7 +1759,7 @@ to latency requirement, reprocessing cost, and regulatory constraints.
 \ap \textbf{Consumer Group Rebalancing.}
 A Kafka topic has 12 partitions. A consumer group starts with 6 consumers,
 each processing 2 partitions.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Consumer~3 fails (crashes without a graceful shutdown). Describe
         what Kafka does: which consumers take over its partitions, and
         how long does the rebalance take (Kafka's default
@@ -1792,7 +1792,7 @@ PII under the National Health Policy 2011 (Bangladesh).
 Design a complete Kafka-based data pipeline for bKash (Bangladesh's
 largest mobile financial service, 50 million users, 10 million
 transactions/day) that must:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Detect fraudulent transactions in real time ($<$200~ms decision
         latency) using velocity checks (more than 5 transactions from
         the same wallet in 60 seconds).
@@ -1819,7 +1819,7 @@ research reporting. Data sources include: student RDBMS (Oracle, 50K
 student records), LMS (Moodle, JSON event logs), library system (MySQL,
 book borrowing records), exam results (Excel uploads by faculty), and
 Wi-Fi access logs (syslog, 100K events/day).
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Design the ingestion pipeline for each source.
   \item Define the zone structure and the schema for the curated zone
         \texttt{student\_engagement} table (columns, types, partitioning).
@@ -1835,7 +1835,7 @@ Wi-Fi access logs (syslog, 100K events/day).
 \pe \textbf{Kafka Producer and Consumer (Python).}
 Using the \texttt{kafka-python} library and a local single-broker
 Docker container:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Implement a producer that generates 50{,}000 synthetic mobile
         payment events (fields: \texttt{txn\_id}, \texttt{sender},
         \texttt{receiver}, \texttt{amount\_bdt}, \texttt{timestamp\_ms}).
@@ -1888,7 +1888,7 @@ print("Done: 50,000 events produced")
 \pe \textbf{Lambda Architecture Simulator (PySpark).}
 Simulate a Lambda architecture for a ride-sharing app (similar to Pathao)
 using PySpark and local files:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item \textbf{Batch layer:} Read a 1-million-row Parquet file of
         historical ride events (columns: \texttt{ride\_id},
         \texttt{driver\_id}, \texttt{pickup\_zone}, \texttt{fare\_bdt},
@@ -1949,7 +1949,7 @@ served.orderBy("pickup_zone", "hour_ts").show(20, truncate=False)
 \pe \textbf{Data Quality Gate (Python + Great Expectations).}
 Implement an automated data quality gate that must pass before a dataset
 is promoted from the raw zone to the processed zone of a data lake:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Load a CSV file of customer records (fields: \texttt{customer\_id},
         \texttt{mobile}, \texttt{name}, \texttt{district}, \texttt{balance\_bdt},
         \texttt{account\_opened}).

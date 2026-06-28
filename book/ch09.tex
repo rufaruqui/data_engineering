@@ -458,14 +458,14 @@ fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 # Left: raw scatter (overplotted)
 axes[0].scatter(x, y, s=0.01, alpha=0.003, color="steelblue")
-axes[0].set_title("Scatterplot (5M points — overplotted)")
+axes[0].set_title("Scatterplot (5M points  --  overplotted)")
 axes[0].set_xlabel("Longitude")
 axes[0].set_ylabel("Latitude")
 
 # Right: hexbin (density readable)
 hb = axes[1].hexbin(x, y, gridsize=80, cmap="Blues", mincnt=1)
 fig.colorbar(hb, ax=axes[1], label="Trip count")
-axes[1].set_title("Hexbin (same 5M points — density readable)")
+axes[1].set_title("Hexbin (same 5M points  --  density readable)")
 axes[1].set_xlabel("Longitude")
 axes[1].set_ylabel("Latitude")
 
@@ -508,7 +508,7 @@ zi     = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
 fig, ax = plt.subplots(figsize=(8, 6))
 cf = ax.contourf(xi, yi, zi, levels=15, cmap="Blues")
 fig.colorbar(cf, ax=ax, label="Density")
-ax.set_title("KDE Density Contour — Dhaka GPS Pings")
+ax.set_title("KDE Density Contour  --  Dhaka GPS Pings")
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 plt.tight_layout()
@@ -571,7 +571,7 @@ cube_df = (fact
         avg("amount_bdt").alias("avg_bdt"),
     ))
 
-# Write the cube as Parquet — millions of rows, not billions
+# Write the cube as Parquet  --  millions of rows, not billions
 (cube_df.write
         .mode("overwrite")
         .partitionBy("txn_date")
@@ -789,7 +789,7 @@ created by writing JavaScript that explicitly binds a data array to
 SVG elements:
 
 \begin{lstlisting}[style=pyspark, caption={D3.js: Tufte-style bar chart (data-driven SVG)}]
-/* Tufte-compliant D3 bar chart — data-ink ratio maximised
+/* Tufte-compliant D3 bar chart  --  data-ink ratio maximised
    No gridlines, no background, direct data labels, 0-based y-axis */
 
 const data = [
@@ -821,7 +821,7 @@ const y = d3.scaleBand()
   .range([0, H])
   .padding(0.35);
 
-// Bars — single flat colour (no gradient, no shadow)
+// Bars  --  single flat colour (no gradient, no shadow)
 svg.selectAll(".bar")
    .data(data)
    .join("rect")
@@ -1190,7 +1190,7 @@ elements: a 3-D bar chart; a $y$-axis that starts at 500{,}000 messages/hour
 area; a gradient fill on each bar (dark blue at bottom, light blue at top);
 a legend listing all 8 topic names in a box overlapping the chart; and
 heavy horizontal gridlines every 10{,}000 messages.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Identify every element that violates Tufte's data-ink principle,
         classify each as chartjunk or a lie-factor violation, and explain
         what information is lost by removing it (if any).
@@ -1235,7 +1235,7 @@ A national electricity utility has a 5-year fact table with 120 billion
 rows and four dimensions: \texttt{meter\_id} (10 million distinct values),
 \texttt{hour\_ts} (43{,}800 hours over 5 years), \texttt{district}
 (64 districts), and \texttt{tariff\_band} (5 bands).
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item How many cuboids are in the full data cube? How many are practically
         useful for a dashboard (explain which dimensions are too high
         cardinality to materialise)?
@@ -1252,7 +1252,7 @@ rows and four dimensions: \texttt{meter\_id} (10 million distinct values),
 \dpr \textbf{DGHS Disease Surveillance Dashboard.}
 The Directorate General of Health Services (DGHS), Bangladesh, needs a
 public health dashboard communicating:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item National COVID-19 confirmed case counts by district over 24 months,
         using a 7-day rolling average.
   \item Real-time hospitalisation rate updated every 5 minutes from hospital
@@ -1271,7 +1271,7 @@ for each panel; and describe two accessibility requirements.
 \dpr \textbf{Streaming bKash Operations Dashboard.}
 Design a real-time operations dashboard for bKash (10 million transactions/day,
 peak 500 transactions/second) that shows:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Total transaction volume (BDT) per minute, last 60 minutes,
         updated every 5 seconds.
   \item Number of active fraud alerts, updated every 30 seconds.
@@ -1289,7 +1289,7 @@ and any pre-aggregation required to achieve the specified latency.
 \pe \textbf{Overplotting Solutions in Python.}
 Given a simulated dataset of 2 million Pathao GPS trip origin points
 (longitude, latitude) distributed across five Dhaka zones:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Plot the raw scatterplot with $\alpha = 0.005$. Describe the
         overplotting effect observed.
   \item Create a hexbin plot with \texttt{gridsize=100} and a sequential
@@ -1330,25 +1330,25 @@ lats = np.concatenate(lats)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 12))
 
-# Panel 1 — Overview: raw scatter (overplotted)
+# Panel 1  --  Overview: raw scatter (overplotted)
 axes[0,0].scatter(lons, lats, s=0.003, alpha=0.004, c="steelblue")
-axes[0,0].set_title("(a) Scatterplot — overplotted (Shneiderman: overview)")
+axes[0,0].set_title("(a) Scatterplot  --  overplotted (Shneiderman: overview)")
 
-# Panel 2 — Zoom: hexbin full city
+# Panel 2  --  Zoom: hexbin full city
 hb = axes[0,1].hexbin(lons, lats, gridsize=100, cmap="Blues", mincnt=1)
 fig.colorbar(hb, ax=axes[0,1], label="Trip count")
-axes[0,1].set_title("(b) Hexbin — density readable (Shneiderman: zoom)")
+axes[0,1].set_title("(b) Hexbin  --  density readable (Shneiderman: zoom)")
 
-# Panel 3 — Zoom: KDE contour on subsample
+# Panel 3  --  Zoom: KDE contour on subsample
 idx     = rng.choice(len(lons), 10_000, replace=False)
 kde     = gaussian_kde(np.vstack([lons[idx], lats[idx]]), bw_method=0.08)
 xi, yi  = np.mgrid[lons.min():lons.max():150j, lats.min():lats.max():150j]
 zi      = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
 cf = axes[1,0].contourf(xi, yi, zi, levels=12, cmap="Blues")
 fig.colorbar(cf, ax=axes[1,0], label="Density")
-axes[1,0].set_title("(c) KDE contour — shape revealed (Shneiderman: zoom)")
+axes[1,0].set_title("(c) KDE contour  --  shape revealed (Shneiderman: zoom)")
 
-# Panel 4 — Detail: Gulshan zone only
+# Panel 4  --  Detail: Gulshan zone only
 mask = (lons > 90.36) & (lons < 90.44) & (lats > 23.79) & (lats < 23.83)
 axes[1,1].hexbin(lons[mask], lats[mask], gridsize=60, cmap="Reds", mincnt=1)
 axes[1,1].set_title("(d) Gulshan zone detail (Shneiderman: detail)")
@@ -1366,7 +1366,7 @@ print("Saved: dhaka_overplotting.png")
 Using PySpark, build a pre-aggregated data cube for a simulated 100
 million-row e-commerce fact table with columns: \texttt{order\_date},
 \texttt{district}, \texttt{category}, and \texttt{revenue\_bdt}.
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Generate 100 million synthetic rows using Spark's built-in
         random functions.
   \item Use \texttt{DataFrame.cube()} to materialise all cuboids for the
@@ -1382,7 +1382,7 @@ million-row e-commerce fact table with columns: \texttt{order\_date},
 
 \pe \textbf{Streaming Dashboard Simulation (Python + InfluxDB).}
 Build a simulated streaming pipeline using Python threads:
-\begin{enumerate}[(a)]
+\begin{enumerate}[label=(\alph*)]
   \item Thread 1 (``producer''): generates 100 synthetic bKash
         transaction events per second, writing them to a Python queue.
   \item Thread 2 (``stream processor''): reads from the queue; aggregates
