@@ -232,7 +232,7 @@ in Chapter~\ref{ch:pipelines}.
 \caption{The data processing spectrum by velocity requirement}
 \label{tab:velocity-spectrum}
 \renewcommand{\arraystretch}{1.35}
-\begin{tabular}{L{2.2cm} L{1.6cm} L{3.2cm} L{3.4cm}}
+\begin{tabular}{L{2.2cm} L{2cm} L{3.2cm} L{3.4cm}}
 \toprule
 \textbf{Processing mode} & \textbf{Latency} & \textbf{Representative tools} & \textbf{Typical use case} \\
 \midrule
@@ -948,6 +948,22 @@ current queue depth, not yesterday's average); and anomaly detection in
 industrial systems (a turbine failure signal is valuable in real time,
 not eight hours later).
 
+\begin{keyinsight}{Lambda and Kappa Architectures}
+Many production systems need both low latency \emph{and} high
+accuracy---properties that are difficult to achieve simultaneously. The
+\textbf{Lambda architecture} (Nathan Marz, 2011) addresses this by
+running both a batch layer (for accurate, comprehensive historical
+analysis) and a speed layer (for low-latency approximate results) in
+parallel, merging their outputs in a serving layer. The cost is
+engineering complexity: every transformation must be implemented twice,
+in different frameworks. The \textbf{Kappa architecture} (Jay Kreps,
+2014) simplifies this by replacing the batch layer with a replay of the
+full event log through the stream processor---using Apache Kafka's
+message retention to make historical reprocessing possible through the
+streaming path. Both architectures are examined in depth in
+Chapter~\ref{ch:pipelines}.
+\end{keyinsight}
+
 Stream processing introduces engineering challenges that batch processing
 avoids. Records may arrive \emph{out of order} (a mobile device's
 network connection may be intermittent, causing events to be delayed and
@@ -982,21 +998,7 @@ Typical tools           & Hadoop MapReduce, Hive, Spark Batch & Kafka, Apache Fl
 \end{tabular}
 \end{table}
 
-\begin{keyinsight}{Lambda and Kappa Architectures}
-Many production systems need both low latency \emph{and} high
-accuracy---properties that are difficult to achieve simultaneously. The
-\textbf{Lambda architecture} (Nathan Marz, 2011) addresses this by
-running both a batch layer (for accurate, comprehensive historical
-analysis) and a speed layer (for low-latency approximate results) in
-parallel, merging their outputs in a serving layer. The cost is
-engineering complexity: every transformation must be implemented twice,
-in different frameworks. The \textbf{Kappa architecture} (Jay Kreps,
-2014) simplifies this by replacing the batch layer with a replay of the
-full event log through the stream processor---using Apache Kafka's
-message retention to make historical reprocessing possible through the
-streaming path. Both architectures are examined in depth in
-Chapter~\ref{ch:pipelines}.
-\end{keyinsight}
+
 
 %%====================================================================
 \section{Case Study: Walmart's Retail Analytics Platform}

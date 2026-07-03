@@ -614,7 +614,7 @@
 \begin{frame}{ETL vs.\ ELT: Comprehensive Comparison}
   \centering
   \renewcommand{\arraystretch}{1.45}
-  \begin{tabular}{p{2.8cm}p{4.3cm}p{4.3cm}}
+  \begin{tabular}{p{2.8cm}p{5cm}p{5cm}}
     \toprule
     \textbf{Dimension} & \textbf{ETL} & \textbf{ELT} \\
     \midrule
@@ -639,10 +639,9 @@
 %================================================================
 
 \begin{frame}{Data Quality: Six Dimensions (DAMA Framework)}
-  \begin{columns}[T]
-    \column{0.55\textwidth}
+ \centering
       \renewcommand{\arraystretch}{1.4}
-      \begin{tabular}{p{2.0cm}p{2.5cm}p{2.6cm}}
+      \begin{tabular}{p{2.0cm}p{4cm}p{7cm}}
         \toprule
         \textbf{Dimension} & \textbf{Definition} & \textbf{Big Data Example} \\
         \midrule
@@ -654,8 +653,12 @@
         \textbf{Uniqueness}  & No duplicate records & Same customer appearing 3 times with different IDs \\
         \bottomrule
       \end{tabular}
+ 
+\end{frame}
 
-    \column{0.42\textwidth}
+
+\begin{frame}{Data Quality: Six Dimensions (DAMA Framework)}
+  
       \begin{alertblock}{The ``Garbage In, Garbage Out'' Law}
         A sophisticated machine learning model trained on inaccurate, incomplete, or inconsistent data will produce \textbf{confidently wrong} predictions.  Data quality validation must happen \textbf{before} any analytics.
       \end{alertblock}
@@ -665,7 +668,7 @@
         \vspace{2pt}
         \textit{Source: IBM Big Data Hub, 2016}
       \end{exampleblock}
-  \end{columns}
+ 
 \end{frame}
 
 %----------------------------------------------------------------

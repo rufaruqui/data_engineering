@@ -255,8 +255,13 @@
                 \emph{and} vice versa; allows bidirectional query rewriting
         \end{itemize}
       \end{block}
-   
-    
+      \vspace{5pt}
+      \begin{alertblock}{The Semantic Gap Problem}
+        Even with perfect GLAV mappings, the \emph{meaning} of
+        \texttt{customer\_id} in the Sales DB $\neq$
+        \texttt{cust\_no} in the CRM — no formal system can resolve
+        this without \textbf{domain expertise}.
+      \end{alertblock}
 
     \column{0.47\textwidth}
       \begin{center}
@@ -268,12 +273,12 @@
         \node[box, fill=PUGold!30]  (q)   at (0, 3.8) {User Query (SQL)};
         \node[box, fill=PUNavy, text=white] (med) at (0, 2.8)
               {Mediator\\{\tiny global schema + rewriter}};
-        \node[box, fill=PUNavy!20]  (wa)  at (-2.2, 1.5) {Wrapper A\\{\tiny RDBMS}};
+        \node[box, fill=PUNavy!20]  (wa)  at (-1.8, 1.5) {Wrapper A\\{\tiny RDBMS}};
         \node[box, fill=PUNavy!20]  (wb)  at (0,    1.5) {Wrapper B\\{\tiny XML feed}};
-        \node[box, fill=PUNavy!20]  (wc)  at (2.2,  1.5) {Wrapper C\\{\tiny REST API}};
-        \node[box, fill=PUGreen!20] (sa)  at (-2.2, 0.3) {Source A};
+        \node[box, fill=PUNavy!20]  (wc)  at (1.8,  1.5) {Wrapper C\\{\tiny REST API}};
+        \node[box, fill=PUGreen!20] (sa)  at (-1.8, 0.3) {Source A};
         \node[box, fill=PUGreen!20] (sb)  at (0,    0.3) {Source B};
-        \node[box, fill=PUGreen!20] (sc)  at (2.2,  0.3) {Source C};
+        \node[box, fill=PUGreen!20] (sc)  at (1.8,  0.3) {Source C};
 
         \draw[arr] (q)  -- (med);
         \draw[arr] (med)-- (wa);
@@ -288,17 +293,8 @@
       \end{tikzpicture}
       \end{center}
   \end{columns}
-   
 \end{frame}
 
-\begin{frame}{Technical Contribution 1 — The Integration Stack}
-    \begin{alertblock}{The Semantic Gap Problem}
-        Even with perfect GLAV mappings, the \emph{meaning} of
-        \texttt{customer\_id} in the Sales DB $\neq$
-        \texttt{cust\_no} in the CRM — no formal system can resolve
-        this without \textbf{domain expertise}.
-      \end{alertblock}
-\end{frame}
 %----------------------------------------------------------------
 \begin{frame}{Technical Contribution 2 — Pay-As-You-Go Integration}
   \begin{columns}[T]
