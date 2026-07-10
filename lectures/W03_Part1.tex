@@ -92,10 +92,10 @@
 \title[CSE 4345 \textbar{} Week 3, Part 1]{CSE 4345: Big Data Analytics}
 \subtitle{Week 3, Part 1 \textemdash\ The Big Data Ecosystem: HDFS \&
           the Distributed Storage Foundation}
-\author[Dept.\ of CSE]{Department of Computer Science \& Engineering\\[4pt]
-       \small Premier University, Chittagong}
+\author[Dept.\ of CSE]{Rokan Uddin Faruqui \\ Professor \\ Department of Computer Science \& Engineering\\[4pt]
+       \small University of Chittagong, Chittagong}
 \institute{}
-\date{Semester 2026}
+\date{CSE, PUC, Spring 2026}
 
 %=================================================================
 \begin{document}
@@ -146,7 +146,7 @@
           \item HDFS read \& write paths
           \item High availability (Active / Standby NameNode)
           \item The small file problem
-          \item Ivy League alignment
+          % \item Ivy League alignment
           \item Student assessment pool
         \end{itemize}
       \end{exampleblock}
@@ -165,8 +165,7 @@
 %================================================================
 
 \begin{frame}{Why a New Storage Architecture?}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{block}{The 2003 Problem Statement}
         Google's web crawl produced petabytes of data that needed to be:
         \begin{itemize}
@@ -185,7 +184,11 @@
         \end{itemize}
       \end{alertblock}
 
-    \column{0.45\textwidth}
+    
+\end{frame}
+
+\begin{frame}{Why a New Storage Architecture?}
+ 
       \begin{exampleblock}{The Paradigm Shift}
         \begin{center}
         \begin{tikzpicture}[
@@ -220,7 +223,7 @@
       \begin{block}{The Fundamental Insight}
         \small \textbf{Moving computation is cheaper than moving data.}  A 100 GB input file costs seconds to process locally; copying it over a network costs minutes.
       \end{block}
-  \end{columns}
+  
 \end{frame}
 
 %----------------------------------------------------------------
@@ -285,7 +288,7 @@
 
 \begin{frame}{The Hadoop Ecosystem: Layered Architecture}
   \begin{center}
-  \begin{tikzpicture}[
+  \begin{tikzpicture}[scale=0.95,
       layer/.style={rectangle, draw=PUNavy!50, rounded corners=3pt,
                     minimum width=11.5cm, align=center, font=\small\bfseries},
       lbl/.style={font=\scriptsize\itshape, PUGray}
@@ -344,7 +347,7 @@
   \end{center}
   \vspace{2pt}
   \begin{alertblock}{Design Philosophy}
-    Each layer is \textbf{independently replaceable}.  YARN replaced MapReduce's resource manager in Hadoop 2.0, allowing Spark, Tez, and Storm to share the same HDFS cluster without rewriting data storage.
+   \footnotesize Each layer is \textbf{independently replaceable}.  YARN replaced MapReduce's resource manager in Hadoop 2.0, allowing Spark, Tez, and Storm to share the same HDFS cluster without rewriting data storage.
   \end{alertblock}
 \end{frame}
 
@@ -352,7 +355,7 @@
 \begin{frame}{Ecosystem Components: Roles at a Glance}
   \centering
   \renewcommand{\arraystretch}{1.38}
-  \begin{tabular}{p{1.8cm}p{1.5cm}p{7.0cm}}
+  \begin{tabular}{p{1.8cm}p{1.5cm}p{9.5cm}}
     \toprule
     \textbf{Component} & \textbf{Week} & \textbf{Role} \\
     \midrule
@@ -376,8 +379,7 @@
 
 %----------------------------------------------------------------
 \begin{frame}{The Economics of Commodity Hardware}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+   
       \begin{block}{Google's Original Design Mandate (GFS, 2003)}
         \textit{``The system is built from many inexpensive commodity components that often fail.  It must constantly monitor itself, detect, tolerate, and recover promptly from component failures.''}
       \end{block}
@@ -398,7 +400,11 @@
         \bottomrule
       \end{tabular}
 
-    \column{0.45\textwidth}
+    
+\end{frame}
+\begin{frame}{The Economics of Commodity Hardware}
+   
+      
       \begin{alertblock}{Design Consequence}
         At 1{,}000+ nodes, hardware failure is not an \textbf{exception}\textemdash it is \textbf{routine}.  HDFS must handle failures \emph{transparently} without operator intervention or data loss.
       \end{alertblock}
@@ -415,19 +421,19 @@
           Lock-in         & High     & None \\
           \bottomrule
         \end{tabular}
-        \vspace{4pt}
-        HDFS achieves \textbf{10$\times$ cost reduction} while adding fault tolerance by design.
-      \end{exampleblock}
-  \end{columns}
-\end{frame}
 
+       
+      \end{exampleblock}
+       \vspace{4pt}
+        HDFS achieves \textbf{10$\times$ cost reduction} while adding fault tolerance by design.
+   
+\end{frame}
 %================================================================
 \section{HDFS: Architecture \& Design}
 %================================================================
 
 \begin{frame}{HDFS Master / Worker Architecture}
-  \begin{columns}[T]
-    \column{0.48\textwidth}
+ 
       \begin{block}{Three Core Components}
         \begin{itemize}
           \item \textbf{NameNode} (1 active): the master.  Stores all filesystem \emph{metadata} in RAM.
@@ -444,7 +450,12 @@
         Separating these planes is a \textbf{critical design choice}: NameNode never touches data, so it can serve thousands of clients simultaneously.
       \end{alertblock}
 
-    \column{0.49\textwidth}
+    
+\end{frame}
+
+
+\begin{frame}{HDFS Master / Worker Architecture}
+   
       \begin{center}
       \begin{tikzpicture}[
           nn/.style={rectangle, rounded corners=3pt, fill=PUNavy,
@@ -463,7 +474,7 @@
           data/.style={-{Stealth[length=4pt]}, PUTeal!80, thick, dashed}
         ]
         % Client
-        \node[cl]  (cli)  at (0,   3.5) {Client};
+        \node[cl]  (cli)  at (-3.0,   3.5) {Client};
         % NameNode
         \node[nn]  (nn)   at (3.0, 3.5) {NameNode\\{\tiny (metadata in RAM)}};
         % Secondary NN
@@ -494,13 +505,11 @@
               {DataNodes send heartbeat every 3 s};
       \end{tikzpicture}
       \end{center}
-  \end{columns}
+  
 \end{frame}
-
 %----------------------------------------------------------------
 \begin{frame}{NameNode: The Brain of HDFS}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{block}{What the NameNode Stores (in RAM)}
         \begin{itemize}
           \item \textbf{Namespace tree}: complete directory hierarchy of all files and directories
@@ -514,7 +523,12 @@
         In-memory metadata = \textbf{microsecond lookups} (vs.\ disk-based = milliseconds).  But: the NameNode is a \textbf{single point of failure}.  If it crashes, the entire cluster is inaccessible until recovered.
       \end{alertblock}
 
-    \column{0.45\textwidth}
+     
+\end{frame}
+
+
+\begin{frame}{NameNode: The Brain of HDFS}
+   
       \begin{exampleblock}{NameNode Metadata Persistence}
         \begin{center}
         \begin{tikzpicture}[
@@ -523,9 +537,9 @@
                         font=\scriptsize, align=center},
             arr/.style={-{Stealth[length=3.5pt]}, PUNavy!70, thick}
           ]
-          \node[box, fill=PUNavy!20] (fs)  at (0, 2.8) {\textbf{FsImage}\\{\tiny filesystem snapshot on disk}};
-          \node[box, fill=PUOrange!20] (el) at (0, 1.7) {\textbf{Edit Log}\\{\tiny all changes since snapshot}};
-          \node[box, fill=PUNavy!70, text=white] (nn) at (0, 0.7)
+          \node[box, fill=PUNavy!20] (fs)  at (-3.5, 2.8) {\textbf{FsImage}\\{\tiny filesystem snapshot on disk}};
+          \node[box, fill=PUOrange!20] (el) at (2, 2.8) {\textbf{Edit Log}\\{\tiny all changes since snapshot}};
+          \node[box, fill=PUNavy!70, text=white] (nn) at (0, 1.7)
                 {\textbf{NameNode RAM}\\{\tiny FsImage $+$ replayed edits}};
           \node[box, fill=PUGold!25] (cp) at (0, -0.3)
                 {\textbf{Checkpoint}\\{\tiny Secondary NN merges FsImage $+$ Log}};
@@ -533,7 +547,7 @@
           \draw[arr] (fs)  -- (nn);
           \draw[arr] (el)  -- (nn);
           \draw[arr] (nn)  to[bend right=45] (cp);
-          \draw[arr] (cp)  to[bend right=45]
+          \draw[arr] (cp)  to[bend left=45]
                 node[right, font=\tiny]{new FsImage} (fs);
         \end{tikzpicture}
         \end{center}
@@ -542,13 +556,11 @@
       \begin{block}{Startup Sequence}
         \small NameNode loads \textbf{FsImage} from disk $\to$ replays all \textbf{Edit Log} entries $\to$ waits for DataNodes to report block locations $\to$ enters \emph{safe mode} until replication factor is met.
       \end{block}
-  \end{columns}
+ 
 \end{frame}
-
 %----------------------------------------------------------------
 \begin{frame}{Secondary NameNode: The Critical Misconception}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{alertblock}{Common Exam Mistake}
         \textbf{The Secondary NameNode is NOT a failover!}\\[4pt]
         Its name is misleading.  If the active NameNode crashes, the Secondary NameNode \textbf{cannot automatically take over}.  The cluster goes down.
@@ -565,7 +577,11 @@
         \textbf{Why needed?}  Without checkpointing, the Edit Log grows indefinitely, making NameNode restart slower and slower (it must replay the entire log).
       \end{block}
 
-    \column{0.45\textwidth}
+    
+\end{frame}
+
+\begin{frame}{Secondary NameNode: The Critical Misconception}
+  
       \begin{exampleblock}{Analogy: Bank Ledger}
         \small
         \begin{itemize}
@@ -579,13 +595,12 @@
       \begin{block}{True Failover: HDFS HA (Hadoop 2.0+)}
         \small \textbf{Active NameNode} + \textbf{Standby NameNode} share a \textbf{Quorum Journal Manager} (3+ JournalNodes).  Standby replays edits in real time.  On failover: ZooKeeper triggers automatic switch in $<$30 seconds.
       \end{block}
-  \end{columns}
+  
 \end{frame}
 
 %----------------------------------------------------------------
 \begin{frame}{DataNode: Block Storage in Practice}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{block}{What a DataNode Does}
         \begin{itemize}
           \item Stores data as \textbf{flat files on local disk} (one file per HDFS block)
@@ -600,8 +615,11 @@
       \begin{alertblock}{NameNode Detection of DataNode Failure}
         If a DataNode misses \textbf{10 consecutive heartbeats} (30 seconds), NameNode marks it as dead and schedules re-replication of all under-replicated blocks.
       \end{alertblock}
+ 
+\end{frame}
 
-    \column{0.45\textwidth}
+\begin{frame}{DataNode: Block Storage in Practice}
+  
       \begin{exampleblock}{Block Storage: How a 300 MB File is Stored}
         \begin{center}
         \begin{tikzpicture}[
@@ -613,9 +631,9 @@
                        font=\scriptsize\bfseries}
           ]
           \node[font=\small\bfseries, PUNavy] at (0,3.2) {sales\_2024.csv (300 MB)};
-          \node[blk, fill=PUNavy!20]  (b1) at (-1.5,2.5) {Block 1 (128 MB)};
+          \node[blk, fill=PUNavy!20]  (b1) at (-3.5,2.5) {Block 1 (128 MB)};
           \node[blk, fill=PUNavy!30]  (b2) at ( 0.5,2.5) {Block 2 (128 MB)};
-          \node[blk, fill=PUNavy!40]  (b3) at ( 2.5,2.5) {Block 3 (44 MB)};
+          \node[blk, fill=PUNavy!40]  (b3) at ( 3.5,2.5) {Block 3 (44 MB)};
 
           % Replicas
           \foreach \b/\x/\y/\col in {
@@ -636,13 +654,12 @@
         \end{tikzpicture}
         \end{center}
       \end{exampleblock}
-  \end{columns}
+ 
 \end{frame}
 
 %----------------------------------------------------------------
 \begin{frame}{Block Size: Why 128 MB?}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{block}{Traditional Filesystem Block Size: 4 KB}
         In a traditional OS (ext4, NTFS):
         \begin{itemize}
@@ -662,7 +679,11 @@
         \end{itemize}
       \end{exampleblock}
 
-    \column{0.45\textwidth}
+     
+\end{frame}
+
+\begin{frame}{Block Size: Why 128 MB?}
+  
       \begin{alertblock}{The Small File Problem}
         HDFS's Achilles' heel: if you store \textbf{millions of small files} (e.g., 1 KB each):
         \vspace{4pt}
@@ -681,16 +702,14 @@
           \item Ingest via \textbf{Kafka $\to$ micro-batch}: accumulate before writing to HDFS
         \end{itemize}
       \end{alertblock}
-  \end{columns}
+  \ 
 \end{frame}
-
 %================================================================
 \section{HDFS: Replication, Read \& Write Paths}
 %================================================================
 
 \begin{frame}{Rack-Aware Replication Strategy}
-  \begin{columns}[T]
-    \column{0.50\textwidth}
+ 
       \begin{block}{Default Replication Factor: 3}
         HDFS places three replicas of each block using a \textbf{rack-aware} policy to tolerate \emph{both} node failure and rack failure:
         \vspace{4pt}
@@ -709,7 +728,11 @@
         \end{itemize}
       \end{alertblock}
 
-    \column{0.47\textwidth}
+    
+\end{frame}
+
+\begin{frame}{Rack-Aware Replication Strategy}
+   
       \begin{center}
       \begin{tikzpicture}[
           rack/.style={rectangle, rounded corners=4pt, draw=PUNavy!40,
@@ -749,9 +772,8 @@
       \begin{block}{\small Configuring Replication}
         \small Default: \texttt{dfs.replication=3}.  Change per-file: \texttt{hdfs dfs -setrep 2 /path/file}
       \end{block}
-  \end{columns}
+ 
 \end{frame}
-
 %----------------------------------------------------------------
 \begin{frame}[fragile]{HDFS Read Path}
   \begin{columns}[T]
@@ -781,17 +803,17 @@
           lbl/.style={font=\tiny, sloped, above}
         ]
         \node[actor, fill=PUOrange!70, text=white] (cl) at (0,   5.0) {Client};
-        \node[actor, fill=PUNavy,       text=white] (nn) at (3.5, 5.0) {NameNode};
-        \node[actor, fill=PUTeal!70,    text=white] (d1) at (2.0, 2.8) {DataNode 1};
+        \node[actor, fill=PUNavy,       text=white] (nn) at (4.5, 5.0) {NameNode};
+        \node[actor, fill=PUTeal!70,    text=white] (d1) at (1.0, 0.8) {DataNode 1};
         \node[actor, fill=PUTeal!70,    text=white] (d2) at (4.5, 1.8) {DataNode 2};
 
         % Step lines
         \draw[arr, PUNavy!70]    (cl) -- node[lbl]{1~open(file)} (nn);
-        \draw[arr, PUNavy!70]    (nn) to[bend right=10]
+        \draw[arr, PUNavy!70]    (nn) to[bend right=30]
               node[lbl, below]{2~block locations} (cl);
         \draw[arr, PUTeal!80]    (cl) to[bend right=10]
               node[lbl]{3~read block 1} (d1);
-        \draw[arr, PUGreen!70]   (d1) to[bend right=10]
+        \draw[arr, PUGreen!70]   (d1) to[bend right=30]
               node[lbl, below]{4~data + checksum} (cl);
         \draw[arr, PUTeal!80]    (cl) to[bend left=5]
               node[lbl]{5~read block 2} (d2);
@@ -804,8 +826,7 @@
 
 %----------------------------------------------------------------
 \begin{frame}{HDFS Write Path: Pipeline Replication}
-  \begin{columns}[T]
-    \column{0.50\textwidth}
+ 
       \begin{block}{Write Sequence (7 Steps)}
         \begin{enumerate}
           \item Client calls \texttt{create()} on NameNode
@@ -822,7 +843,12 @@
         If a DataNode fails mid-pipeline, HDFS removes it, forms a \textbf{new 2-node pipeline}, and schedules background re-replication later.
       \end{alertblock}
 
-    \column{0.47\textwidth}
+     
+\end{frame}
+
+
+\begin{frame}{HDFS Write Path: Pipeline Replication}
+  
       \begin{center}
       \begin{tikzpicture}[
           actor/.style={rectangle, rounded corners=2pt,
@@ -831,11 +857,11 @@
           arr/.style={-{Stealth[length=3.5pt]}, thick},
           ack/.style={-{Stealth[length=3.5pt]}, dashed, PUGreen!80}
         ]
-        \node[actor, fill=PUOrange!70, text=white] (cl) at (0,   4.5) {Client};
-        \node[actor, fill=PUNavy,       text=white] (nn) at (4.0, 4.5) {NameNode};
-        \node[actor, fill=PUTeal!80,    text=white] (d1) at (0,   2.8) {DN1};
+        \node[actor, fill=PUOrange!70, text=white] (cl) at (-2.0,   6.5) {Client};
+        \node[actor, fill=PUNavy,       text=white] (nn) at (6.0, 6.5) {NameNode};
+        \node[actor, fill=PUTeal!80,    text=white] (d1) at (-2.0,   2.8) {DN1};
         \node[actor, fill=PUTeal!60,    text=white] (d2) at (2.0, 2.8) {DN2};
-        \node[actor, fill=PUTeal!40,    text=white] (d3) at (4.0, 2.8) {DN3};
+        \node[actor, fill=PUTeal!40,    text=white] (d3) at (6.0, 2.8) {DN3};
 
         % Requests
         \draw[arr, PUNavy!70] (cl) -- node[above, font=\tiny]{1~create} (nn);
@@ -848,11 +874,11 @@
         \draw[arr, PURed!70] (d2) -- node[above, font=\tiny]{5} (d3);
 
         % Acks back
-        \draw[ack] (d3) to[bend right=15]
+        \draw[ack] (d3) to[bend right=35]
               node[below, font=\tiny]{\textcircled{6} ack} (d2);
-        \draw[ack] (d2) to[bend right=15]
+        \draw[ack] (d2) to[bend right=35]
               node[below, font=\tiny]{ack} (d1);
-        \draw[ack] (d1) to[bend right=15]
+        \draw[ack] (d1) to[bend right=35]
               node[below, font=\tiny]{ack} (cl);
 
         % Close
@@ -860,15 +886,14 @@
               node[right, font=\tiny]{\textcircled{7}~close} (nn);
       \end{tikzpicture}
       \end{center}
-  \end{columns}
+  
 \end{frame}
-
 %----------------------------------------------------------------
 \begin{frame}[fragile]{HDFS in Practice: Key CLI Commands}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
+ 
       \begin{block}{Essential HDFS Shell Commands}
         \vspace{4pt}
+           \footnotesize
         \begin{lstlisting}[language=bash]
 # List files in HDFS directory
 hdfs dfs -ls /user/data/
@@ -896,9 +921,14 @@ hdfs dfsadmin -report
         \end{lstlisting}
       \end{block}
 
-    \column{0.45\textwidth}
+    
+\end{frame}
+
+\begin{frame}[fragile]{HDFS in Practice: Key CLI Commands}
+   
       \begin{exampleblock}{Useful Admin Commands}
         \vspace{4pt}
+        \footnotesize
         \begin{lstlisting}[language=bash]
 # Change replication factor for a file
 hdfs dfs -setrep 2 /data/file.csv
@@ -919,49 +949,55 @@ hdfs dfsadmin -safemode leave
 hdfs balancer -threshold 10
         \end{lstlisting}
       \end{exampleblock}
+     
+ 
+\end{frame}
+
+\begin{frame}[fragile]{HDFS in Practice: Key CLI Commands}
+   
+      
       \vspace{4pt}
       \begin{alertblock}{HDFS vs POSIX}
         HDFS is \textbf{not} a POSIX filesystem.  No random write support (append-only), no in-place updates, no \texttt{mmap}.  Designed exclusively for \textbf{write-once, read-many} workloads.
       \end{alertblock}
-  \end{columns}
+ 
 \end{frame}
+% %================================================================
+% \section{Ivy League Alignment}
+% %================================================================
 
-%================================================================
-\section{Ivy League Alignment}
-%================================================================
+% \begin{frame}{HDFS in Top University Curricula}
+%   \begin{columns}[T]
+%     \column{0.55\textwidth}
+%       \begin{block}{MIT 6.830 — Database Systems (Madden, Stonebraker)}
+%         \small MIT uses HDFS/GFS as the canonical case study for \textbf{distributed file system design trade-offs}:
+%         \begin{itemize}
+%           \item \textbf{Strong consistency vs.\ availability}: NameNode is a CP system\textemdash consistent but unavailable during NN failure
+%           \item \textbf{SPOF analysis}: The single NameNode is the main architectural weakness; HA design is a distributed-systems engineering exercise
+%           \item \textbf{Metadata in RAM}: A deliberate trade-off\textemdash fast access in exchange for memory limits on namespace size ($\approx$1 billion files for 128 GB NameNode RAM)
+%         \end{itemize}
+%         \vspace{4pt}
+%         \textbf{Key exam question at MIT 6.830:}\\
+%         \textit{``How does HDFS enforce consistency without a distributed lock manager?''} (Answer: \textbf{leases} on open files; NameNode is the sole authority on block locations.)
+%       \end{block}
 
-\begin{frame}{HDFS in Top University Curricula}
-  \begin{columns}[T]
-    \column{0.55\textwidth}
-      \begin{block}{MIT 6.830 — Database Systems (Madden, Stonebraker)}
-        \small MIT uses HDFS/GFS as the canonical case study for \textbf{distributed file system design trade-offs}:
-        \begin{itemize}
-          \item \textbf{Strong consistency vs.\ availability}: NameNode is a CP system\textemdash consistent but unavailable during NN failure
-          \item \textbf{SPOF analysis}: The single NameNode is the main architectural weakness; HA design is a distributed-systems engineering exercise
-          \item \textbf{Metadata in RAM}: A deliberate trade-off\textemdash fast access in exchange for memory limits on namespace size ($\approx$1 billion files for 128 GB NameNode RAM)
-        \end{itemize}
-        \vspace{4pt}
-        \textbf{Key exam question at MIT 6.830:}\\
-        \textit{``How does HDFS enforce consistency without a distributed lock manager?''} (Answer: \textbf{leases} on open files; NameNode is the sole authority on block locations.)
-      \end{block}
-
-    \column{0.42\textwidth}
-      \begin{exampleblock}{Harvard CS265 — Big Data Systems (Idreos)}
-        \small Harvard's course emphasises the \textbf{storage hierarchy} impact on algorithm design:
-        \vspace{4pt}
-        \begin{itemize}
-          \item HDFS abstracts the disk and network into a \textbf{single storage namespace}
-          \item Algorithms must be designed to \textbf{minimise the number of passes} over HDFS data (each full pass = petabytes of I/O)
-          \item Harvard uses the concept of \textbf{I/O complexity} as a complexity measure, replacing time complexity for big data algorithms
-        \end{itemize}
-      \end{exampleblock}
-      \vspace{4pt}
-      \begin{alertblock}{Stanford CS246 (Leskovec)}
-        \textit{``We assume throughout this course that data lives in HDFS and algorithms must process it in a small number of sequential passes.  Random access is forbidden.''}\\[4pt]
-        This single assumption drives the entire MapReduce, Spark, and streaming design space.
-      \end{alertblock}
-  \end{columns}
-\end{frame}
+%     \column{0.42\textwidth}
+%       \begin{exampleblock}{Harvard CS265 — Big Data Systems (Idreos)}
+%         \small Harvard's course emphasises the \textbf{storage hierarchy} impact on algorithm design:
+%         \vspace{4pt}
+%         \begin{itemize}
+%           \item HDFS abstracts the disk and network into a \textbf{single storage namespace}
+%           \item Algorithms must be designed to \textbf{minimise the number of passes} over HDFS data (each full pass = petabytes of I/O)
+%           \item Harvard uses the concept of \textbf{I/O complexity} as a complexity measure, replacing time complexity for big data algorithms
+%         \end{itemize}
+%       \end{exampleblock}
+%       \vspace{4pt}
+%       \begin{alertblock}{Stanford CS246 (Leskovec)}
+%         \textit{``We assume throughout this course that data lives in HDFS and algorithms must process it in a small number of sequential passes.  Random access is forbidden.''}\\[4pt]
+%         This single assumption drives the entire MapReduce, Spark, and streaming design space.
+%       \end{alertblock}
+%   \end{columns}
+% \end{frame}
 
 %================================================================
 \section{Student Assessment Pool}
