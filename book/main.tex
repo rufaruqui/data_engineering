@@ -30,39 +30,55 @@
 %----------------------------------------------------------------------
 \frontmatter
 
-% Title page
-\begin{titlepage}
-  \centering
-  \vspace*{2cm}
-  \color{DEBlue}
-  \rule{\linewidth}{2pt}\\[12pt]
-  {\sffamily\fontsize{36}{40}\selectfont\bfseries Data Engineering}\\[10pt]
-  {\sffamily\Large\color{DEBlue!70}
-    Distributed Systems, Scalable Processing,\\[4pt]
-    and Modern Architectures}\\[12pt]
-  \rule{\linewidth}{0.8pt}\\[2cm]
-  {\large Rokan Uddin Faruqui}\\[6pt]
-  {\normalsize Professor, Department of Computer Science \& Engineering\\
-  University of Chittagong}\\[3cm]
-  \vfill
-  {\sffamily\color{DEGray} 2026}
-\end{titlepage}
+% Cover page (from cover_v2.pdf — compile cover_v2.tex first if cover_v2.pdf is missing)
+\includepdf[pages=1]{cover_v7.pdf}
+%\includepdf[pages=1, fitpaper=true]{cover.pdf}
 
-% Copyright page
+% Title + copyright page (single page between cover and ToC)
+\cleardoublepage
 \thispagestyle{empty}
-\vspace*{\fill}
-% \noindent
-% \textcopyright\ 2026 Rokan Uddin Faruqui.
+\begin{center}
+  \vspace*{2.2cm}
 
-% \noindent
-% All rights reserved. No part of this publication may be reproduced,
-% stored in a retrieval system, or transmitted in any form or by any means,
-% electronic, mechanical, photocopying, recording, or otherwise,
-% without the prior written permission of the author.
+  {\color{DEBlue}\rule{\textwidth}{1.5pt}}
+  \vspace{0.5cm}
 
-\noindent
-\textit{First Edition, 2026.}
-\vspace{2cm}
+  {\sffamily\Huge\bfseries\color{DEBlue} Data Engineering}
+
+  \vspace{0.35cm}
+
+  {\sffamily\Large\color{DEBlue!75}
+    Distributed Systems, Scalable Processing,\\[4pt]
+    and Modern Architectures}
+
+  \vspace{0.35cm}
+  {\color{DEBlue}\rule{\textwidth}{1.5pt}}
+
+  \vspace{1.4cm}
+
+  {\sffamily\large\bfseries \sc Rokan Uddin Faruqui}\\[5pt]
+  {\sffamily\small Professor, Department of Computer Science \& Engineering}\\[2pt]
+  {\sffamily\small University of Chittagong}
+
+  \vspace{1.2cm}
+
+  {\sffamily\small\color{DEGray}
+    Lecture notes for \textbf{Big Data Analytics/Data Engineering} courses.\\[3pt] 
+    Suitable for senior undergraduate and postgraduate study.}
+
+  \vfill
+
+  \noindent{\color{DEBlue!30}\rule{\textwidth}{0.6pt}}
+  \vspace{0.35cm}
+
+  {\sffamily\small\color{DEGray}
+    \textit{First Edition, 2026.}\quad
+    Licensed under \textbf{CC~BY~4.0} ---
+    free to use, adapt, and distribute with attribution.\\[3pt]
+    \texttt{creativecommons.org/licenses/by/4.0}}
+
+  \vspace{0.4cm}
+\end{center}
 
 % Table of contents
 \tableofcontents
@@ -94,17 +110,17 @@
 \input{ch07}
 
 %%% Part V: Data Pipelines and Modern Integration
-% \part{Data Pipelines and Modern Integration}
-% \input{ch08}
+\part{Data Pipelines and Modern Integration}
+\input{ch08}
 
 %%% Part VI: Insight Delivery
-% \part{Insight Delivery}
-% \input{ch09}
-% \input{ch10}
+\part{Insight Delivery}
+\input{ch09}
+\input{ch10}
 
 %%% Part VII: The Modern Data Stack
-% \part{The Modern Data Stack}
-% \input{ch11}
+\part{The Modern Data Stack}
+\input{ch11}
 
 %----------------------------------------------------------------------
 % BACK MATTER

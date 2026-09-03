@@ -1,0 +1,1750 @@
+%% ch10.tex — Chapter 10: Domain Applications: Social Networks,
+%%                         Time Series, and Healthcare
+%% Part of "Data Engineering" textbook
+
+\chapter{Domain Applications: Social Networks, Time Series, and Healthcare}
+\label{ch:domain-apps}
+
+\epigraph{\textit{``Big data hubris is the often implicit assumption that
+big data are a substitute for, rather than a supplement to, traditional
+data collection and analysis.''}}{David Lazer, Ryan Kennedy, Gary King
+\& Alessandro Vespignani, \textit{Science}, 343(6176), 2014}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain four structural properties of social media graphs---power-law
+        degree distribution, small-world diameter, asymmetric directed
+        edges, and community structure---and state the implications of each
+        for analysis at big data scale.
+  \item Describe the Louvain community detection algorithm: its modularity
+        objective, two-phase greedy procedure, and $O(n \log n)$ complexity,
+        and explain why it is preferred over spectral clustering for
+        billion-node graphs.
+  \item Define influence maximisation, state Kempe, Kleinberg \&
+        Tardos's NP-hardness result and their greedy $(1-1/e)$
+        approximation guarantee, and identify which nodes to seed for
+        maximum information spread.
+  \item Apply VADER sentiment analysis to social media text, interpret
+        the compound score, and describe how VADER handles capitalisation,
+        punctuation, degree modifiers, and negation differently from
+        bag-of-words approaches.
+  \item Explain what makes time series data fundamentally different from
+        i.i.d.\ tabular data: autocorrelation, seasonality, trend, and
+        non-stationarity, and describe how ARIMA$(p,d,q)$ addresses each.
+  \item Describe Facebook Prophet's additive decomposition
+        $y(t) = g(t) + s(t) + h(t) + \varepsilon(t)$, explain how
+        automatic changepoint detection and Fourier seasonality work,
+        and explain why the model is preferred over ARIMA for business
+        forecasting at scale.
+  \item Describe two anomaly detection methods for time series---STL
+        decomposition with residual IQR thresholding and Isolation Forest
+        ---and explain the circumstances under which each is appropriate.
+  \item Design a vectorised batch forecasting pipeline using PySpark's
+        \code{applyInPandas} that fits one Prophet model per partition
+        across thousands of time series simultaneously.
+  \item Identify and contrast four healthcare data modalities---EHR/FHIR,
+        genomics (VCF/Parquet), wearables (Kafka streaming), and medical
+        imaging (DICOM)---and select the appropriate storage, processing,
+        and privacy technique for each.
+  \item Explain three privacy-preserving techniques for healthcare analytics
+        ---safe harbour de-identification, differential privacy, and
+        federated learning---and identify which regulatory framework
+        (HIPAA, GDPR, or CCPA) mandates each.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+The preceding nine chapters built the complete data engineering stack:
+distributed storage (Chapter~\ref{ch:hdfs}), batch processing
+(Chapter~\ref{ch:mapreduce}), resource management and file formats
+(Chapter~\ref{ch:formats}), in-memory processing with Spark
+(Chapter~\ref{ch:spark}), SQL at scale (Chapter~\ref{ch:sql-scale}),
+streaming pipelines and data lakes (Chapter~\ref{ch:pipelines}),
+and visualization (Chapter~\ref{ch:visualization}).
+This chapter applies the complete stack to three high-impact application
+domains that collectively define where big data systems deliver the most
+measurable value: social media analytics, time series forecasting, and
+healthcare.
+
+Each domain presents a distinct combination of data characteristics
+(graph-structured, temporally ordered, and privacy-sensitive respectively)
+and a distinct set of algorithmic techniques. All three domains share the
+same underlying infrastructure---HDFS or object storage for persistence,
+Kafka for event ingestion, Spark for distributed processing, and Grafana
+or Superset for visualization---demonstrating that the engineering stack
+built in previous chapters is not domain-specific but universally applicable.
+
+The chapter closes with three research spotlights and a case study
+that illustrates both the power and the peril of big data in public
+health: the rise and fall of Google Flu Trends, and the more robust
+Prophet-based syndromic surveillance architecture that replaced it.
+
+%%====================================================================
+\section{Three Domains of Big Data Application}
+\label{sec:domain-overview}
+%%====================================================================
+
+The same infrastructure serves radically different application domains.
+Table~\ref{tab:three-domains} summarises the characteristics, tools,
+and primary analytical tasks for the three domains covered in this chapter.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{3.0cm}p{3.0cm}p{3.2cm}}
+  \toprule
+  \textbf{Domain} & \textbf{Data Characteristics}
+    & \textbf{Primary Algorithms} & \textbf{Domain Tools} \\
+  \midrule
+  Social Media
+    & Graph-structured, temporal, text-heavy, multimedia
+    & Louvain, PageRank, influence maximisation, VADER, LSH
+    & GraphX, NetworkX, Neo4j, VADER \\
+  Time Series
+    & Ordered, autocorrelated, seasonal, non-stationary
+    & ARIMA, Prophet, LSTM, STL, Isolation Forest
+    & statsmodels, Prophet, Spark MLlib \\
+  Healthcare
+    & Semi-structured EHR, genomic, streaming wearables, binary imaging
+    & Random Forest, Gradient Boosting, CNN, AlphaFold
+    & FHIR, GATK, TensorFlow, HAPI \\
+  \midrule
+  \multicolumn{4}{c}{\textit{Shared infrastructure: HDFS / S3 $\cdot$
+    Kafka $\cdot$ Spark $\cdot$ Hive $\cdot$ Grafana / Superset}} \\
+  \bottomrule
+\end{tabular}
+\caption{Three big data application domains. All three share the same
+         distributed infrastructure; domain-specific tools sit above
+         the common stack.}
+\label{tab:three-domains}
+\end{table}
+
+%%====================================================================
+\section{Domain A: Social Media Analytics}
+\label{sec:social-media}
+%%====================================================================
+
+Social media platforms are among the largest-scale data systems humans
+have ever built. Twitter (now X) processes 500 million posts per day;
+Facebook logs 100 billion interactions; TikTok serves 1 billion video
+views. In many markets, Facebook remains the primary channel for crisis
+communication, political discourse, and commercial marketing. The data they generate is
+graph-structured, temporally indexed, linguistically complex, and at a
+scale that requires the full Hadoop/Spark stack to process.
+
+%--------------------------------------------------------------------
+\subsection{Graph Structure and Scale}
+\label{subsec:social-graph}
+%--------------------------------------------------------------------
+
+Social platforms are fundamentally \term{directed graphs}: users are
+nodes; following, friending, retweeting, and replying are edges. The
+properties of these graphs differ dramatically from the random graphs
+assumed by naive statistical models.
+
+\begin{defbox}{Social Network Graph Properties}
+A \textbf{social network graph} $G = (V, E)$ has four structural
+properties that distinguish it from random graphs:
+\begin{enumerate}
+  \item \textbf{Power-law degree distribution}: the fraction of nodes
+        with degree $k$ follows $P(k) \propto k^{-\alpha}$ for some
+        $\alpha \in (2, 3)$. A small number of ``hub'' nodes (celebrities,
+        media accounts) have millions of followers; the vast majority
+        have tens. This is called a \emph{scale-free network} after
+        Barabási \& Albert (1999).
+  \item \textbf{Small-world property}: despite billions of nodes, the
+        average shortest path between any two nodes is very short---Kwak
+        et al.\ (2010) found 4.12 hops on Twitter's 41.7-million-node
+        graph. Milgram's ``six degrees of separation'' (1967) observed
+        this empirically in 1967; it is now a mathematical consequence
+        of power-law degree distributions.
+  \item \textbf{Asymmetric directed edges}: on Twitter, only 22.1\%
+        of following relationships are reciprocal. On Facebook (undirected,
+        mutual friendship), reciprocity is 100\%. The directedness of the
+        graph determines how information propagates.
+  \item \textbf{Community structure}: nodes cluster into densely
+        interconnected groups (communities) that are sparsely connected
+        to other communities. Political echo chambers, professional
+        networks, and fan communities are all examples.
+\end{enumerate}
+\end{defbox}
+
+\textbf{Storage and processing.} A social graph with $N$ nodes and $M$
+edges requires $O(N + M)$ storage. Twitter's 2010 graph had
+$N = 41.7$~million users and $M = 1.47$~billion directed edges,
+storing roughly 40~GB of compressed adjacency data. At 2024 scale
+($N = 500$~million users), the full following graph is $\sim$500~GB
+compressed. Storing and querying this graph requires distributed systems:
+\begin{itemize}
+  \item \textbf{Apache GraphX} (part of Spark) for large-scale iterative
+        graph algorithms (PageRank, connected components, triangle count)
+        running on the full graph in Spark's in-memory model.
+  \item \textbf{Neo4j} for online, low-latency graph queries
+        (``show me the mutual friends of user X and user Y'')
+        where Spark's batch latency would be unacceptable.
+  \item \textbf{Apache Hive / Parquet} for offline analytical queries
+        over the graph's edge list (``how many edges were added in Q1 2024?'').
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{Community Detection: The Louvain Algorithm}
+\label{subsec:community}
+%--------------------------------------------------------------------
+
+A \term{community} in a graph is a group of nodes that are more densely
+connected to each other than to the rest of the graph. Detecting communities
+reveals interest groups, political factions, professional clusters, or
+coordinated bot networks. It is one of the most practically important
+operations in social network analysis.
+
+\begin{defbox}{Modularity and the Louvain Algorithm (Blondel et al., 2008)}
+\textbf{Modularity} $Q$ measures the fraction of edges that fall within
+communities minus the expected fraction under a null model of random
+edge placement:
+\[
+  Q = \frac{1}{2m} \sum_{i,j}
+  \left[ A_{ij} - \frac{k_i k_j}{2m} \right] \delta(c_i, c_j)
+\]
+where $A_{ij}$ is the adjacency matrix, $k_i$ is node $i$'s degree,
+$m$ is the total number of edges, and $\delta(c_i, c_j) = 1$ if nodes
+$i$ and $j$ are in the same community.
+
+The \textbf{Louvain algorithm} maximises $Q$ in two phases repeated
+iteratively:
+\begin{enumerate}
+  \item \textbf{Local optimisation:} each node is moved to the neighbour
+        community that maximises the modularity gain $\Delta Q$. A node
+        stays in its own community if no move improves $Q$. This passes
+        over all nodes until no further improvement is possible.
+  \item \textbf{Network aggregation:} communities become super-nodes.
+        Edges between communities become weighted edges between
+        super-nodes. The algorithm is then applied to the aggregated
+        network.
+\end{enumerate}
+Complexity: $O(n \log n)$ on sparse graphs---scalable to graphs with
+hundreds of millions of nodes.
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={Community detection with Louvain
+  in Python (networkx + python-louvain)}]
+import networkx as nx
+import community as community_louvain   # pip install python-louvain
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# Construct a simple directed follow graph (Twitter-style)
+# In production: load edge list from HDFS Parquet via Spark
+G_directed = nx.DiGraph()
+edges = [
+    (1, 2), (2, 1), (1, 3), (3, 1),
+    (2, 3), (3, 4), (4, 5), (5, 4),
+    (4, 6), (6, 5), (5, 7), (7, 5),
+    (1, 8), (8, 4),   # bridge nodes
+]
+G_directed.add_edges_from(edges)
+
+# Louvain requires undirected input
+G = G_directed.to_undirected()
+
+# --- Apply Louvain ---
+partition = community_louvain.best_partition(G)
+modularity = community_louvain.modularity(partition, G)
+print(f"Modularity Q = {modularity:.4f}")
+
+communities = {}
+for node, comm_id in partition.items():
+    communities.setdefault(comm_id, []).append(node)
+
+for comm_id, members in sorted(communities.items()):
+    print(f"  Community {comm_id}: nodes {sorted(members)}")
+
+# Visualise
+pos    = nx.spring_layout(G, seed=42)
+colors = [partition[n] for n in G.nodes()]
+fig, ax = plt.subplots(figsize=(8, 6))
+nx.draw_networkx(G, pos=pos, node_color=colors,
+                 cmap=plt.cm.Set1, node_size=500,
+                 font_color="white", ax=ax)
+ax.set_title(f"Louvain Communities  (Q = {modularity:.3f})")
+ax.axis("off")
+plt.tight_layout()
+plt.savefig("louvain_communities.png", dpi=150)
+print("Saved: louvain_communities.png")
+\end{lstlisting}
+
+\begin{systemdesign}{Scaling Community Detection to Billion-Node Graphs}
+For graphs with hundreds of millions of nodes, Python's
+\texttt{python-louvain} library is too slow. Production implementations use:
+\begin{itemize}
+  \item \textbf{Apache Spark GraphX}: the Pregel API implements
+        iterative vertex-program algorithms including Louvain phases;
+        the full graph is partitioned across executors and edges are
+        shuffled only when communities cross partition boundaries.
+  \item \textbf{Neo4j Graph Data Science (GDS) library}: implements
+        Louvain natively with a streaming result API; suitable for
+        online, low-latency community refresh.
+  \item \textbf{GraphSAGE / Graph Neural Networks} (Hamilton et al.,
+        2017): for graphs where node feature attributes (text, image
+        embeddings) should inform community assignment, GNNs learn
+        community representations end-to-end.
+\end{itemize}
+For the \emph{full} Twitter graph at 500 million nodes, Louvain in
+Spark GraphX requires approximately 3--5 iterations to converge,
+with each iteration involving one full shuffle of the edge list.
+On a 100-executor Spark cluster with 16~GB RAM per executor, this
+completes in $\sim$20--40 minutes.
+\end{systemdesign}
+
+%--------------------------------------------------------------------
+\subsection{Influence Maximisation}
+\label{subsec:influence}
+%--------------------------------------------------------------------
+
+Given a social network and a budget of $k$ ``seed'' users, the
+\term{influence maximisation} problem asks: which $k$ users should
+receive an initial message so that the maximum number of users are
+ultimately reached through organic sharing?
+
+This problem has commercial applications (viral marketing campaigns,
+product seeding), public health applications (vaccination campaign
+targeting), and disinformation applications (coordinated bot networks
+that seed false narratives at high-PageRank nodes).
+
+\begin{defbox}{Influence Maximisation: NP-Hard with
+  $(1 - 1/e)$ Approximation (Kempe, Kleinberg \& Tardos, 2003)}
+Under the \textbf{independent cascade model}, each edge $(u, v)$ has
+a probability $p_{uv}$ that user $u$ activates user $v$ in a single time
+step. The influence $\sigma(S)$ of a seed set $S$ is the expected
+number of activated nodes after cascades run to completion.
+
+\textbf{Problem:} Find $S^* = \arg\max_{|S| \leq k} \sigma(S)$.
+
+\textbf{Hardness:} The problem is NP-hard; $\sigma(S)$ is
+\#P-hard to compute exactly.
+
+\textbf{Greedy approximation:} The function $\sigma(\cdot)$ is
+\emph{monotone submodular}: adding a node to a larger set provides no
+more benefit than adding it to a smaller set. Nemhauser's theorem
+guarantees that the greedy algorithm---at each step, add the node that
+maximises the marginal gain $\sigma(S \cup \{v\}) - \sigma(S)$---achieves
+\[
+  \sigma(S_{\text{greedy}}) \geq \left(1 - \frac{1}{e}\right) \sigma(S^*)
+  \approx 0.632 \cdot \sigma(S^*)
+\]
+This is the best polynomial-time approximation ratio possible unless
+P = NP.
+\end{defbox}
+
+\begin{keyinsight}{PageRank vs.\ Follower Count for Seeding}
+Kwak et al.\ (2010) demonstrated that users ranked by \emph{follower count}
+and users ranked by \emph{PageRank} are substantially different populations.
+A user with 1 million followers who is followed by many high-PageRank users
+(e.g., other celebrities and media accounts) has higher influence than a
+celebrity with 5 million followers who is followed by low-influence accounts.
+For influence maximisation campaigns, seeding at high-PageRank nodes
+produces measurably more cascade depth than seeding at high-follower-count
+nodes. This is because PageRank correctly captures the \emph{recursive}
+nature of influence: being followed by influential people makes you more
+influential.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Sentiment Analysis: VADER}
+\label{subsec:sentiment}
+%--------------------------------------------------------------------
+
+Sentiment analysis assigns a polarity (positive, negative, or neutral)
+to a piece of text. At social media scale---millions of tweets per
+hour---it provides real-time measures of public opinion, brand sentiment,
+and crisis emotion.
+
+Standard bag-of-words and TF-IDF approaches fail on social media text
+because they ignore the conventions of online communication:
+capitalisation for emphasis, punctuation for intensity, emojis for
+emotion, and degree modifiers (``very'', ``kind of'', ``absolutely'')
+that shift sentiment magnitude.
+
+\begin{defbox}{VADER: Valence Aware Dictionary and sEntiment Reasoner
+  (Hutto \& Gilbert, 2014)}
+\textbf{VADER} is a lexicon-and-rule-based sentiment analyser specifically
+designed for social media text. Its lexicon assigns a sentiment valence
+score to 7{,}517 lexical features (words, emojis, slang terms).
+Five heuristic rules modify these base scores:
+\begin{enumerate}
+  \item \textbf{Capitalisation}: \texttt{GREAT} is scored higher than
+        \texttt{great} (amplification factor: $+0.733$).
+  \item \textbf{Punctuation}: each exclamation mark adds $+0.292$ to
+        a positive score up to a maximum of three.
+  \item \textbf{Degree modifiers}: ``very good'' $>$ ``good'' $>$
+        ``kind of good''. Boosters add $+0.293$; dampeners subtract.
+  \item \textbf{Negation}: a negation word within three positions
+        of a sentiment word inverts and attenuates the score by
+        multiplying by $-0.74$: ``not good'' $\to$ negative.
+  \item \textbf{Contrastive conjunctions}: ``but'' signals that the
+        clause following it is more salient than the clause preceding.
+\end{enumerate}
+Output: a \textbf{compound score} $\in [-1, +1]$. Convention:
+$> 0.05$ is positive; $< -0.05$ is negative; otherwise neutral.
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={VADER sentiment in a PySpark
+  pipeline (UDF on tweet DataFrame)}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf, col, window, avg
+from pyspark.sql.types import FloatType
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+spark = SparkSession.builder.appName("TwitterSentiment").getOrCreate()
+spark.sparkContext.setLogLevel("WARN")
+
+# Broadcast the VADER analyser  --  one object reused per executor
+sid_broadcast = spark.sparkContext.broadcast(SentimentIntensityAnalyzer())
+
+@udf(returnType=FloatType())
+def vader_compound(text: str) -> float:
+    if text is None:
+        return 0.0
+    sid = sid_broadcast.value
+    return float(sid.polarity_scores(text)["compound"])
+
+# Load Twitter stream from Kafka (see ch08 for Kafka source config)
+tweets_df = (spark.readStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", "kafka:9092")
+    .option("subscribe", "twitter-bd-2024")
+    .load()
+    .selectExpr("CAST(value AS STRING) AS text",
+                "timestamp"))
+
+# Apply VADER UDF
+sentiment_df = tweets_df.withColumn(
+    "compound", vader_compound(col("text")))
+
+# Aggregate: average sentiment per 5-minute tumbling window
+agg_df = (sentiment_df
+    .groupBy(window(col("timestamp"), "5 minutes"))
+    .agg(
+        avg("compound").alias("avg_sentiment"),
+        count("*").alias("tweet_count")
+    ))
+
+# Stream to console (replace with InfluxDB sink for Grafana)
+query = (agg_df.writeStream
+    .outputMode("complete")
+    .format("console")
+    .option("truncate", False)
+    .start())
+
+query.awaitTermination()
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Trend Detection and the Twitter News-Media Finding}
+\label{subsec:trends}
+%--------------------------------------------------------------------
+
+Kwak et al.\ (2010) analysed 106 million tweets and found that 85\%
+of Twitter's trending topics were \emph{headline news events}---not
+personal conversations or social memes. The median duration of a
+trending topic was 17.5 hours, matching the lifespan of a news cycle.
+Breaking news topics reached their peak tweet rate within 15 minutes
+of the event---faster than most professional news agencies.
+
+This finding established Twitter as a \term{real-time news medium}
+rather than a social network, with profound implications for public
+health surveillance: if Twitter reflects real-world events within
+minutes, then flu-related tweets should correlate with actual flu
+incidence faster than physician-reported surveillance data.
+
+\textbf{Trend detection algorithm.} Twitter's trending topics algorithm
+detects sudden relative spikes in phrase frequency using a variant of
+Locality-Sensitive Hashing (LSH) on character $n$-grams. A phrase that
+normally appears 10 times per hour and suddenly appears 10{,}000 times
+per hour is ``trending''---regardless of its absolute frequency. This
+\emph{relative} thresholding is what distinguishes a trend from simply
+a very popular phrase.
+
+\begin{caution}{Ethical Risks of Social Media Analytics}
+The same techniques that enable flu surveillance and brand monitoring
+enable political surveillance and targeted manipulation:
+\begin{itemize}
+  \item Sentiment analysis on political posts can be weaponised to
+        identify and suppress dissent---flagging negative sentiment
+        about government policy for content removal.
+  \item Influence maximisation can be used by coordinated inauthentic
+        behaviour campaigns (bot networks) to artificially amplify
+        misinformation by seeding it at high-PageRank nodes.
+  \item Community detection can expose political affiliations, religious
+        identities, or sexual orientations of users who have not
+        consented to disclose them---violating privacy through
+        \emph{inference}.
+\end{itemize}
+Any deployment of social media analytics must include an explicit
+purpose-limitation policy (stating what the analysis will and will not
+be used for) and an independent algorithmic audit.
+\end{caution}
+
+%%====================================================================
+\section{Domain B: Time Series Analysis}
+\label{sec:timeseries}
+%%====================================================================
+
+Time series data is fundamentally different from i.i.d.\ tabular data.
+A transaction table can be analysed by shuffling its rows without loss
+of information. A time series cannot: the temporal order of observations
+is itself the information. This section covers the properties that make
+time series special, the classical ARIMA model, Facebook Prophet's
+modern approach to large-scale forecasting, and two anomaly detection methods.
+
+%--------------------------------------------------------------------
+\subsection{Properties of Time Series Data}
+\label{subsec:ts-properties}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Time Series: Five Structural Properties}
+A \textbf{time series} $\{y_t\}_{t=1}^{T}$ is a sequence of observations
+indexed by time. Five structural properties must be understood before
+modelling:
+\begin{enumerate}
+  \item \textbf{Autocorrelation}: $y_t$ is correlated with $y_{t-1}$,
+        $y_{t-2}$, \ldots at multiple lags. Standard regression that
+        assumes $\text{Cov}(y_t, y_{t-k}) = 0$ for $k > 0$ is
+        invalid---its parameter estimates are unbiased but its standard
+        errors and $p$-values are wrong.
+  \item \textbf{Trend}: a long-run upward or downward drift.
+        Trend must be removed or modelled explicitly; a model that ignores
+        a positive trend will persistently under-predict future values.
+  \item \textbf{Seasonality}: regular cyclical patterns that repeat
+        with a fixed period---daily (web traffic peaks in the evening),
+        weekly (retail sales peak on Friday), or annual (flu season peaks
+        in January--February). Multiple simultaneous seasonalities are
+        common.
+  \item \textbf{Non-stationarity}: the mean or variance of the series
+        changes over time. Most classical models (ARIMA, regression)
+        require \emph{stationarity} (constant mean and variance).
+        Non-stationarity is typically removed by \emph{differencing}:
+        $\nabla y_t = y_t - y_{t-1}$.
+  \item \textbf{Irregularity (Holiday Effects)}: one-off events
+        (public holidays, national elections, product launches, natural
+        disasters) cause sharp deviations from the seasonal pattern.
+        These cannot be captured by a Fourier seasonality model and must
+        be encoded explicitly.
+\end{enumerate}
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{Classical Forecasting: ARIMA}
+\label{subsec:arima}
+%--------------------------------------------------------------------
+
+\begin{defbox}{ARIMA$(p, d, q)$ — AutoRegressive Integrated Moving Average}
+The \textbf{ARIMA}$(p, d, q)$ model has three components:
+\begin{itemize}
+  \item \textbf{AR$(p)$}: the current value is a linear function of the
+        past $p$ values: $y_t = \phi_1 y_{t-1} + \cdots + \phi_p y_{t-p} + \varepsilon_t$.
+  \item \textbf{I$(d)$}: the series is differenced $d$ times to achieve
+        stationarity. First-order differencing ($d=1$) removes linear
+        trend; second-order ($d=2$) removes quadratic trend.
+  \item \textbf{MA$(q)$}: the current value depends on the past $q$
+        forecast errors: $y_t = \varepsilon_t + \theta_1 \varepsilon_{t-1}
+        + \cdots + \theta_q \varepsilon_{t-q}$.
+\end{itemize}
+Parameter selection uses the \textbf{Akaike Information Criterion (AIC)};
+\texttt{auto.arima} (R) and \texttt{pmdarima.auto\_arima} (Python)
+automate this search.
+
+\textbf{When ARIMA is appropriate}: short stationary series with no
+strong seasonality, requiring exact confidence intervals. Small
+datasets ($T < 500$) where Prophet's Bayesian MAP estimation overfits.
+Regulatory contexts (financial forecasting) that require documented
+statistical assumptions.
+
+\textbf{When ARIMA is \emph{not} appropriate}: multiple overlapping
+seasonalities (ARIMA's SARIMA extension handles only one); 10{,}000+
+parallel series requiring automated fitting without expert tuning of
+$p$, $d$, $q$ for each; irregular calendar effects (holidays, special
+events) that fall outside the seasonal period.
+\end{defbox}
+
+%--------------------------------------------------------------------
+\subsection{Facebook Prophet: Decomposable Forecasting at Scale}
+\label{subsec:prophet}
+%--------------------------------------------------------------------
+
+Prophet \autocite{Prophet2018} was developed at Facebook's Core Data
+Science team to address a concrete business need: daily forecasts for
+thousands of internal metrics (daily active users, ad impressions,
+revenue) that had to be produced automatically, without a statistician
+tuning ARIMA parameters for each series.
+
+\begin{defbox}{Prophet's Additive Decomposition (Taylor \& Letham, 2018)}
+Prophet models a time series as an additive composition of four
+interpretable components:
+\[
+  y(t) = g(t) + s(t) + h(t) + \varepsilon(t)
+\]
+\begin{itemize}
+  \item \textbf{Trend} $g(t)$: piecewise linear (or logistic) growth.
+        Structural trend changes (\emph{changepoints}) are detected
+        automatically by placing potential changepoints at regular
+        intervals and imposing a sparse prior
+        $\delta_j \sim \mathrm{Laplace}(0, \tau)$ on the slope changes.
+        The hyperparameter $\tau$ (called \texttt{changepoint\_prior\_scale})
+        controls trend flexibility: small values produce smooth trends;
+        large values produce flexible trends that may overfit.
+  \item \textbf{Seasonality} $s(t)$: a Fourier series captures periodic
+        patterns at multiple resolutions simultaneously:
+        \[
+          s(t) = \sum_{n=1}^{N}
+          \left(a_n \cos\frac{2\pi n t}{P} +
+                b_n \sin\frac{2\pi n t}{P}\right)
+        \]
+        where $P$ is the period (365.25 for annual; 7 for weekly).
+        Multiple periods (annual \emph{and} weekly) are summed additively.
+        The order $N$ controls smoothness.
+  \item \textbf{Holiday effects} $h(t)$: a user-specified table of
+        one-off events (Black Friday, national elections, sporting finals,
+        bank holidays) is encoded as indicator variables that absorb the
+        effect of each event. Events with multi-day impact (e.g., a
+        long weekend) are represented with a window.
+  \item \textbf{Noise} $\varepsilon(t)$: assumed i.i.d.\ Gaussian;
+        the residual not captured by the three structural components.
+\end{itemize}
+Parameters are estimated via maximum a posteriori (MAP) estimation
+using the probabilistic programming language \textbf{Stan}, which is
+fast enough to fit thousands of series in parallel.
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={Prophet on one time series:
+  e-commerce daily sales volume with Black Friday holiday effect}]
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(2024)
+
+# Simulate 3 years of daily e-commerce sales volume
+dates = pd.date_range("2021-01-01", periods=3*365, freq="D")
+t     = np.arange(len(dates))
+
+trend      = 1_000_000 + 500 * t                   # growing trend
+weekly_s   = 200_000 * np.sin(2*np.pi * t / 7)    # weekly seasonality
+annual_s   = 500_000 * np.sin(2*np.pi * t / 365 - np.pi/2)
+noise      = rng.normal(0, 80_000, len(t))
+y          = trend + weekly_s + annual_s + noise
+
+df = pd.DataFrame({"ds": dates, "y": y})
+
+# Define shopping holidays (volume spikes during Black Friday / Cyber Monday)
+holidays = pd.DataFrame({
+    "holiday":      "BlackFriday",
+    "ds":           pd.to_datetime([
+                        "2021-11-26", "2021-11-29",
+                        "2022-11-25", "2022-11-28",
+                        "2023-11-24", "2023-11-27",
+                    ]),
+    "lower_window": -1,   # 1 day before
+    "upper_window":  2,   # 2 days after
+})
+
+m = Prophet(
+    yearly_seasonality  = True,
+    weekly_seasonality  = True,
+    daily_seasonality   = False,
+    holidays            = holidays,
+    changepoint_prior_scale = 0.05,    # conservative trend
+    seasonality_prior_scale = 10,
+)
+m.fit(df)
+
+# Forecast 90 days ahead
+future   = m.make_future_dataframe(periods=90)
+forecast = m.predict(future)
+
+fig1 = m.plot(forecast)
+fig1.axes[0].set_title("E-commerce Daily Sales Volume  --  Prophet Forecast")
+fig1.savefig("sales_forecast.png", dpi=150, bbox_inches="tight")
+
+fig2 = m.plot_components(forecast)
+fig2.savefig("sales_components.png", dpi=150, bbox_inches="tight")
+print("Saved: sales_forecast.png and sales_components.png")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Anomaly Detection in Time Series}
+\label{subsec:anomaly}
+%--------------------------------------------------------------------
+
+An \term{anomaly} in a time series is an observation that does not conform
+to the expected pattern---either a transient spike, a structural break,
+or a slow drift outside expected bounds. Anomaly detection is a critical
+component of fraud monitoring, network operations, and predictive
+maintenance.
+
+\textbf{Method 1: STL Decomposition.} STL (Seasonal-Trend decomposition
+using LOESS) decomposes the time series into trend, seasonal, and
+residual components using locally weighted regression (LOESS) for each.
+Residuals that exceed $k \times \text{IQR}$ of all residuals are flagged
+as anomalies. STL is interpretable (the analyst can inspect each component),
+handles missing data gracefully, and works well when the seasonal pattern
+is stable.
+
+\textbf{Method 2: Isolation Forest.} An \term{Isolation Forest} is an
+ensemble of random trees that \emph{isolates} anomalies by recursively
+splitting the feature space at randomly chosen thresholds. An anomaly
+requires fewer splits to isolate than a normal observation, because it
+lies in a sparse region of the feature space. The anomaly score is the
+average \emph{path length} across all trees: short path length indicates
+an anomaly. Isolation Forest makes no distributional assumptions, handles
+high-dimensional feature spaces, and scales to millions of observations
+in Spark MLlib.
+
+\begin{lstlisting}[style=pyspark, caption={Anomaly detection with Isolation
+  Forest in PySpark MLlib}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, hour, dayofweek, lag
+from pyspark.sql.window import Window
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import RandomForestClassifier
+
+# NOTE: Spark MLlib does not have a native IsolationForest (as of Spark 3.5).
+# Use the spark-iforest package or scikit-learn on Pandas partitions.
+# Here we show the applyInPandas approach with sklearn.
+
+from pyspark.sql.types import StructType, StructField, DoubleType, IntegerType
+from sklearn.ensemble import IsolationForest
+import pandas as pd
+
+spark = SparkSession.builder.appName("AnomalyDetection").getOrCreate()
+
+# Example: payment agent hourly transaction counts
+df = spark.read.parquet("hdfs:///data/payments/agent_hourly_txn/")
+
+# Feature engineering: add lag features
+w = Window.partitionBy("agent_id").orderBy("hour_ts")
+df = (df
+    .withColumn("lag1",  lag("txn_count", 1).over(w))
+    .withColumn("lag24", lag("txn_count", 24).over(w))
+    .withColumn("hour_of_day", hour(col("hour_ts")))
+    .withColumn("dow",         dayofweek(col("hour_ts")))
+    .na.drop())
+
+# Schema for the output of our Pandas UDF
+output_schema = StructType([
+    StructField("agent_id",  df.schema["agent_id"].dataType, True),
+    StructField("hour_ts",   df.schema["hour_ts"].dataType,  True),
+    StructField("txn_count", DoubleType(), True),
+    StructField("anomaly_score", DoubleType(), True),
+    StructField("is_anomaly", IntegerType(), True),
+])
+
+def detect_anomalies(pdf: pd.DataFrame) -> pd.DataFrame:
+    """Fit Isolation Forest per agent partition."""
+    features = ["txn_count", "lag1", "lag24", "hour_of_day", "dow"]
+    X = pdf[features].fillna(0).values
+
+    if len(X) < 10:          # too few observations
+        pdf["anomaly_score"] = 0.0
+        pdf["is_anomaly"]    = 0
+        return pdf[["agent_id", "hour_ts", "txn_count",
+                    "anomaly_score", "is_anomaly"]]
+
+    clf = IsolationForest(n_estimators=100,
+                          contamination=0.02,   # expect 2% anomalies
+                          random_state=42)
+    clf.fit(X)
+
+    pdf["anomaly_score"] = -clf.score_samples(X)    # higher = more anomalous
+    pdf["is_anomaly"]    = (clf.predict(X) == -1).astype(int)
+    return pdf[["agent_id", "hour_ts", "txn_count",
+                "anomaly_score", "is_anomaly"]]
+
+# One IsolationForest per agent; runs in parallel across Spark partitions
+anomalies = (df.groupBy("agent_id")
+               .applyInPandas(detect_anomalies, schema=output_schema))
+
+anomalies.filter(col("is_anomaly") == 1) \
+         .orderBy("anomaly_score", ascending=False) \
+         .show(20, truncate=False)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Vectorised Batch Forecasting in Spark}
+\label{subsec:spark-prophet}
+%--------------------------------------------------------------------
+
+A retail chain needs 90-day demand forecasts for 5{,}000 store--product
+SKU combinations, each with its own seasonal pattern and promotional
+calendar. Fitting 5{,}000 separate Prophet models sequentially on a
+single machine would take 8+ hours. Fitting them in parallel across a
+Spark cluster reduces this to $\sim$12 minutes on a 20-executor cluster
+---a $40\times$ speedup.
+
+The pattern is called \term{vectorised batch forecasting}: each SKU's
+time series is assigned to one Spark partition; a Pandas UDF
+(\code{applyInPandas}) runs the full Prophet fit-and-predict cycle
+inside that partition; results are written as Parquet for serving.
+
+\begin{lstlisting}[style=pyspark, caption={Vectorised Prophet forecasting:
+  5\,000 SKUs in parallel with applyInPandas}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from pyspark.sql.types import (StructType, StructField,
+    StringType, DateType, DoubleType)
+from prophet import Prophet
+import pandas as pd
+import time
+
+spark = SparkSession.builder \
+    .appName("VectorisedProphet") \
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
+    .getOrCreate()
+
+# Load historical sales: schema (sku_id, date, units_sold)
+sales = spark.read.parquet("hdfs:///data/retail/daily_sales/")
+
+# Output schema: what each partition will return
+forecast_schema = StructType([
+    StructField("sku_id",     StringType(), True),
+    StructField("ds",         DateType(),   True),
+    StructField("yhat",       DoubleType(), True),
+    StructField("yhat_lower", DoubleType(), True),
+    StructField("yhat_upper", DoubleType(), True),
+])
+
+def fit_and_forecast(pdf: pd.DataFrame) -> pd.DataFrame:
+    """Fit Prophet on one SKU's history; return 90-day forecast."""
+    sku_id = pdf["sku_id"].iloc[0]
+
+    # Prophet requires columns named 'ds' and 'y'
+    train = pdf.rename(columns={"date": "ds", "units_sold": "y"})
+    train["ds"] = pd.to_datetime(train["ds"])
+    train = train[["ds", "y"]].sort_values("ds")
+
+    if len(train) < 14:     # need at least 2 weeks of data
+        return pd.DataFrame(columns=["sku_id", "ds", "yhat",
+                                     "yhat_lower", "yhat_upper"])
+
+    m = Prophet(
+        yearly_seasonality       = True,
+        weekly_seasonality       = True,
+        changepoint_prior_scale  = 0.05,
+        seasonality_prior_scale  = 10.0,
+    )
+    m.fit(train)
+
+    future   = m.make_future_dataframe(periods=90)
+    forecast = m.predict(future)
+
+    result = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+    result["sku_id"] = sku_id
+    result["ds"]     = result["ds"].dt.date
+    return result[["sku_id", "ds", "yhat", "yhat_lower", "yhat_upper"]]
+
+t0 = time.perf_counter()
+
+forecasts = (sales
+    .repartition(200, "sku_id")   # one or more SKUs per partition
+    .groupBy("sku_id")
+    .applyInPandas(fit_and_forecast, schema=forecast_schema))
+
+# Write forecasts to Parquet for the inventory management dashboard
+(forecasts.write
+    .mode("overwrite")
+    .partitionBy("sku_id")
+    .parquet("hdfs:///data/retail/sku_forecasts_90d/"))
+
+forecasts.count()     # trigger execution
+elapsed = time.perf_counter() - t0
+print(f"5,000 SKU forecasts completed in {elapsed/60:.1f} minutes")
+\end{lstlisting}
+
+%%====================================================================
+\section{Domain C: Healthcare Big Data}
+\label{sec:healthcare}
+%%====================================================================
+
+Healthcare is the domain where big data analytics is most consequential
+and most constrained. The potential benefits---earlier disease detection,
+personalised treatment, pandemic preparedness---are matched by the
+sensitivity of the data and the severity of the consequences of errors.
+
+%--------------------------------------------------------------------
+\subsection{Healthcare Data Modalities}
+\label{subsec:health-modalities}
+%--------------------------------------------------------------------
+
+Healthcare generates four structurally distinct data modalities, each
+requiring different storage, processing, and privacy approaches.
+
+\textbf{1. Electronic Health Records (EHR).} EHR systems contain structured
+data (ICD-10 diagnosis codes, medication orders, laboratory results,
+vital signs), semi-structured data (HL7 FHIR resources, as covered in
+Chapter~\ref{ch:integration}), and unstructured data (clinical notes
+written by physicians in natural language). A typical hospital generates
+2--5~GB of new EHR data per day. At the national level, large healthcare
+systems such as the NHS (UK) or Kaiser Permanente (US) hold 15+ years of
+digitised records, representing sufficient scale for population-level clinical analytics.
+
+\textbf{2. Genomics.} A single whole-genome sequence at 30$\times$ coverage
+produces $\sim$200~GB of raw sequencing reads (FASTQ format), which compress
+to $\sim$50~GB as an aligned BAM file and $\sim$1~GB as a called variant VCF
+file. A clinical genomics study of 10{,}000 patients generates 2~PB of raw
+data---requiring the HDFS-class distributed storage introduced in
+Chapter~\ref{ch:hdfs} and the GATK (Genome Analysis Toolkit) pipeline
+ported to Spark for distributed variant calling.
+
+\textbf{3. Wearables and IoT.} Continuous monitoring devices (smartwatches,
+continuous glucose monitors, cardiac monitors, hospital bedside vital-sign
+monitors) generate time-series data at per-second resolution. A single
+ICU patient generates $\sim$1~GB of monitoring data per day across
+all bedside devices. This is precisely the streaming ingestion scenario
+from Chapter~\ref{ch:pipelines}: Kafka receives the device events,
+Spark Structured Streaming applies anomaly detection in real time, and
+an InfluxDB time-series database stores the per-second aggregates for
+Grafana dashboards on the nursing station.
+
+\textbf{4. Medical Imaging.} CT scans (200--500~MB per study), MRI
+scans (200~MB--2~GB), digital pathology slides (2--10~GB per slide),
+and chest X-rays (50~MB) are stored in \term{DICOM} format---a binary
+file format with embedded metadata headers. DICOM is fundamentally
+unstructured: there is no predefined row-column schema that SQL can
+query. Analysis requires deep learning models (convolutional neural
+networks for radiology, vision transformers for pathology slides)
+running on GPU infrastructure. PACS (Picture Archiving and Communication
+Systems) store these files; the Hadoop stack is not the primary
+processing environment for imaging analytics.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{2.5cm}p{2.5cm}p{2.5cm}p{2.0cm}}
+  \toprule
+  \textbf{Modality} & \textbf{Format}
+    & \textbf{Storage} & \textbf{Processing} & \textbf{Privacy Risk} \\
+  \midrule
+  EHR / FHIR  & HL7 FHIR JSON, relational
+    & Hive / PostgreSQL & Spark SQL, NLP & High \\
+  Genomics     & VCF / BAM / FASTQ
+    & HDFS Parquet & GATK on Spark & Very high \\
+  Wearables    & JSON events (Kafka)
+    & InfluxDB, HDFS & Spark Streaming & Medium \\
+  Medical Imaging & DICOM binary
+    & PACS / S3 & CNN / ViT on GPU & High \\
+  \bottomrule
+\end{tabular}
+\caption{Healthcare data modalities and their infrastructure requirements.
+         Genomic data carries the highest privacy risk: a person's genome
+         is permanently identifying and cannot be de-identified by removing
+         names and dates.}
+\label{tab:health-modalities}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Clinical Prediction Models}
+\label{subsec:clinical-pred}
+%--------------------------------------------------------------------
+
+\autocite{Obermeyer2016} argued in a landmark New England Journal of
+Medicine paper that machine learning models trained on EHR data at
+scale could systematically outperform physician heuristics for three
+critical clinical tasks.
+
+\textbf{ICU mortality prediction.} A random forest trained on vital
+signs, laboratory values (serum lactate, creatinine, bilirubin,
+platelet count), and prior diagnosis codes achieves an AUROC greater
+than 0.90 for predicting which ICU patients will die within 24 hours.
+Conventional ICU scoring systems (APACHE-IV, SOFA) achieve AUROC
+$\approx 0.74$--$0.82$. The difference in AUROC translates to 6--8 hours
+of earlier identification of deteriorating patients---time in which
+palliative care discussions can occur or escalation of treatment can be
+initiated.
+
+\textbf{30-day hospital readmission.} Gradient boosting on structured
+discharge records (diagnosis codes, procedure codes, length of stay,
+laboratory trends, medication count) identifies high-risk patients for
+post-discharge follow-up interventions. When these interventions are
+implemented, readmission rates fall by 15--20\%, reducing both patient
+suffering and hospital readmission penalties under value-based care
+contracts.
+
+\textbf{Sepsis early warning.} Sepsis is a life-threatening organ
+dysfunction caused by infection; each hour of delayed treatment increases
+mortality by 7\%. A continuous streaming model fed by Kafka (receiving
+bedside vital sign updates every 60 seconds) and Spark Structured
+Streaming can detect sepsis onset 6 hours before the standard clinical
+criteria (SIRS or qSOFA) are met, enabling prophylactic antibiotic
+administration.
+
+\begin{keyinsight}{Data Scale Requirements for Clinical ML}
+Obermeyer and Emanuel's meta-analysis found that clinical prediction
+models trained on fewer than 10{,}000 patient records are generally
+unreliable for clinical deployment: the models overfit to local
+population characteristics and fail to generalise to patients with
+comorbidities not well-represented in the training data. Reliable
+generalisation requires 100{,}000+ patient records for common diagnoses
+(heart failure, pneumonia, sepsis) and 1{,}000{,}000+ for rare conditions.
+Large national health systems (NHS England, Kaiser Permanente, VA Health
+System) record tens of millions of inpatient encounters per year---if
+integrated and de-identified, sufficient for mortality and readmission modelling.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Privacy: HIPAA, GDPR, and the CCPA}
+\label{subsec:health-privacy}
+%--------------------------------------------------------------------
+
+Healthcare data is the most sensitive personal data category recognised
+by law. Three regulatory frameworks govern its handling.
+
+\begin{defbox}{Healthcare Privacy Regulatory Frameworks}
+\begin{itemize}
+  \item \textbf{HIPAA (USA)} — Health Insurance Portability and
+        Accountability Act (1996): requires de-identification of 18
+        specific ``protected health information'' (PHI) identifiers
+        (name, date of birth, National ID number, zip code, telephone,
+        email, account numbers, etc.) before research use. Two de-identification
+        methods are defined: the \emph{Safe Harbour} method (remove all 18
+        identifiers) and the \emph{Expert Determination} method (a qualified
+        statistician certifies that re-identification risk is very small).
+  \item \textbf{GDPR (EU)} — General Data Protection Regulation (2018):
+        treats health data as a ``special category'' requiring explicit
+        consent for processing. Data minimisation (collect only what is
+        needed), purpose limitation (use only for the stated purpose), and
+        right to erasure (the ``right to be forgotten'') apply. GDPR's
+        $\in$20 million or 4\% of global revenue fines have made it the
+        effective global standard.
+  \item \textbf{CCPA (California)} — California Consumer Privacy Act
+        (2020): grants residents the right to know what personal data is
+        collected, to opt out of its sale, and to request deletion.
+        Health data collected outside HIPAA-covered entities (e.g., by
+        consumer wellness apps) falls under CCPA rather than HIPAA.
+        Many US states are enacting similar legislation, and CCPA
+        serves as a model for comprehensive state-level privacy law.
+\end{itemize}
+\end{defbox}
+
+\textbf{Technical mitigation techniques.} Four engineering approaches
+exist for enabling analytics on sensitive healthcare data without
+exposing individual records.
+
+\textbf{1. Safe harbour de-identification.} Remove all 18 HIPAA-specified
+identifiers. After safe harbour, the data is no longer legally PHI and
+can be shared for research without patient consent. Limitation: dates
+must be generalised to year only; zip codes must be generalised to the
+first 3 digits---changes that reduce the data's utility for geospatial
+and temporal analyses.
+
+\textbf{2. Differential privacy.} Add calibrated Gaussian or Laplace
+noise to the output of any aggregate query such that no individual record
+can be inferred from the query result. The privacy guarantee is
+formal: a mechanism $\mathcal{M}$ is $(\varepsilon, \delta)$-differentially
+private if adding or removing any single individual's record changes the
+output distribution by at most a factor $e^\varepsilon$ with probability
+$1 - \delta$. Smaller $\varepsilon$ (stronger privacy) requires more noise
+(less accuracy). Apple, Google, and the US Census Bureau use differential
+privacy for aggregate statistics release.
+
+\textbf{3. Federated learning.} Rather than centralising patient data
+in a single data lake, each hospital trains the model locally on its
+own data. Only the model's gradient updates (parameter changes, not raw
+data) are sent to a central coordinator, which aggregates them using
+\emph{federated averaging} (McMahan et al., 2017). The raw patient
+records never leave the hospital. Federated learning is the standard
+approach for multi-site clinical trials and cross-hospital model training
+in GDPR-regulated environments.
+
+\textbf{4. Synthetic data generation.} Generative models (Variational
+Autoencoders, Generative Adversarial Networks) trained on real patient
+records produce \emph{synthetic} patient records that preserve the
+statistical properties of the original data while containing no real
+individuals. Synthetic data can be shared publicly without legal
+restriction. Limitation: the generative model itself must be trained
+on real data, so data access remains necessary at the training stage.
+
+%--------------------------------------------------------------------
+\subsection{AlphaFold: Big Data and Deep Learning in Science}
+\label{subsec:alphafold}
+%--------------------------------------------------------------------
+
+AlphaFold~\autocite{AlphaFold2021} is the most dramatic example of
+big data combined with deep learning transforming an experimental
+science. For 50 years, predicting a protein's three-dimensional structure
+from its amino acid sequence was considered one of biology's hardest
+problems---the ``protein folding problem.'' Experimental determination
+by X-ray crystallography or cryo-electron microscopy takes months per
+protein and costs thousands of dollars. As of 2020, the Protein Data
+Bank (PDB) contained approximately 170{,}000 experimentally determined
+structures---a tiny fraction of the $\sim$250 million known protein
+sequences in the UniProt database.
+
+\textbf{AlphaFold 2 (DeepMind, 2020)} solved this problem with:
+\begin{itemize}
+  \item A transformer-based architecture (\emph{Evoformer}) that operates
+        jointly on the amino acid sequence and a \emph{multiple sequence
+        alignment (MSA)}---a matrix of thousands of evolutionarily related
+        sequences from 250 million protein sequences in UniProt.
+  \item Training on all 170{,}000 PDB structures using 128 TPU v3 cores
+        over several weeks.
+  \item Prediction accuracy: median GDT score $>$92 on the CASP14
+        benchmark---the first computational method to achieve expert-level
+        accuracy.
+\end{itemize}
+
+In 2022, DeepMind released the \emph{AlphaFold Protein Structure Database}:
+predicted structures for 200 million proteins across all known organisms,
+covering effectively the entire known proteome---a resource that took
+experimental biology 70 years to partially populate. The database is
+freely accessible and has been used in vaccine design, drug discovery, and
+fundamental biology research.
+
+\textbf{Why this is a big data problem.} The key input to AlphaFold
+is not just the query sequence---it is the MSA. Generating an MSA for
+a single query requires searching 250 million sequences (200+ GB compressed),
+aligning the top hits, and encoding the result as a 2-D attention matrix.
+This search alone takes 3--5 minutes on a high-memory CPU server. Training
+required petabyte-scale data access across the PDB and UniRef90. AlphaFold
+is in this sense less a breakthrough in neural network architecture than
+a breakthrough in what becomes possible when a deep learning model is
+trained on a complete and expertly curated scientific dataset at scale.
+
+\begin{techdebt}{AlphaFold's Limitation: Dynamics and Complexes}
+AlphaFold predicts \emph{static} protein structures in isolation.
+Two fundamental limitations remain for practical drug discovery:
+\begin{enumerate}
+  \item Many drug targets are \emph{intrinsically disordered proteins}
+        (IDPs) that have no fixed structure---they fold only upon binding
+        their interaction partner. AlphaFold's confidence scores for IDPs
+        are low and should not be trusted as structural predictions.
+  \item AlphaFold predicts monomeric (single-chain) structures.
+        Many proteins function as \emph{complexes} (multi-chain assemblies).
+        AlphaFold-Multimer (2021) and AlphaFold 3 (2024) address this,
+        but with lower accuracy than the monomer model.
+\end{enumerate}
+In production use for drug discovery pipelines, AlphaFold predictions
+are treated as \emph{starting hypotheses} for experimental validation,
+not as definitive structures.
+\end{techdebt}
+
+%%====================================================================
+\section{Research Spotlight}
+\label{sec:ch10-research}
+%%====================================================================
+
+\begin{researchspotlight}{Kwak et al.\ (2010) · Taylor \& Letham (2018)
+  · Obermeyer \& Emanuel (2016) --- Social Networks, Time Series, and
+  Clinical ML at Scale}
+
+\textbf{Work 1: Kwak, H., Lee, C., Park, H., \& Moon, S. (2010).
+``What is Twitter, a Social Network or a News Media?''
+\textit{Proceedings of WWW 2010}, pp.~591--600. ACM.}
+($>$7{,}000 citations; KAIST.)
+
+The paper's central question was deceptively simple: is Twitter's graph
+structure more like a social network (mutual relationships, dense local
+communities, information spreading through friendship chains) or a news
+medium (one-to-many broadcasting, shallow cascades, content driven by
+events rather than social ties)?
+
+To answer it, Kwak, Lee, Park, and Moon crawled Twitter's full public
+graph in June 2009---41.7 million users, 1.47 billion directed following
+edges---using breadth-first search via the Twitter API over three weeks.
+The resulting 40~GB compressed adjacency dataset was one of the first
+big data social graph studies.
+
+Three findings reshaped social media analytics:
+\begin{enumerate}
+  \item \textbf{Twitter is a news medium.} 85\% of trending topics were
+        headline news events, not personal conversations. The median trending
+        topic lasted 17.5 hours. Breaking news reached peak tweet rate
+        within 15 minutes---faster than news wire services.
+  \item \textbf{Asymmetric structure.} Only 22.1\% of following
+        relationships are reciprocal---far lower than Facebook's 100\%.
+        The in-degree distribution follows a power law with exponent
+        $\alpha \approx 2.276$: a small number of celebrity accounts
+        have millions of followers, while the vast majority have tens.
+        The average shortest path across the full 41.7-million-node
+        graph is 4.12 hops.
+  \item \textbf{PageRank diverges from follower count.} Users ranked by
+        PageRank (recursive influence in the directed graph) differ
+        substantially from those ranked by raw follower count.
+        A user followed by many high-PageRank accounts outranks a
+        celebrity followed by low-influence accounts.
+\end{enumerate}
+
+\textbf{Impact.} The news-medium finding directly enabled social media
+epidemiology: CDC, WHO, and academic groups built influenza, COVID-19,
+and mental health surveillance systems on the Twitter graph model.
+The directed-cascade model of retweets is the reference network structure
+for misinformation propagation studies (Vosoughi, Roy \& Aral, 2018,
+\textit{Science}: ``False news spreads faster, farther, and more broadly
+than true news''). Twitter's own Trends algorithm redesigns were shaped
+by the paper's finding that trending topics are news events.
+
+\medskip
+\textbf{Work 2: Taylor, S.~J., \& Letham, B. (2018). ``Forecasting at
+Scale.'' \textit{The American Statistician}, 72(1), 37--45.}
+($>$1{,}500 citations; Facebook Core Data Science.)
+
+The Prophet paper addresses a practical industrial problem: Facebook
+needed daily forecasts for thousands of internal business metrics
+(daily active users, ad impressions, revenue per cohort)---automatically,
+without a statistician manually tuning ARIMA parameters for each series.
+Classical approaches (ARIMA, exponential smoothing) had three failure modes
+at this scale: they required expert parameter selection ($p$, $d$, $q$)
+that could not be automated reliably across heterogeneous time series;
+they struggled with complex multi-period seasonality (annual \emph{and}
+weekly simultaneously); and they had no mechanism for handling irregular
+calendar effects (holidays that fall on different dates each year).
+
+Prophet's key innovations were:
+\begin{enumerate}
+  \item \textbf{Interpretable decomposition}: the additive
+        $g(t) + s(t) + h(t) + \varepsilon(t)$ structure lets a domain
+        analyst (not a statistician) inspect and correct each component
+        independently.
+  \item \textbf{Automatic changepoint detection}: a sparse Laplace prior
+        on trend slope changes detects structural breaks without
+        over-segmenting the trend.
+  \item \textbf{Fourier seasonality}: annual, weekly, and daily seasonality
+        are represented as overlapping Fourier series, capturing all
+        simultaneously without the SARIMA workaround of a single fixed period.
+  \item \textbf{Stan-based MAP estimation}: fast enough to fit thousands
+        of models per day; calibrated uncertainty intervals outperform
+        ARIMA's theoretical confidence intervals on real data.
+\end{enumerate}
+
+\textbf{Impact.} Prophet became the de facto industry standard for
+business time series forecasting within two years: adopted by Airbnb,
+Uber, Walmart, and most major tech companies. The \code{applyInPandas}
++ Prophet vectorisation pattern is now the canonical PySpark design
+pattern for parallel time series forecasting. In healthcare, Prophet
+is used for ICU capacity forecasting, hospital admission nowcasting,
+and CDC FluSight flu season projections.
+
+\medskip
+\textbf{Work 3: Obermeyer, Z., \& Emanuel, E.~J. (2016). ``Predicting
+the Future---Big Data, Machine Learning, and Clinical Medicine.''
+\textit{New England Journal of Medicine}, 375(13), 1216--1219.}
+($>$2{,}000 citations; NEJM; foundational clinical ML position paper.)
+
+Obermeyer and Emanuel's paper is not a primary research study---it is
+a perspective article written for the clinical audience of the NEJM,
+arguing on the basis of existing evidence that machine learning models
+trained on EHR big data can and should be integrated into clinical
+practice. Its influence is exceptional because it appeared in the world's
+most prestigious medical journal and was written in language accessible
+to practising physicians rather than computer scientists.
+
+Three clinical ML results they synthesised:
+\begin{enumerate}
+  \item \textbf{ICU mortality}: random forest on vitals and labs achieves
+        AUROC $>0.90$ vs.\ APACHE's $\approx 0.74$---earlier identification
+        of deteriorating patients.
+  \item \textbf{30-day readmission}: gradient boosting on discharge records
+        identifies high-risk patients for post-discharge follow-up,
+        reducing readmission by 15--20\%.
+  \item \textbf{Sepsis}: continuous streaming models detect sepsis 6 hours
+        before clinical criteria---time enough for prophylactic antibiotics.
+\end{enumerate}
+
+The paper also warned of three failure modes: biased training data (if
+certain patient populations are underrepresented, predictions are
+unreliable for those groups); overfitting to local population
+characteristics that do not generalise to other hospitals; and the
+``black-box problem''---clinicians distrust predictions they cannot
+explain. These warnings have proved prescient: subsequent audits of
+deployed clinical ML models have found racial and socioeconomic bias,
+poor cross-site generalisation, and physician distrust leading to
+models being ignored in practice even when technically accurate.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: CDC Syndromic Surveillance and the Google Flu
+  Trends Lesson}
+\label{sec:cdc-case}
+%%====================================================================
+
+\begin{casestudy}{CDC BioSense and the Prophet-Based Flu Surveillance
+  Architecture (2009--2022)}
+
+\textbf{Context: Traditional Surveillance Lag.}
+The CDC's traditional influenza surveillance system, ILINet, relies on
+$>$3{,}000 sentinel physicians across all 50 US states reporting weekly
+counts of influenza-like illness (ILI) patients---defined as fever $> 100$°F
+plus cough or sore throat. The data flow is: clinic $\to$ state health
+department $\to$ CDC weekly report. The lag between a patient's first
+symptoms and the CDC receiving the report is \textbf{1--2 weeks}.
+By the time CDC identifies a surge, it may already have passed its peak.
+
+\textbf{Google Flu Trends: The Promise and the Failure.}
+In 2008, Ginsberg et al.\ at Google published in \textit{Nature} a
+system called Google Flu Trends (GFT): by correlating 45 flu-related
+search queries (``flu symptoms'', ``how to treat fever'', etc.) with
+ILINet surveillance data, GFT could \emph{predict} flu incidence two weeks
+before CDC's official reports with $r^2 = 0.97$ on 5 years of training data.
+GFT was cited as the canonical example of ``big data surpassing traditional
+surveillance.''
+
+In the 2012--2013 flu season, GFT over-predicted flu incidence by a factor
+of \textbf{$2\times$}. Lazer et al.\ (\textit{Science}, 2014)
+\autocite{LazerFluTrends2014} diagnosed three causes:
+\begin{enumerate}
+  \item \textbf{Big Data hubris}: $r^2 = 0.97$ on a 5-year training
+        window does not guarantee generalisation when the data-generating
+        process is non-stationary. Search behaviour changes as the internet
+        population and search interface evolve.
+  \item \textbf{Algorithm confounding}: Google's autocomplete algorithm
+        (opaque to GFT's developers) suggested flu-related search terms
+        to users during flu news coverage, amplifying search volume
+        \emph{independently} of actual incidence.
+  \item \textbf{Media amplification}: heavy news coverage of a flu season
+        drove flu-related searches even among people who were not ill,
+        creating a spurious correlation between media attention and
+        predicted (but not actual) incidence.
+\end{enumerate}
+GFT was discontinued as a primary source and eventually taken offline in 2015.
+
+\textbf{BioSense: The Better Architecture.}
+The CDC's BioSense Platform represents the mature, post-GFT approach
+to syndromic surveillance:
+\begin{itemize}
+  \item \textbf{Primary signal: direct medical observation.} BioSense
+        receives near-real-time electronic health data from $>$3{,}500
+        emergency departments, urgent care centres, and hospitals
+        via HL7 FHIR messages. Syndromes (influenza-like, gastrointestinal,
+        neurological) are automatically extracted from chief complaints
+        using NLP. Lag: $<$72 hours vs.\ ILINet's 1--2 weeks.
+  \item \textbf{Secondary signal: Twitter/social media.} Twitter flu-related
+        keywords are monitored as a \emph{leading indicator} supplementing
+        the direct medical signal---not replacing it. The Kwak et al.\ finding
+        that Twitter reflects real-world events within minutes makes it
+        valuable as a 3--5 day leading signal. But unlike GFT, the Twitter
+        signal is an input to a model alongside clinical data, not the
+        sole prediction basis.
+  \item \textbf{Forecasting: Prophet + Ensemble.}
+        CDC's FluSight forecasting challenge (2013--present) pools
+        submissions from academic teams worldwide. The top performers
+        are always ensemble methods. Prophet is a strong component:
+        it models the annual flu season's characteristic double-peaked
+        shape (a primary peak in January--February, a secondary peak
+        in March) as overlapping seasonal components, and its changepoint
+        detection identifies season-start changepoints within 1--2 weeks.
+\end{itemize}
+
+\textbf{Scale: 2019--2020 Season.}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Metric} & \textbf{Value} \\
+  \midrule
+  Emergency department records processed     & 38 million visits \\
+  FHIR messages ingested per day             & $\sim$250{,}000 \\
+  HHS regions with independent Prophet models & 60 \\
+  Spark executors for Prophet batch inference & 20 \\
+  Twitter keyword stream volume monitored    & $\sim$500{,}000 flu-related tweets/day \\
+  FluSight ensemble models combined          & 38 (2019--2020 season) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Engineering Lessons.}
+\begin{enumerate}
+  \item \textbf{Proxy data amplifies noise, not signal.} GFT's failure was
+        that search queries capture \emph{health anxiety and media attention}
+        rather than health incidence. Proxy signals require causal validation
+        before policy use; correlation is not sufficient.
+  \item \textbf{Algorithm transparency is a public health issue.}
+        GFT failed partly because Google's internal autocomplete changes
+        were opaque to CDC. When a public health surveillance system
+        depends on a third party's algorithm, that algorithm's changes
+        become a public health risk.
+  \item \textbf{Decomposability improves trust.} Prophet's $g + s + h$
+        structure lets epidemiologists inspect each component---an
+        epidemiologist can identify which changepoint corresponds to the
+        season start, which holiday effect captures school opening, and
+        whether the trend component reflects a genuine long-term burden
+        change. Black-box deep learning forecasters produce comparable
+        accuracy but generate less physician and public health official trust.
+  \item \textbf{Ensemble beats any single model.} The CDC FluSight top
+        performers from 2013 to 2022 are always ensemble methods.
+        No single model---Prophet, ARIMA, LSTM, or human expert---wins
+        every season. The value of Prophet in the ensemble is its
+        interpretability: when the ensemble disagrees with a Prophet
+        component, epidemiologists can inspect the component and understand
+        why.
+  \item \textbf{Twitter adds lead time, not accuracy.} Social media signals
+        are available 3--5 days earlier than BioSense ED data but
+        with 30--40\% higher error. The trade-off is latency versus
+        precision---an acceptable trade-off for an early warning signal
+        but not for a primary surveillance measure.
+\end{enumerate}
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch10-summary}
+%%====================================================================
+
+Three high-impact application domains demonstrate that the data
+engineering stack built in previous chapters is universally applicable.
+
+Social media analytics treats platforms as directed graphs and applies
+community detection (Louvain, $O(n \log n)$, modularity maximisation),
+influence maximisation (NP-hard, $(1-1/e)$-approximable by greedy),
+and real-time sentiment analysis (VADER: compound score handles
+capitalisation, punctuation, degree modifiers, and negation) to problems
+ranging from viral marketing to public health surveillance. Kwak et al.\ (2010)
+established that Twitter is a news medium, not a social network---a finding
+that unlocked social media epidemiology.
+
+Time series analysis begins with ARIMA's classical approach (differencing
+for stationarity, autoregressive and moving average components for
+autocorrelation) and extends to Facebook Prophet's decomposable
+$g + s + h$ model (piecewise linear trend with automatic changepoint
+detection, Fourier seasonality, holiday tables). Vectorised batch
+forecasting via \code{applyInPandas} parallelises one Prophet model
+per series across thousands of series simultaneously in Spark. STL and
+Isolation Forest address the anomaly detection problem.
+
+Healthcare big data combines four data modalities (EHR/FHIR, genomics,
+wearables, DICOM imaging), three privacy frameworks (HIPAA, GDPR, CCPA),
+and four privacy-engineering techniques (safe harbour, differential
+privacy, federated learning, synthetic data). Clinical prediction models
+at scale outperform physician heuristics for ICU mortality, readmission,
+and sepsis detection. AlphaFold demonstrated that a 50-year scientific
+grand challenge could be solved by training a transformer on a complete
+curated database at scale.
+
+The CDC/Google Flu Trends case study provides the chapter's most
+important cautionary lesson: high in-sample correlation does not guarantee
+out-of-sample accuracy when the data-generating process is non-stationary,
+and proxy data captures anxiety and media attention as much as the
+phenomenon it purports to measure.
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch10-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq What are the four structural properties of social network graphs
+described in this chapter? For each, state one implication for how
+information spreads through the network.
+
+\sq Describe the two phases of the Louvain community detection algorithm.
+What is the modularity objective $Q$, and why does maximising it detect
+communities?
+
+\sq Why is PageRank a better measure of user influence on Twitter than
+raw follower count? Describe a specific scenario where the two measures
+would rank users in a different order.
+
+\sq VADER outputs a ``compound score'' for social media text. For each
+of the following tweets, state whether the compound score will be higher
+or lower than the score for the plain form, and explain which VADER rule
+causes the difference:
+(a) ``GREAT concert'' vs.\ ``great concert'';
+(b) ``not good'' vs.\ ``good'';
+(c) ``absolutely fantastic!!!'' vs.\ ``fantastic''.
+
+\sq What is autocorrelation in a time series, and why does it invalidate
+standard regression's standard errors? Give an example from a business
+time series (e.g., daily e-commerce transactions) where strong autocorrelation
+would be expected.
+
+\sq Describe each component of Prophet's model
+$y(t) = g(t) + s(t) + h(t) + \varepsilon(t)$.
+What hyperparameter controls the flexibility of the trend component,
+and what happens if it is set too high?
+
+\sq A Prophet model for weekly hospital outpatient visits shows an
+unexplained spike every year in late April and late June. Which Prophet
+component is responsible for these spikes? What information would you
+add to the model to capture them explicitly?
+
+\sq What are STL decomposition and Isolation Forest? For each, describe
+what type of anomaly it is best suited to detect in a time series.
+
+\sq What is the difference between a \emph{safe harbour} de-identification
+and \emph{differential privacy} for healthcare data? Give one scenario
+where safe harbour is sufficient and one where differential privacy
+would also be needed.
+
+\sq What was the core argument of Obermeyer \& Emanuel (2016)? List two
+specific clinical tasks where they argued ML models outperform physician
+heuristics, and state the metric used to measure outperformance.
+
+\sq Explain why Google Flu Trends over-predicted flu incidence in 2012--2013.
+Name all three causes identified by Lazer et al.\ (2014) and describe which
+is the most fundamental.
+
+\sq What is \emph{federated learning}? Why is it used in multi-hospital
+clinical machine learning, and what is the primary limitation of the
+federated averaging algorithm?
+
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Influence Maximisation Calculation.}
+A Facebook group for a CDC dengue alert campaign has 1 million users.
+The following-graph has a power-law degree distribution with exponent
+$\alpha = 2.3$. The campaign budget allows seeding $k = 5$ initial posts.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Under the independent cascade model with $p_{uv} = 0.05$ on each
+        edge, estimate (qualitatively) whether seeding at the 5 users with
+        the highest follower count or the 5 users with the highest PageRank
+        will achieve greater spread. Justify your answer using the Kwak
+        et al.\ finding on PageRank vs.\ follower count.
+  \item The Kempe et al.\ greedy algorithm guarantees a $(1-1/e) \approx 0.632$
+        approximation ratio. If the optimal seed set $S^*$ achieves influence
+        $\sigma(S^*) = 200{,}000$ users, what is the worst-case influence
+        of the greedy seed set? Is this a meaningful guarantee for a
+        public health campaign? Discuss.
+  \item Kempe et al.'s greedy algorithm requires evaluating $\sigma(S)$
+        by Monte Carlo simulation (running the cascade 10{,}000 times).
+        For a graph of 1 million nodes, $k = 5$ seed nodes, and 100
+        candidate nodes to evaluate at each greedy step, estimate the
+        total number of cascade simulations required. Is this tractable
+        on a single machine?
+\end{enumerate}
+
+\ap \textbf{Prophet Model Diagnostics.}
+A Prophet model was fitted to 3 years of weekly dengue case data
+for a tropical metropolitan region. The fitted components show:
+\begin{itemize}
+  \item Trend $g(t)$: an increasing linear trend with two changepoints:
+        at week 52 (slope increase) and week 130 (slope decrease).
+  \item Seasonality $s(t)$: a strong annual peak centred on weeks 32--38
+        (August--September) coinciding with the post-monsoon season.
+  \item Residuals $\varepsilon(t)$: mostly near zero except for weeks 88,
+        89, and 90, where residuals are $+150$, $+220$, and $+180$ cases
+        above the seasonal expected value.
+\end{itemize}
+\begin{enumerate}[label=(\alph*)]
+  \item What real-world events might explain the two changepoints at
+        weeks 52 and 130? (Hint: consider vector control interventions,
+        climate events, and reporting system changes.)
+  \item The large positive residuals in weeks 88--90 were not captured
+        by the seasonal component. What type of event would cause a
+        3-week anomaly in dengue cases, and how would you modify the
+        Prophet model to capture it in future forecasts?
+  \item The public health director asks whether the model can predict a
+        dengue surge 8 weeks in advance. Describe the specific uncertainty that
+        makes 8-week forecasts unreliable in a dengue context (not a
+        general statistical argument---specific to dengue epidemiology).
+\end{enumerate}
+
+\ap \textbf{Healthcare Privacy Analysis.}
+A health system researcher wants to analyse 5 years of inpatient records
+(500{,}000 patients) from 10 hospitals to build a 30-day readmission
+prediction model. The data includes: patient name, national ID number,
+date of birth, home region, ICD-10 diagnosis codes, procedure codes,
+admission date, length of stay, and discharge outcome.
+\begin{enumerate}[label=(\alph*)]
+  \item List all fields that would be removed under HIPAA's safe harbour
+        method. Which field is most uniquely identifying and why?
+  \item The researcher wants to release a public version of the dataset
+        for academic use. Under GDPR's data minimisation principle, which
+        fields should be retained and which should be removed or generalised?
+        Justify each decision.
+  \item A second research team at a partner university wants to train on
+        their own 50{,}000-patient dataset and combine insights via
+        federation. Why would federated learning be preferable to data
+        centralisation? Describe the federated averaging protocol and
+        identify one risk.
+  \item The final deployed model has AUROC 0.82. The Chief Data Officer
+        asks: ``Is the model equally accurate for patients from rural
+        regions as for patients from urban centres?'' Describe the
+        analysis you would run to answer this question and the corrective
+        action if the answer is no.
+\end{enumerate}
+
+\ap \textbf{Vectorised Forecasting Performance Analysis.}
+A telecom company needs to forecast daily call-drop rates for 6{,}000
+cell towers, each with 2 years of daily measurements.
+\begin{enumerate}[label=(\alph*)]
+  \item Design the Spark job using \code{applyInPandas}. Specify:
+        the DataFrame schema, the partition key, the Pandas UDF signature,
+        and the output schema for 30-day forecasts.
+  \item A single Prophet fit on 730 daily observations takes approximately
+        2 seconds. Estimate the wall-clock time to fit all 6{,}000 tower
+        models on: (i) a single machine with 8 cores; (ii) a Spark cluster
+        with 20 executors each having 8 cores.
+  \item The Prophet models for 300 towers (5\%) produce MAPE $> 30\%$
+        on a holdout set. Describe three diagnostic checks you would
+        perform to identify why these towers have poor forecast accuracy.
+  \item Propose a strategy for handling towers with fewer than 60 days
+        of data (e.g., new towers installed in the past 2 months).
+\end{enumerate}
+
+\exercisesection{Design Problems}
+
+\dpr \textbf{National Disease Surveillance System.}
+Design a big data disease surveillance system analogous to the CDC
+BioSense platform. The system should detect outbreaks of dengue fever,
+influenza, and COVID-19 up to 7 days before the health authority
+receives clinical confirmation.
+
+\begin{enumerate}[label=(\alph*)]
+  \item \textbf{Data sources}: identify four non-traditional data sources
+        analogous to the CDC's syndromic surveillance inputs (social
+        media, pharmacy, ER, search). For each, identify the entity that
+        controls the data and the access mechanism.
+  \item \textbf{Ingestion pipeline}: specify the Kafka topic structure
+        (topic name, partition count, key, value format) for each source.
+        Explain why Kafka is preferable to a direct database write for
+        multi-source signal aggregation.
+  \item \textbf{Signal processing}: describe the Spark Structured Streaming
+        window aggregation for the social media signal (window size, slide,
+        output metric). Describe the Prophet model configuration for the
+        weekly hospitalization series.
+  \item \textbf{Alert logic}: specify the threshold that triggers an
+        outbreak alert. Should the threshold be a fixed case count, a
+        percentage above the Prophet forecast, or a combination? Justify.
+  \item \textbf{Privacy safeguards}: the social media signal includes
+        geotagged posts and the pharmacy signal includes named individuals'
+        medication purchases. Specify the de-identification steps before
+        these signals enter the pipeline, citing GDPR Article~9 and
+        HIPAA Safe Harbour requirements.
+\end{enumerate}
+
+\dpr \textbf{Multi-Hospital Clinical ML Pipeline.}
+A regional health authority wants to deploy a 30-day readmission
+prediction model trained on data from five hospitals in a metropolitan
+region. Data sharing between hospitals is restricted by HIPAA / GDPR.
+
+\begin{enumerate}[label=(\alph*)]
+  \item Design a federated learning architecture: specify which component
+        runs at each hospital, what is transmitted to the central server,
+        and how the federated averaging step works.
+  \item Specify the minimum feature set that can be computed from ICD-10
+        codes, length of stay, and admission month without transmitting
+        any PHI identifiers. Explain the trade-off between feature richness
+        and privacy risk.
+  \item The central model achieves AUROC 0.79 after 10 federated rounds.
+        Hospital A's local model (50{,}000 patients) achieves AUROC 0.84.
+        The hospital director asks whether to use the global model or the
+        local model. Analyse the trade-offs and provide a recommendation.
+  \item Describe two bias risks in the federated model arising from
+        the dataset heterogeneity across five hospitals (e.g., different
+        patient populations, different documentation practices) and
+        propose a mitigation for each.
+\end{enumerate}
+
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Social Network Analysis with NetworkX and Louvain.}
+Construct a social network from a synthetic dataset of 1{,}000 Twitter
+users and 15{,}000 directed following edges, then analyse its structure.
+\begin{enumerate}[label=(\alph*)]
+  \item Generate the synthetic directed graph using \texttt{networkx}
+        with a preferential attachment model (\texttt{barabasi\_albert\_graph}).
+        Compute: number of nodes, number of edges, average in-degree,
+        maximum in-degree, reciprocity rate, and average shortest path
+        length (on the largest connected component).
+  \item Apply the Louvain algorithm (\texttt{python-louvain}). Report:
+        number of communities detected, modularity $Q$, and the size
+        of the five largest communities.
+  \item Compute PageRank for all nodes. Identify the top-5 nodes by
+        PageRank and the top-5 by in-degree. Are they the same nodes?
+        Calculate the Spearman rank correlation between PageRank and
+        in-degree rankings.
+  \item Create a visualisation: draw the network with nodes coloured
+        by community assignment (Louvain partition), node size
+        proportional to PageRank, and inter-community edges drawn
+        as dashed grey lines.
+\end{enumerate}
+
+\pe \textbf{Prophet Forecasting with Holiday Effects.}
+Using the Prophet library, build a demand forecasting model for an
+international retailer with strong year-end seasonal spikes.
+\begin{enumerate}[label=(\alph*)]
+  \item Generate 3 years of synthetic weekly sales data with: an upward
+        linear trend, strong annual seasonality (peak in late November /
+        December holiday season), moderate weekly seasonality (peak on
+        Saturday), and random Gaussian noise.
+  \item Fit two Prophet models: one without holidays and one with
+        Black Friday, Cyber Monday, and Christmas dates explicitly encoded
+        with a window of $[-3, +3]$ days. Compare the MAPE on a 12-week
+        holdout set.
+  \item Plot the component decomposition for the model with holidays.
+        Identify the estimated holiday effect size (in sales units) for
+        Black Friday.
+  \item Change \texttt{changepoint\_prior\_scale} from 0.01 to 0.5 in
+        steps. Plot how the fitted trend changes. At what value does the
+        model begin to overfit to noise in the training data?
+\end{enumerate}
+
+\pe \textbf{Healthcare Data Pipeline (FHIR + Spark).}
+Build a Spark pipeline that simulates processing EHR data from multiple
+hospitals for a 30-day readmission prediction task.
+\begin{enumerate}[label=(\alph*)]
+  \item Generate 100{,}000 synthetic patient records with fields:
+        \texttt{patient\_id} (UUID), \texttt{admission\_date},
+        \texttt{region} (50 values), \texttt{primary\_icd10} (50 codes),
+        \texttt{los\_days}, \texttt{readmitted\_30d} (binary label,
+        15\% positive rate).
+  \item Apply safe harbour de-identification: generate a surrogate
+        \texttt{anon\_id} (SHA-256 hash of patient UUID), generalise
+        \texttt{admission\_date} to \texttt{admission\_year\_month},
+        and group \texttt{region} into 10 macro-regions.
+  \item Using Spark MLlib, train a Gradient Boosted Tree classifier
+        on the de-identified features. Report AUROC, precision, recall,
+        and F1 on a 20\% holdout set.
+  \item Stratify the AUROC by region. Identify the three regions with
+        the lowest AUROC and hypothesise (in 2--3 sentences) why the
+        model performs worse in those regions.
+\end{enumerate}
+
+%%====================================================================
+\section*{Further Reading}
+\label{sec:ch10-further}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{\cite{Kwak2010}} --- Five pages; read it in full.
+        The network topology findings (Sections 3--4) and the trending
+        topics analysis (Section 5) are the most cited. The data collection
+        section (Section 2) is worth reading for its description of
+        rate-limit-aware BFS crawling---a practical lesson for any
+        large-scale API data collection.
+  \item \textbf{\cite{Prophet2018}} --- Open access at
+        \texttt{peerj.com/preprints/3190}. Read Sections 2 (model)
+        and 3 (analyst-in-the-loop). The Appendix contains the Stan
+        code for the full model---useful if you want to extend Prophet's
+        priors for a specific domain.
+  \item \textbf{\cite{Obermeyer2016}} --- Two pages in NEJM.
+        Read alongside Caruana et al.'s 2015 KDD paper on ``Intelligible
+        Models for Healthcare'' for the interpretability counterargument:
+        high-AUROC models that physicians cannot explain are frequently
+        ignored in clinical practice.
+  \item \textbf{\cite{LazerFluTrends2014}} --- Three pages in
+        \textit{Science}. A masterclass in the epistemology of big data:
+        why $r^2 = 0.97$ on training data means almost nothing, and why
+        algorithm opacity is a scientific problem.
+  \item \textbf{\cite{AlphaFold2021}} --- Read the introduction and
+        the ``Results'' first paragraph. The Evoformer architecture
+        section (Methods) is deep and requires familiarity with
+        attention mechanisms; save it for after studying transformers.
+  \item \textbf{Leskovec, Rajaraman \& Ullman.
+        \textit{Mining of Massive Datasets}, 3rd ed.\ Chapter 10}:
+        social network structure, community detection, influence
+        propagation. Freely available at \texttt{mmds.org}.
+  \item \textbf{Hyndman, R.~J., \& Athanasopoulos, G. (2021).
+        \textit{Forecasting: Principles and Practice}, 3rd ed.}
+        Freely available at \texttt{otexts.com/fpp3}. The definitive
+        modern time series forecasting textbook; Chapters 9--10 cover
+        ARIMA and Prophet in depth.
+\end{itemize}

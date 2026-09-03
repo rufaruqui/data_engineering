@@ -267,7 +267,7 @@ completion:
         the AM's own container.
 \end{enumerate}
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     actor/.style={rectangle, draw=DEBlue!60, fill=DELightBlue!40, rounded corners=4pt,
@@ -600,7 +600,7 @@ A column of \texttt{country} codes (``US'', ``DE'', ``JP'', ...) with
 high repetition compresses 10--50$\times$ better than an entire row
 containing a mix of integers, strings, and floats.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     hdr/.style={rectangle, fill=DEBlue!80, text=white, draw=DEBlue,
@@ -742,7 +742,7 @@ Each column chunk is further divided into \term{pages} of approximately
 (replacing repeated values with short integer codes) and then
 compressed with a configurable codec (Snappy by default).
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     file/.style={rectangle, draw=DEBlue!50, fill=DELightBlue!20,
@@ -856,7 +856,7 @@ outweigh the decompression overhead. ORC also supports Hive's ACID
 Parquet does not natively support---enabling \texttt{UPDATE} and
 \texttt{DELETE} operations on Hive tables.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Comparison of the five major Hadoop file formats}
 \label{tab:format-comparison}
@@ -913,7 +913,7 @@ each reading one row group from a local DataNode---achieving 80$\times$
 parallelism and completing the job in $1/80$th the wall-clock time of
 the single-task case.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     blk/.style={rectangle, draw=DEGreen!60, fill=DELightGreen,
@@ -963,7 +963,7 @@ the single-task case.
 \label{subsec:codecs}
 %--------------------------------------------------------------------
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Hadoop compression codecs: performance and splittability}
 \label{tab:codecs}

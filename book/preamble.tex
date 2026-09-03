@@ -10,7 +10,7 @@
 \usepackage{newpxtext}          % Palatino-style text (pdfLaTeX compatible)
 \usepackage{newpxmath}          % matching math font
 \usepackage{inconsolata}        % high-quality monospace for all code
-\usepackage{microtype}          % optical margin alignment, letter spacing
+\usepackage[expansion=false]{microtype} % kerning/tracking only; expansion off (font compat)
 \usepackage{setspace}
 \setstretch{1.15}               % comfortable reading line spacing
 
@@ -50,8 +50,10 @@
 % 4. MATHEMATICS
 %----------------------------------------------------------------------
 \usepackage{amsmath}
+% newpxmath defines \Bbbk; amssymb would redefine it — clear first
+\let\Bbbk\relax
 \usepackage{amssymb}
-% newpxmath defines \openbox; amsthm also defines it — clear it first
+% newpxmath also defines \openbox; clear before amsthm
 \let\openbox\relax
 \usepackage{amsthm}
 
@@ -86,8 +88,7 @@
   decorations.text,
   calc,
   matrix,
-  patterns,
-  shadows.blur
+  patterns
 }
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.17}
@@ -97,6 +98,18 @@
 %----------------------------------------------------------------------
 \usepackage{listings}
 \renewcommand{\lstlistingname}{Listing}
+
+% Global listing defaults — handle UTF-8 special chars that appear in comments
+\lstset{
+  extendedchars=true,
+  inputencoding=utf8,
+  literate=
+    {—}{{---}}{1}%  em dash  → three hyphens (typewriter convention)
+    {–}{{--}}{1}%   en dash  → two hyphens
+    {…}{{...}}{1}%  ellipsis → three dots
+    {←}{{\texttt{<-}}}{2}%
+    {→}{{\texttt{->}}}{2}%
+}
 
 % PySpark / Python
 \lstdefinestyle{pyspark}{
@@ -205,8 +218,6 @@
   title={Research Spotlight\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DEBlue, size=small},
   #1
 }
 
@@ -221,8 +232,6 @@
   title={Key Insight\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DEAccent, size=small},
   #1
 }
 
@@ -237,8 +246,6 @@
   title={System Design Note\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DEGreen, size=small},
   #1
 }
 
@@ -253,8 +260,6 @@
   title={Common Misconception\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DERed, size=small},
   #1
 }
 
@@ -269,8 +274,6 @@
   title={Production Lesson\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DEGray, size=small},
   #1
 }
 
@@ -299,8 +302,6 @@
   title={Case Study\quad\textbar\quad #2},
   left=6pt, right=6pt, top=4pt, bottom=6pt,
   arc=4pt, boxrule=0.8pt,
-  attach boxed title to top left={yshift=-2mm, xshift=8pt},
-  boxed title style={arc=2pt, colback=DEPurple, size=small},
   #1
 }
 
@@ -478,6 +479,8 @@
 \newcommand{\pe}{\stepcounter{pectr}%
   \par\vspace{6pt}\noindent
   \textbf{PE\thechapter.\thepectr.}\enspace}
+
+\usepackage{pdfpages}   % for \includepdf{cover.pdf}
 
 % Section heading shorthand for exercise sections
 \newcommand{\exercisesection}[1]{%

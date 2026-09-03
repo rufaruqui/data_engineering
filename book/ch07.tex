@@ -247,7 +247,7 @@ FROM daily_sales
 WHERE dt = '2024-Q1';
 \end{lstlisting}
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Key HiveQL window functions}
 \label{tab:window-functions}
@@ -375,7 +375,7 @@ replaces the MapReduce execution model with a \term{directed acyclic graph
 to express a complex multi-stage query as a single DAG rather than a chain
 of separate MapReduce jobs.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     mr/.style={rectangle, draw=DERed!60, fill=DERed!15, rounded corners=4pt,
@@ -607,7 +607,7 @@ shuffle whatsoever. SMB Join requires upfront investment in table design
 (bucketing and sorting at write time) but delivers the best possible
 join performance at read time.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Hive join strategy comparison}
 \label{tab:join-strategies}
@@ -683,7 +683,7 @@ distinction matters.
 A Presto cluster consists of one \term{Coordinator} node and multiple
 \term{Worker} nodes, communicating over HTTP/2.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     coord/.style={rectangle, draw=DEBlue!70, fill=DELightBlue!50,
@@ -931,7 +931,7 @@ Impala's key design characteristics:
 \label{subsec:engine-comparison}
 %%--------------------------------------------------------------------
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{SQL-on-Hadoop engine comparison}
 \label{tab:engine-comparison}

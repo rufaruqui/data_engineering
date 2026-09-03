@@ -1,6 +1,6 @@
 %=================================================================
 % CSE 4345 — Big Data Analytics
-% Week 2, Part 2: Seminal Research & Case Study
+% Week 2, Part 2: Research Article & Case Study
 % Department of CSE, Premier University
 %
 % SEMINAL PAPER:
@@ -100,11 +100,11 @@
 
 %---------- Title metadata ----------
 \title[CSE 4345 \textbar{} Week 2, Part 2]{CSE 4345: Big Data Analytics}
-\subtitle{Week 2, Part 2 \textemdash\ Seminal Research \& Case Study}
-\author[Dept.\ of CSE]{Department of Computer Science \& Engineering\\[4pt]
-       \small Premier University, Chittagong}
+\subtitle{Week 2, Part 2 \textemdash\ Research Article \& Case Study}
+\author[Dept.\ of CSE]{Rokan Uddin Faruqui \\ Professor \\ Department of Computer Science \& Engineering\\[4pt]
+       \small University of Chittagong, Chittagong}
 \institute{}
-\date{Semester 2026}
+\date{CSE, PUC, Spring 2026}
 
 %=================================================================
 \begin{document}
@@ -128,7 +128,7 @@
       \end{block}
 
     \column{0.50\textwidth}
-      \begin{exampleblock}{Seminal Paper Covered}
+      \begin{exampleblock}{Research Article Covered}
         \begin{enumerate}
           \item Halevy, A., Rajaraman, A., \& Ordille, J. (2006).
                 \textit{Data Integration: The Teenage Years.}
@@ -255,13 +255,8 @@
                 \emph{and} vice versa; allows bidirectional query rewriting
         \end{itemize}
       \end{block}
-      \vspace{5pt}
-      \begin{alertblock}{The Semantic Gap Problem}
-        Even with perfect GLAV mappings, the \emph{meaning} of
-        \texttt{customer\_id} in the Sales DB $\neq$
-        \texttt{cust\_no} in the CRM — no formal system can resolve
-        this without \textbf{domain expertise}.
-      \end{alertblock}
+   
+    
 
     \column{0.47\textwidth}
       \begin{center}
@@ -273,12 +268,12 @@
         \node[box, fill=PUGold!30]  (q)   at (0, 3.8) {User Query (SQL)};
         \node[box, fill=PUNavy, text=white] (med) at (0, 2.8)
               {Mediator\\{\tiny global schema + rewriter}};
-        \node[box, fill=PUNavy!20]  (wa)  at (-1.8, 1.5) {Wrapper A\\{\tiny RDBMS}};
+        \node[box, fill=PUNavy!20]  (wa)  at (-2.2, 1.5) {Wrapper A\\{\tiny RDBMS}};
         \node[box, fill=PUNavy!20]  (wb)  at (0,    1.5) {Wrapper B\\{\tiny XML feed}};
-        \node[box, fill=PUNavy!20]  (wc)  at (1.8,  1.5) {Wrapper C\\{\tiny REST API}};
-        \node[box, fill=PUGreen!20] (sa)  at (-1.8, 0.3) {Source A};
+        \node[box, fill=PUNavy!20]  (wc)  at (2.2,  1.5) {Wrapper C\\{\tiny REST API}};
+        \node[box, fill=PUGreen!20] (sa)  at (-2.2, 0.3) {Source A};
         \node[box, fill=PUGreen!20] (sb)  at (0,    0.3) {Source B};
-        \node[box, fill=PUGreen!20] (sc)  at (1.8,  0.3) {Source C};
+        \node[box, fill=PUGreen!20] (sc)  at (2.2,  0.3) {Source C};
 
         \draw[arr] (q)  -- (med);
         \draw[arr] (med)-- (wa);
@@ -293,8 +288,17 @@
       \end{tikzpicture}
       \end{center}
   \end{columns}
+   
 \end{frame}
 
+\begin{frame}{Technical Contribution 1 — The Integration Stack}
+    \begin{alertblock}{The Semantic Gap Problem}
+        Even with perfect GLAV mappings, the \emph{meaning} of
+        \texttt{customer\_id} in the Sales DB $\neq$
+        \texttt{cust\_no} in the CRM — no formal system can resolve
+        this without \textbf{domain expertise}.
+      \end{alertblock}
+\end{frame}
 %----------------------------------------------------------------
 \begin{frame}{Technical Contribution 2 — Pay-As-You-Go Integration}
   \begin{columns}[T]
@@ -729,7 +733,7 @@ df.show()
 
 %----------------------------------------------------------------
 \begin{frame}{References}
-  \begin{block}{Seminal Paper}
+  \begin{block}{Research Article}
     \begin{itemize}
       \item Halevy, A., Rajaraman, A., \& Ordille, J. (2006).
             Data integration: The teenage years.

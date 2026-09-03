@@ -98,18 +98,18 @@ pdflatex main.tex
 ### Part V — Data Pipelines and Modern Integration
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 8 | Data Pipelines, Data Lakes, and Real-Time Integration | W08 | pending |
+| 8 | Data Pipelines, Data Lakes, and Real-Time Integration | W08 | **DONE** |
 
 ### Part VI — Insight Delivery
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 9 | Data Visualization at Scale | W09 | pending |
-| 10 | Domain Applications: Social Networks, Time Series, and Healthcare | W10 | pending |
+| 9 | Data Visualization at Scale | W09 | **DONE** |
+| 10 | Domain Applications: Social Networks, Time Series, and Healthcare | W10 | **DONE** |
 
 ### Part VII — The Modern Data Stack
 | Ch | Title | Source weeks | Status |
 |---|---|---|---|
-| 11 | The Lakehouse, MLOps, and Emerging Architectures | W11 | pending |
+| 11 | The Lakehouse, MLOps, and Emerging Architectures | W11 | **DONE** |
 
 ---
 

@@ -59,7 +59,7 @@ zettabyte equals $10^{21}$ bytes, or roughly 250 billion standard 4\TB\
 hard drives---more drives than there are stars visible to the naked eye
 from any single point on Earth.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Data volume units and their relationship to everyday storage}
 \label{tab:volume-units}
@@ -158,7 +158,7 @@ single machine cannot store and process it within an acceptable elapsed
 time. The following production examples illustrate current operational
 scales:
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Volume at production scale (representative 2023--2024 estimates)}
 \label{tab:volume-examples}
@@ -227,12 +227,12 @@ separation between \emph{batch} and \emph{stream} processing
 architectures, explored in Section~\ref{sec:batch-stream} and in depth
 in Chapter~\ref{ch:pipelines}.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{The data processing spectrum by velocity requirement}
 \label{tab:velocity-spectrum}
 \renewcommand{\arraystretch}{1.35}
-\begin{tabular}{L{2.2cm} L{1.6cm} L{3.2cm} L{3.4cm}}
+\begin{tabular}{L{2.2cm} L{2cm} L{3.2cm} L{3.4cm}}
 \toprule
 \textbf{Processing mode} & \textbf{Latency} & \textbf{Representative tools} & \textbf{Typical use case} \\
 \midrule
@@ -621,7 +621,7 @@ approximately doubles the throughput. Failure of a single node---which
 is expected, not exceptional, in a large cluster---does not halt the
 system, because data is replicated across multiple nodes.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Vertical vs.\ horizontal scaling: a systematic comparison}
 \label{tab:scaling}
@@ -765,7 +765,7 @@ every request with possibly stale data, guaranteeing responsiveness)?
 This choice is one of the most important architectural decisions in data
 engineering.
 
-\begin{figure}[ht]
+\begin{figure}[h!t]
 \centering
 \begin{tikzpicture}[
     node distance=0pt,
@@ -822,7 +822,7 @@ engineering.
 \label{fig:cap-triangle}
 \end{figure}
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{CAP positioning of representative data systems}
 \label{tab:cap-systems}
@@ -948,6 +948,22 @@ current queue depth, not yesterday's average); and anomaly detection in
 industrial systems (a turbine failure signal is valuable in real time,
 not eight hours later).
 
+\begin{keyinsight}{Lambda and Kappa Architectures}
+Many production systems need both low latency \emph{and} high
+accuracy---properties that are difficult to achieve simultaneously. The
+\textbf{Lambda architecture} (Nathan Marz, 2011) addresses this by
+running both a batch layer (for accurate, comprehensive historical
+analysis) and a speed layer (for low-latency approximate results) in
+parallel, merging their outputs in a serving layer. The cost is
+engineering complexity: every transformation must be implemented twice,
+in different frameworks. The \textbf{Kappa architecture} (Jay Kreps,
+2014) simplifies this by replacing the batch layer with a replay of the
+full event log through the stream processor---using Apache Kafka's
+message retention to make historical reprocessing possible through the
+streaming path. Both architectures are examined in depth in
+Chapter~\ref{ch:pipelines}.
+\end{keyinsight}
+
 Stream processing introduces engineering challenges that batch processing
 avoids. Records may arrive \emph{out of order} (a mobile device's
 network connection may be intermittent, causing events to be delayed and
@@ -960,7 +976,7 @@ careful memory management and state backends. Fault recovery requires
 mechanisms like \emph{exactly-once processing} semantics, which add
 significant implementation complexity.
 
-\begin{table}[ht]
+\begin{table}[h!t]
 \centering
 \caption{Batch vs.\ stream processing: a systematic comparison}
 \label{tab:batch-stream}
@@ -982,21 +998,7 @@ Typical tools           & Hadoop MapReduce, Hive, Spark Batch & Kafka, Apache Fl
 \end{tabular}
 \end{table}
 
-\begin{keyinsight}{Lambda and Kappa Architectures}
-Many production systems need both low latency \emph{and} high
-accuracy---properties that are difficult to achieve simultaneously. The
-\textbf{Lambda architecture} (Nathan Marz, 2011) addresses this by
-running both a batch layer (for accurate, comprehensive historical
-analysis) and a speed layer (for low-latency approximate results) in
-parallel, merging their outputs in a serving layer. The cost is
-engineering complexity: every transformation must be implemented twice,
-in different frameworks. The \textbf{Kappa architecture} (Jay Kreps,
-2014) simplifies this by replacing the batch layer with a replay of the
-full event log through the stream processor---using Apache Kafka's
-message retention to make historical reprocessing possible through the
-streaming path. Both architectures are examined in depth in
-Chapter~\ref{ch:pipelines}.
-\end{keyinsight}
+
 
 %%====================================================================
 \section{Case Study: Walmart's Retail Analytics Platform}

@@ -1,0 +1,62 @@
+\documentclass[11pt,fleqn]{book}
+\usepackage[utf8]{inputenc}
+\usepackage[a4paper,margin=0in]{geometry} % Full bleed cover design
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{fontspec}
+
+% Define a modern, professional data engineering color palette
+\definecolor{DeepNavy}{HTML}{0A192F}
+\definecolor{TealAccent}{HTML}{00B4D8}
+\definecolor{LightSlate}{HTML}{8892B0}
+\definecolor{PureWhite}{HTML}{F8F9FA}
+\definecolor{GridLine}{HTML}{172A45}
+
+\begin{document}
+\thispagestyle{empty}
+
+\begin{tikzpicture}[remember picture, overlay]
+    % Background
+    \fill[DeepNavy] (current page.south west) rectangle (current page.north east);
+    
+    % Abstract Modern Abstract Grid representing Distributed Systems/Nodes
+    \draw[GridLine, thin, step=1.5cm] (current page.south west) grid (current page.north east);
+    
+    % Decorative Tech Accents (Nodes)
+    \foreach \x/\y in {3/5, 6/12, 14/8, 18/15, 8/22, 12/25, 4/18, 16/22} {
+        \fill[TealAccent, opacity=0.15] (\x,\y) circle (20pt);
+        \fill[TealAccent, opacity=0.4] (\x,\y) circle (6pt);
+        \fill[PureWhite] (\x,\y) circle (2pt);
+    }
+    
+    % Connecting lines for distributed system look
+    \draw[TealAccent, opacity=0.2, thick] (3,5) -- (6,12) -- (4,18) -- (8,22) -- (12,25) -- (16,22) -- (14,8) -- (3,5);
+    \draw[TealAccent, opacity=0.15, thin] (6,12) -- (14,8);
+    \draw[TealAccent, opacity=0.15, thin] (4,18) -- (16,22);
+    
+    % Decorative Top Bar
+    \fill[TealAccent] ([yshift=-1cm]current page.north west) rectangle ([yshift=-1.2cm]current page.north east);
+
+    % Main Title Block Container
+    \node[anchor=center, text width=16cm, align=left] at ([yshift=3cm]current page.center) {
+        {\fontsize{14pt}{18pt}\selectfont\color{TealAccent}\sffamily\bfseries\MakeUppercase{Advanced Data Series}}\\[0.8cm]
+        {\fontsize{38pt}{46pt}\selectfont\color{PureWhite}\sffamily\bfseries Data Engineering}\\[0.4cm]
+        {\fontsize{22pt}{28pt}\selectfont\color{LightSlate}\sffamily\mdseries Distributed Systems, Scalable Processing, and Modern Architectures}
+    };
+    
+    % Divider Line
+    \draw[TealAccent, line width=2pt] ([xshift=2.5cm, yshift=-1cm]current page.center) -- ([xshift=-2.5cm, yshift=-1cm]current page.center);
+
+    % Author Block
+    \node[anchor=south, text width=16cm, align=center] at ([yshift=3cm]current page.south) {
+        {\fontsize{16pt}{20pt}\selectfont\color{PureWhite}\sffamily\mdseries Rokan Uddin Faruqui}
+    };
+
+    % Publisher / Tech Badge at bottom
+    \node[anchor=south, text width=16cm, align=center] at ([yshift=1.5cm]current page.south) {
+        {\fontsize{10pt}{12pt}\selectfont\color{LightSlate}\sffamily\bfseries SCIENTIFIC PRESS}
+    };
+
+\end{tikzpicture}
+
+\end{document}

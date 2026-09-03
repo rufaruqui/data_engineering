@@ -1,0 +1,1499 @@
+%% ch09.tex — Chapter 9: Data Visualization at Scale
+%% Part of "Data Engineering" textbook
+
+\chapter{Data Visualization at Scale}
+\label{ch:visualization}
+
+\epigraph{\textit{``Above all else, show the data.''}}{Edward R.\ Tufte,
+\textit{The Visual Display of Quantitative Information},
+Graphics Press, 1983}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain why Anscombe's Quartet demonstrates that summary statistics
+        alone are insufficient for data understanding, and describe the
+        role of visualization as a primary data quality check.
+  \item Define Tufte's data-ink ratio, compute it for a given chart, and
+        identify specific chartjunk elements (heavy grids, 3-D effects,
+        gradients) that should be removed to maximise it.
+  \item Calculate Tufte's lie factor for a chart with a truncated axis and
+        explain the distortion it introduces in the viewer's perception of
+        the data effect.
+  \item Describe Tufte's small multiples and sparklines and explain why
+        each is preferable to animation for comparing trends across many
+        subsets.
+  \item Apply Shneiderman's three-step visual information seeking mantra
+        (overview first; zoom and filter; details on demand) to the design
+        of an interactive big data dashboard.
+  \item Use Shneiderman's seven data type taxonomy to select the appropriate
+        visualization type for a given analytical question (temporal, 2D
+        geographic, multi-dimensional, tree, and network data).
+  \item Describe three techniques for addressing overplotting in
+        million-point scatterplots---alpha transparency, hexbin aggregation,
+        and kernel density estimation---and explain what each preserves
+        that the overplotted chart loses.
+  \item Explain how pre-aggregated data cubes enable sub-second interactive
+        query response on billion-row fact tables, and identify the latency
+        versus freshness trade-off.
+  \item Design a streaming visualization architecture using Kafka, Spark
+        Structured Streaming, a time-series database, and Grafana, and
+        explain when to use WebSocket push versus periodic poll.
+  \item Compare six visualization tools---Tableau, Power BI, D3.js,
+        Grafana, Apache Superset, and Kibana---on audience, data source,
+        scale, and real-time capability, and select the appropriate tool
+        for a given scenario.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:pipelines} established how data arrives in the platform ---
+through Kafka pipelines, data lakes, and stream processing architectures.
+This chapter asks what happens at the other end: once data has been
+ingested, stored, and aggregated, how should it be communicated to the
+humans who must act on it?
+
+The answer is not as obvious as it might appear. A petabyte-scale analytical
+result compressed into a single number is not trustworthy; a table of ten
+million rows is unreadable; and a chart that presents data incorrectly is
+worse than no chart at all. The discipline of data visualization provides
+a rigorous body of principles---grounded in perceptual psychology,
+information theory, and graphic design---that governs how data should be
+encoded visually so that human pattern recognition can operate effectively.
+
+This chapter covers the three intellectual pillars of that discipline:
+Edward Tufte's \emph{data-ink} theory of minimal graphical design;
+Ben Shneiderman's \emph{task-by-data-type taxonomy} and interaction model;
+and Mike Bostock's \emph{D3.js}, which made both principles implementable
+in interactive web graphics. It then addresses the three specific engineering
+challenges that big data introduces for visualization---overplotting, latency,
+and streaming---and maps the tool landscape across which practitioners
+must choose.
+
+%%====================================================================
+\section{Why Visualization Matters: From Summary to Insight}
+\label{sec:viz-why}
+%%====================================================================
+
+The case for visualization is not merely aesthetic. It rests on a
+demonstrable limitation of summary statistics: different data with
+radically different structures can produce identical numerical summaries.
+
+%--------------------------------------------------------------------
+\subsection{Anscombe's Quartet}
+\label{subsec:anscombe}
+%--------------------------------------------------------------------
+
+In 1973, statistician Francis Anscombe constructed four datasets---now
+called \term{Anscombe's Quartet}---each with 11 observations, each
+sharing the following summary statistics to two decimal places:
+mean of $x = 9.00$; mean of $y = 7.50$; variance of $x = 11.00$;
+variance of $y = 4.12$; correlation $r = 0.816$; regression line
+$\hat{y} = 3.00 + 0.500x$.
+
+Despite being statistically indistinguishable, the four datasets describe
+four qualitatively different phenomena:
+\begin{itemize}
+  \item \textbf{Dataset I} is a linear relationship with normally
+        distributed residuals---the ``textbook'' regression case.
+  \item \textbf{Dataset II} is a perfect curved (quadratic) relationship;
+        a linear fit is systematically wrong at every point.
+  \item \textbf{Dataset III} is a near-perfect linear relationship with
+        one outlier that drags the fitted slope away from the true slope.
+  \item \textbf{Dataset IV} has all $x$-values equal to 8 except one;
+        a vertical cluster of points with a single leverage point.
+\end{itemize}
+
+Anscombe's point was that no data analyst should trust a regression result
+without first plotting the data. The quartet has been the standard opening
+of every serious statistics course since 1973 and remains the canonical
+argument for prioritising visualization over numerical summary.
+
+\begin{keyinsight}{Visualization as the First Quality Check}
+At big data scale, Anscombe's problem becomes more severe, not less.
+A billion-row table may contain multiple overlapping sub-populations
+with opposing trends that cancel in the aggregate mean. Log-scale
+distributions (income, city populations, web traffic volumes) make
+arithmetic means uninformative. Seasonal effects can be exactly
+cancelled by counter-seasonal confounders, leaving a flat year-over-year
+mean that masks both effects. Visualization is therefore not a
+presentation step that happens after analysis---it is the first and
+most important analysis step.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Visualization in the Big Data Context}
+\label{subsec:viz-bigdata}
+%--------------------------------------------------------------------
+
+Big data introduces challenges that do not arise with small datasets:
+\begin{enumerate}
+  \item \textbf{Scale}: rendering 10 million points in a standard scatter
+        plot produces an uninformative solid blob. Visualization must be
+        redesigned for scale.
+  \item \textbf{Velocity}: streaming data generates new observations every
+        second. Charts must update continuously without requiring the user
+        to manually refresh.
+  \item \textbf{Variety}: heterogeneous data types---geographic coordinates,
+        time series, network graphs, free text---require different chart
+        types with different interaction paradigms.
+  \item \textbf{Latency}: a business analyst querying a 100-billion-row
+        Hive table expects a dashboard filter response in under one second.
+        The underlying computation may take minutes.
+\end{enumerate}
+
+The remainder of this chapter addresses each challenge in turn, building
+from foundational principles to engineering solutions.
+
+%%====================================================================
+\section{Tufte's Principles of Analytical Design}
+\label{sec:tufte}
+%%====================================================================
+
+Edward R.\ Tufte is Professor Emeritus of Statistics, Graphic Design, and
+Political Economy at Yale University. His 1983 book \textit{The Visual
+Display of Quantitative Information}---rejected by every publisher and
+self-published after Tufte mortgaged his house to pay for printing---sold
+40{,}000 copies in its first year and has been cited over 20{,}000 times.
+It is required reading at Harvard, Stanford, Yale, and MIT in data science
+and statistics courses, and its principles are embedded in every modern
+dashboard tool.
+
+%--------------------------------------------------------------------
+\subsection{The Data-Ink Ratio}
+\label{subsec:data-ink}
+%--------------------------------------------------------------------
+
+Tufte's central concept is the \term{data-ink ratio}:
+
+\begin{defbox}{Data-Ink Ratio (Tufte, 1983)}
+The \textbf{data-ink ratio} of a graphic is the proportion of the total
+ink used in the graphic that encodes actual data:
+\[
+  \text{Data-ink ratio} =
+  \frac{\text{ink devoted to data}}{\text{total ink used in graphic}}
+\]
+\textbf{Principle}: maximise the data-ink ratio. The maximum is 1: every
+mark encodes data and no mark is decorative. Erasing a non-data mark
+that does not reduce information is called \emph{erasing chartjunk}.
+\end{defbox}
+
+\term{Chartjunk} is Tufte's umbrella term for ink that does not encode
+data. He identifies three categories:
+\begin{itemize}
+  \item \textbf{Vibrations}: optical illusions caused by dense cross-
+        hatching, competing patterns, or high-contrast decorative elements.
+  \item \textbf{Grids}: heavy gridlines that compete with the data.
+        Tufte recommends light, thin gridlines or none at all; the data
+        should dominate the visual field, not the scaffolding.
+  \item \textbf{Ducks}: graphic elements that represent themselves rather
+        than data. A bar chart drawn as a stack of coins, a temperature
+        chart drawn as a thermometer, or any 3-D perspective added to a
+        2-D bar chart are all ``ducks'' --- they encode the same information
+        as the underlying simple chart but add ink without adding data.
+\end{itemize}
+
+\textbf{Practical application.} When designing or reviewing a chart, ask:
+``If I erased this element, would the viewer lose information?'' If the
+answer is no, erase it. Specific elements that almost always fail this test:
+\begin{itemize}
+  \item 3-D effects on bar charts, pie charts, or line charts.
+        Three-dimensional perspective distorts quantitative comparison:
+        the apparent depth makes a bar appear larger than its height warrants.
+  \item Gradient fills. A bar coloured dark-at-bottom and light-at-top
+        implies a quantitative dimension that does not exist.
+  \item Redundant legends when the chart can be directly labelled.
+  \item Background colours, shadows, and rounded decorative borders.
+\end{itemize}
+
+%--------------------------------------------------------------------
+\subsection{The Lie Factor}
+\label{subsec:lie-factor}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Lie Factor (Tufte, 1983)}
+The \textbf{lie factor} of a graphic measures how much the chart
+exaggerates or understates the effect it purports to show:
+\[
+  \text{Lie factor} =
+  \frac{\text{size of effect shown in graphic}}
+       {\text{size of effect in data}}
+\]
+A lie factor of 1 is truthful. A lie factor $>1$ overstates the data
+effect; a lie factor $<1$ understates it. Lie factors greater than
+1.05 or less than 0.95 are considered deceptive by Tufte.
+\end{defbox}
+
+The most common source of a high lie factor is a \emph{truncated axis}:
+a bar chart whose $y$-axis starts at 80 rather than 0. If two bars
+represent values of 82 and 90, the true ratio is $90/82 = 1.10$
+(a 10\% difference). If the $y$-axis starts at 80, the bars appear to
+have heights of 2 and 10---a ratio of 5---making the same 10\% difference
+look like a $5\times$ difference. The lie factor is $5/1.1 \approx 4.5$.
+
+\begin{caution}{The Truncated Axis in Political and Business Reporting}
+Truncated axes are ubiquitous in political advertising, corporate
+earnings presentations, and cable news graphics. They are technically
+not incorrect---the tick marks do state the true values---but they
+exploit the human perceptual system's tendency to judge bar charts by
+height rather than by reading the axis labels. In big data dashboards,
+the most common violation is a live metrics chart where the $y$-axis
+autoscales to the data range: a stable metric that fluctuates between
+99.98\% and 99.99\% availability appears to swing dramatically between
+\textasciitilde{}0\% and \textasciitilde{}100\% of the chart's visual height. Always verify that
+availability and ratio charts start their $y$-axes at zero.
+\end{caution}
+
+%--------------------------------------------------------------------
+\subsection{Small Multiples and Sparklines}
+\label{subsec:small-multiples}
+%--------------------------------------------------------------------
+
+Two of Tufte's most practically useful design patterns address the problem
+of comparing many subsets simultaneously without animation.
+
+\begin{defbox}{Small Multiples (Tufte, 1983)}
+\textbf{Small multiples} (also called \emph{trellis charts} or
+\emph{facet charts}) are a grid of charts that repeat the same visual
+structure---same axes, same scale, same chart type---across different
+subsets of the data (different time periods, geographic regions, product
+categories, or experimental conditions). The viewer's eye detects
+differences and patterns across the grid instantaneously, leveraging
+the perceptual system's ability to perform parallel comparison.
+The critical requirement is that \textbf{all panels share the same scale};
+if panels have different scales, comparison is invalid.
+\end{defbox}
+
+\begin{defbox}{Sparklines (Tufte, 2006)}
+A \textbf{sparkline} is a small, word-sized data graphic embedded
+directly in text or in a table cell alongside the numeric value it
+contextualises. A sparkline adds temporal context to a number without
+requiring a separate figure. Grafana's stat panel sparkline, the GitHub
+contribution heatmap, and Bloomberg terminal trend indicators are all
+direct applications of this concept. The design rule is minimal: no axis
+labels, no legend, no gridlines---just the trend shape in a space no
+larger than the surrounding text.
+\end{defbox}
+
+Small multiples are preferable to animation for the following reason:
+animation requires the viewer to \emph{remember} the previous frame to
+compare it with the current frame. A small-multiples grid allows
+simultaneous comparison of all subsets with no memory burden. A classic
+example is the New York Times COVID-19 tracker, which showed 50-state
+case charts in a small-multiples grid---allowing readers to compare New
+York, Texas, and California at a glance---rather than an animated map
+that required readers to hold the April 2020 pattern in working memory
+while watching the July 2020 pattern unfold.
+
+%%====================================================================
+\section{Shneiderman's Visual Information Seeking Mantra}
+\label{sec:shneiderman}
+%%====================================================================
+
+Ben Shneiderman is Professor of Computer Science at the University of
+Maryland and the inventor of the treemap (1991). His 1996 paper ``The Eyes
+Have It: A Task by Data Type Taxonomy for Information Visualizations,''
+presented at the IEEE Symposium on Visual Languages, has been cited over
+5{,}000 times and provides the standard framework for designing interactive
+visualisation systems.
+
+%--------------------------------------------------------------------
+\subsection{The Three-Step Mantra}
+\label{subsec:mantra}
+%--------------------------------------------------------------------
+
+Shneiderman's central contribution is the \term{visual information seeking
+mantra}:
+
+\begin{keyinsight}{Shneiderman's Visual Information Seeking Mantra}
+\begin{center}
+\large\textit{``Overview first, zoom and filter, then details on demand.''}
+\end{center}
+This three-step model describes the \textbf{universal interaction sequence}
+for any well-designed interactive visualisation:
+\begin{enumerate}
+  \item \textbf{Overview first.} Present the complete dataset or the
+        highest-level aggregation as the initial view. The user must
+        be able to see the whole picture before selecting a subset.
+  \item \textbf{Zoom and filter.} Allow the user to narrow the view to
+        a region of interest---either spatially (zoom on a geographic
+        map, zoom on a time-axis), or by attribute (filter to a specific
+        category, date range, or threshold).
+  \item \textbf{Details on demand.} Allow the user to inspect the raw
+        record for any visible item by clicking or hovering. The tooltip
+        or drill-down panel reveals the full record without switching context.
+\end{enumerate}
+Every major dashboard tool implements this mantra: Tableau's drill-down,
+Grafana's time-range zoom, Google Maps' scroll-to-zoom, and Kibana's
+faceted search all instantiate the same three-step pattern.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Seven Data Types and Their Visualizations}
+\label{subsec:seven-types}
+%--------------------------------------------------------------------
+
+Shneiderman identifies seven data types, each with a natural family
+of visualization forms and a natural set of interaction tasks.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{3.6cm}p{4.2cm}}
+  \toprule
+  \textbf{Data Type} & \textbf{Typical Analytical Question}
+    & \textbf{Recommended Visualizations} \\
+  \midrule
+  \textbf{1-D (linear)}
+    & Which category is largest? How are values distributed?
+    & Bar chart, histogram, dot plot \\
+  \textbf{2-D (planar/geographic)}
+    & How is X distributed across space?
+    & Choropleth map (rate), proportional bubble map (absolute count) \\
+  \textbf{3-D (volumetric)}
+    & What is the internal structure of a volume?
+    & Volume rendering, 3-D scatter (scientific visualisation) \\
+  \textbf{Temporal}
+    & How did X change over time?
+    & Line chart, area chart, calendar heatmap \\
+  \textbf{Multi-dimensional}
+    & Any pattern across $>$3 variables?
+    & Scatter plot matrix, parallel coordinates, heatmap with clustering \\
+  \textbf{Tree}
+    & What is the hierarchical breakdown?
+    & Treemap, sunburst diagram, dendogram \\
+  \textbf{Network}
+    & How are entities connected?
+    & Force-directed graph, chord diagram, adjacency matrix \\
+  \bottomrule
+\end{tabular}
+\caption{Shneiderman's seven data types with recommended visualisations.
+         Matching the chart type to the data type is the most consequential
+         design decision in dashboard construction.}
+\label{tab:seven-types}
+\end{table}
+
+\textbf{The most abused chart.} The pie chart should only be used when
+there are at most four categories and the question is ``what fraction of
+the whole does each category represent?'' For any comparison question,
+any ranking question, any time-series question, or any analysis with
+more than four categories, a horizontal bar chart ordered by value
+is always more readable. Human perception judges the length of a bar
+far more accurately than the angle or arc length of a pie segment---a
+finding confirmed by Cleveland and McGill's perceptual accuracy studies
+(1984), which are the empirical foundation of both Tufte's and
+Shneiderman's recommendations.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{3.2cm}p{4.5cm}p{2.0cm}}
+  \toprule
+  \textbf{Data Type} & \textbf{Question Type}
+    & \textbf{Best Visualization} & \textbf{Avoid} \\
+  \midrule
+  Temporal    & Trend over time  & Line chart, area chart, calendar heatmap & Pie chart \\
+  Categorical & Which is largest? & Horizontal bar chart ($>$4 cats); grouped bar & 3-D pie \\
+  Geographic  & Spatial distribution & Choropleth (rate); bubble map (count) & Plain bar \\
+  Relational  & Entity connections & Force-directed graph; chord diagram & Table \\
+  Distribution & Shape and spread & Histogram; box plot; violin plot & Line chart \\
+  Correlation & Does X predict Y? & Scatterplot; scatterplot matrix & Bar chart \\
+  Hierarchical & Part-of-whole breakdown & Treemap; sunburst & Nested pie \\
+  \bottomrule
+\end{tabular}
+\caption{Visualization selection by data type and question. The ``Avoid''
+         column lists common mistakes that produce low-information charts
+         for the given combination of data type and question.}
+\label{tab:chart-selection}
+\end{table}
+
+%%====================================================================
+\section{Big Data Visualization Challenges}
+\label{sec:bigdata-viz-challenges}
+%%====================================================================
+
+%--------------------------------------------------------------------
+\subsection{Challenge 1: Overplotting at Scale}
+\label{subsec:overplotting}
+%--------------------------------------------------------------------
+
+A standard scatterplot renders one point per data record. At ten million
+records, points overlap completely, producing a solid blob that conveys
+no more information than ``data exists in this region.'' This is the
+\term{overplotting} problem, and it appears whenever visualising a large
+dataset with more than $\sim$10{,}000 points in a 2-D projection.
+
+Three solutions exist in increasing sophistication.
+
+\textbf{1. Alpha transparency.} Set each point's opacity to a small value
+(e.g., $\alpha = 0.01$). Regions where points overlap appear darker because
+the opacities stack multiplicatively. This is simple to implement and
+reveals gross density differences, but fails at very high densities: once
+$>$100 points overlap, all regions appear equally saturated at $\alpha = 0.01$.
+
+\textbf{2. Hexbin aggregation.} Divide the 2-D plot area into a regular
+hexagonal grid (hexagonal cells tile a plane more uniformly than square
+cells). Count the number of data points falling in each hexagonal cell.
+Colour each cell by its count using a sequential colour scale (e.g.,
+light-to-dark blue). The result converts a 10-million-point scatter into
+a grid of $\sim$10{,}000 hexagonal cells, each representing a local density
+estimate---interactive and readable.
+
+\begin{lstlisting}[style=pyspark, caption={Hexbin scatterplot in Python (matplotlib)}]
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(42)
+
+# Simulate 5 million GPS coordinates around New York City
+x = rng.normal(-73.95, 0.15, 5_000_000)   # longitude
+y = rng.normal(40.75,  0.10, 5_000_000)   # latitude
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# Left: raw scatter (overplotted)
+axes[0].scatter(x, y, s=0.01, alpha=0.003, color="steelblue")
+axes[0].set_title("Scatterplot (5M points  --  overplotted)")
+axes[0].set_xlabel("Longitude")
+axes[0].set_ylabel("Latitude")
+
+# Right: hexbin (density readable)
+hb = axes[1].hexbin(x, y, gridsize=80, cmap="Blues", mincnt=1)
+fig.colorbar(hb, ax=axes[1], label="Trip count")
+axes[1].set_title("Hexbin (same 5M points  --  density readable)")
+axes[1].set_xlabel("Longitude")
+axes[1].set_ylabel("Latitude")
+
+plt.tight_layout()
+plt.savefig("nyc_gps_hexbin.png", dpi=150, bbox_inches="tight")
+print("Saved nyc_gps_hexbin.png")
+\end{lstlisting}
+
+\textbf{3. Kernel Density Estimation (KDE).} A \term{kernel density
+estimate} places a smooth kernel function (typically Gaussian) on each
+data point and sums the kernels to produce a continuous estimate of the
+probability density over the 2-D domain. The density surface is then
+visualised as filled contours or as a heatmap. KDE reveals the shape,
+modes (peaks), and tails of the point distribution more clearly than
+hexbin, but is more computationally expensive: $O(N \cdot G)$ where $N$
+is the number of points and $G$ is the number of grid cells used to
+evaluate the density.
+
+\begin{lstlisting}[style=pyspark, caption={2-D KDE density plot (scipy + matplotlib)}]
+from scipy.stats import gaussian_kde
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
+
+rng = np.random.default_rng(0)
+x = rng.normal(-73.95, 0.12, 200_000)
+y = rng.normal(40.75,  0.08, 200_000)
+
+# KDE on a random subsample (full dataset is too large for naive KDE)
+idx    = rng.choice(len(x), size=50_000, replace=False)
+kde    = gaussian_kde(np.vstack([x[idx], y[idx]]),
+                      bw_method=0.05)
+
+# Evaluate on a grid
+xi, yi = np.mgrid[x.min():x.max():200j,
+                  y.min():y.max():200j]
+zi     = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
+
+fig, ax = plt.subplots(figsize=(8, 6))
+cf = ax.contourf(xi, yi, zi, levels=15, cmap="Blues")
+fig.colorbar(cf, ax=ax, label="Density")
+ax.set_title("KDE Density Contour  --  NYC GPS Pings")
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+plt.tight_layout()
+plt.savefig("nyc_kde.png", dpi=150)
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Challenge 2: Latency and Pre-Aggregation}
+\label{subsec:latency}
+%--------------------------------------------------------------------
+
+A business analyst using Tableau expects a dashboard filter
+(``show Q1 2024, North-East region only'') to respond in under one second.
+But the underlying fact table may contain 100 billion rows in Hive on HDFS.
+A Hive query over the full fact table takes minutes to complete, making
+interactive filtering impossible.
+
+Two engineering solutions exist.
+
+\textbf{1. Pre-aggregated data cubes.} A \term{data cube} (also called
+an \emph{OLAP cube} or \emph{aggregate table}) materialises the results
+of all combinations of GROUP BY queries over a set of dimensions at
+ingest time. If the fact table has three dimensions---date,
+region, and product category---the data cube pre-computes eight
+subtotals: one for each subset of the three dimensions (the
+\emph{power set} of dimensions, sometimes called the \emph{cuboid}).
+
+\begin{defbox}{Data Cube}
+A \textbf{data cube} over a fact table with $d$ dimensions contains
+$2^d$ \emph{cuboids}: one for each subset of dimensions. The base
+cuboid aggregates over all dimensions (producing one row); the apex
+cuboid contains the full fact table (no aggregation). Materialising
+the full cube requires $O(N \cdot 2^d)$ space where $N$ is the fact
+table row count, but in practice only a subset of cuboids are
+materialised based on query frequency---a process called
+\emph{selective materialisation}.
+
+Queries served by the data cube read from a materialised cuboid
+rather than the raw fact table, reducing I/O by a factor of
+$N / |\text{cuboid}|$---often $10^4$--$10^6 \times$ for typical
+analytical workloads.
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={Pre-aggregating a data cube in Spark SQL}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum as _sum, count, avg
+
+spark = SparkSession.builder.appName("DataCube").getOrCreate()
+
+# Raw fact table: 100 billion rows on HDFS
+fact = spark.read.parquet("hdfs:///data/curated/transactions/")
+
+# --- Materialise a data cube with GROUPING SETS ---
+# This one Spark job produces all 8 cuboids for 3 dimensions
+cube_df = (fact
+    .cube("txn_date", "region", "product_category")
+    .agg(
+        _sum("amount_usd").alias("total_usd"),
+        count("*").alias("txn_count"),
+        avg("amount_usd").alias("avg_usd"),
+    ))
+
+# Write the cube as Parquet  --  millions of rows, not billions
+(cube_df.write
+        .mode("overwrite")
+        .partitionBy("txn_date")
+        .parquet("hdfs:///data/curated/txn_cube/"))
+
+# Tableau / Superset query: reads from cube (ms), not fact table (min)
+region_q1 = spark.read.parquet("hdfs:///data/curated/txn_cube/") \
+    .filter(
+        (col("txn_date").between("2024-01-01", "2024-03-31")) &
+        col("region").isNotNull() &
+        col("product_category").isNull()
+    ) \
+    .orderBy("total_usd", ascending=False)
+
+region_q1.show(10)
+\end{lstlisting}
+
+\textbf{2. Approximate query processing (AQP).} Rather than pre-computing
+exact aggregates, \term{approximate query processing} returns a statistically
+correct estimate of the aggregate in milliseconds by sampling the table.
+\tool{Apache DataSketches} (formerly Yahoo DataSketches) implements a
+family of streaming algorithms---HyperLogLog for cardinality, Theta
+sketch for set operations, KLL for quantiles---that provide guaranteed
+error bounds with sub-linear space. The trade-off: AQP is appropriate
+for exploratory dashboards where a 5\% error is acceptable, but not for
+financial reconciliation or regulatory reporting where exactness is
+mandatory.
+
+%--------------------------------------------------------------------
+\subsection{Challenge 3: Streaming Visualization}
+\label{subsec:streaming-viz}
+%--------------------------------------------------------------------
+
+Many big data applications require visualisations that update
+continuously as new events arrive:
+\begin{itemize}
+  \item An operations dashboard showing the number of active Uber
+        drivers by city zone, updated every 5 seconds.
+  \item A payment fraud operations centre showing transaction volume
+        per minute and active alert count.
+  \item A CDC / NHS disease surveillance dashboard showing new case
+        reports as hospitals submit their hourly returns.
+\end{itemize}
+
+Two delivery mechanisms exist for updating a browser chart with new data.
+
+\begin{defbox}{Poll vs.\ WebSocket Push}
+\begin{itemize}
+  \item \textbf{Periodic poll (Grafana default)}: The browser makes
+        an HTTP request to the backend on a configured interval
+        (e.g., every 5 seconds). The backend queries the time-series
+        database and returns the latest value. Simplest to implement;
+        adds latency of up to one poll interval.
+  \item \textbf{WebSocket push}: The server establishes a persistent
+        bidirectional connection to the browser. New data points are
+        pushed to the browser as they arrive, without waiting for a
+        poll. Sub-second update latency; required for real-time financial
+        tickers, live election results, and sensor dashboards.
+\end{itemize}
+\end{defbox}
+
+The standard streaming visualization architecture is:
+\begin{enumerate}
+  \item \textbf{Kafka}: receives events from producers in real time.
+  \item \textbf{Spark Structured Streaming or Flink}: subscribes to
+        Kafka topic; applies a tumbling or sliding window aggregation
+        (e.g., count of transactions per minute per region).
+  \item \textbf{Time-series database} (InfluxDB, Prometheus, TimescaleDB):
+        stores the window aggregates; indexed by timestamp.
+  \item \textbf{Grafana or Kibana}: polls the TSDB on a configured
+        interval (Grafana: minimum 5 seconds) and re-renders the chart.
+        For sub-second updates, a custom D3.js frontend with WebSocket
+        replaces Grafana.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, rounded corners=4pt, minimum width=3.0cm,
+                minimum height=0.75cm, font=\small\sffamily, align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
+  ]
+  \node[box, fill=DEGray!20] (prod) at (0, 6.2)
+        {Event Producers\\{\small PayPal · Uber · IoT}};
+  \node[box, fill=DEBlue!75, text=white] (kaf) at (0, 5.0)
+        {Apache Kafka\\{\small durable event log}};
+  \node[box, fill=DEGreen!22] (sp)  at (0, 3.8)
+        {Spark Streaming / Flink\\{\small 1-min tumbling window}};
+  \node[box, fill=DEAccent!22] (tsdb) at (0, 2.6)
+        {Time-Series DB\\{\small InfluxDB / Prometheus}};
+  \node[box, fill=DEBlue!20] (graf) at (-2.0, 1.3)
+        {Grafana\\{\small poll every 5s}};
+  \node[box, fill=DEPurple!18] (d3) at (2.0, 1.3)
+        {D3.js + WebSocket\\{\small push, sub-second}};
+
+  \draw[arr, DEGray!50]  (prod)--(kaf);
+  \draw[arr, DEBlue!55]  (kaf)--(sp);
+  \draw[arr, DEGreen!60] (sp)--(tsdb);
+  \draw[arr, DEAccent!60] (tsdb)--(graf);
+  \draw[arr, DEAccent!60] (tsdb)--(d3);
+
+  \node[font=\scriptsize\sffamily\itshape, text=DEGray] at (2.8, 2.6)
+        {ops dashboards};
+  \node[font=\scriptsize\sffamily\itshape, text=DEGray] at (-2.8, 1.3)
+        {5s latency};
+  \node[font=\scriptsize\sffamily\itshape, text=DEPurple] at (2.8, 1.3)
+        {$<$1s latency};
+\end{tikzpicture}
+\caption{Streaming visualization architecture. Events flow from producers
+         through Kafka and a stream processor to a time-series database.
+         Grafana polls the TSDB every 5 seconds; a WebSocket-based D3.js
+         frontend receives pushed updates for sub-second latency.}
+\label{fig:streaming-viz}
+\end{figure}
+
+%%====================================================================
+\section{The Visualization Tools Landscape}
+\label{sec:tools-landscape}
+%%====================================================================
+
+The choice of visualization tool determines what is possible, what requires
+custom development, and how well the tool integrates with the rest of the
+data stack. Six tools dominate the landscape for big data visualisation.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{3.0cm}p{2.8cm}p{2.0cm}l}
+  \toprule
+  \textbf{Tool} & \textbf{Best For}
+    & \textbf{Data Sources} & \textbf{Scale} & \textbf{Real-time} \\
+  \midrule
+  \textbf{Tableau}
+    & Business dashboards, drag-and-drop BI
+    & SQL, Hive, Spark, CSV, Excel
+    & Millions of rows
+    & Limited \\
+  \textbf{Power BI}
+    & Microsoft ecosystem, executive reports
+    & Azure, Excel, SQL Server, REST
+    & Millions of rows
+    & Limited \\
+  \textbf{D3.js}
+    & Custom interactive web graphics
+    & JSON, CSV, REST APIs
+    & Flexible (SVG/Canvas)
+    & Yes (WebSocket) \\
+  \textbf{Grafana}
+    & Ops metrics, real-time monitoring
+    & InfluxDB, Prometheus, Elasticsearch
+    & Millions of data points
+    & Yes (5s poll) \\
+  \textbf{Apache Superset}
+    & Open-source BI on data lakes
+    & Presto, Hive, Spark SQL, PG
+    & Billions of rows
+    & Limited \\
+  \textbf{Kibana}
+    & Log analytics, search exploration
+    & Elasticsearch only
+    & Billions of documents
+    & Yes \\
+  \bottomrule
+\end{tabular}
+\caption{Visualization tool landscape. Each tool occupies a distinct
+         niche; selecting the wrong tool forces expensive workarounds.}
+\label{tab:viz-tools}
+\end{table}
+
+%--------------------------------------------------------------------
+\subsection{Tableau and Power BI: Business Intelligence Platforms}
+\label{subsec:tableau-powerbi}
+%--------------------------------------------------------------------
+
+\tool{Tableau} (acquired by Salesforce in 2019) is the dominant
+business intelligence platform for analyst-facing dashboards. Its drag-and-drop
+interface allows non-programmers to build interactive charts, maps, and
+cross-tabs from SQL databases, Hive tables, Spark dataframes, and flat files.
+Tableau implements Shneiderman's mantra through a drill-down hierarchy
+(Year $\to$ Quarter $\to$ Month $\to$ Day), its filter shelf (dynamic
+queries), and detail-on-demand tooltips.
+
+Tableau's primary limitation is scale: for tables exceeding
+$\sim$50 million rows, Tableau either operates in \emph{extract} mode
+(a cached in-memory copy of the data, updated on a schedule) or through
+a \emph{live connection} that pushes each query to the underlying database.
+For Hive or Presto queries, even a simple filter can take 30--60 seconds
+on very large tables, breaking the interactive experience. Pre-aggregated
+data cubes in Presto or Spark SQL are the standard mitigation.
+
+\tool{Microsoft Power BI} is the dominant choice in organisations
+standardised on the Microsoft Azure ecosystem (Azure Synapse Analytics,
+Azure Data Factory, Office 365). Its DAX formula language for calculated
+columns and measures is more expressive than Tableau for certain
+analytical patterns, but its connector ecosystem is smaller and its
+performance at big data scale is similar to Tableau's.
+
+%--------------------------------------------------------------------
+\subsection{D3.js: Data-Driven Documents}
+\label{subsec:d3}
+%--------------------------------------------------------------------
+
+\tool{D3.js} (\textbf{D}ata-\textbf{D}riven \textbf{D}ocuments) is a
+JavaScript library for binding data to DOM (Document Object Model)
+elements in a web browser and applying transformations based on data
+values. Created by Mike Bostock, Vadim Ogievetsky, and Jeffrey Heer at
+Stanford and released in 2011, D3 is the foundation of the New York Times
+interactive graphics, The Guardian's data journalism, and the Reuters
+COVID-19 tracker.
+
+D3's design philosophy is minimal abstraction: it provides general
+geometric and visual primitives (SVG shapes, scales, axes, transitions)
+but does not prescribe chart types. Every element of a D3 chart is
+created by writing JavaScript that explicitly binds a data array to
+SVG elements:
+
+\begin{lstlisting}[style=pyspark, caption={D3.js: Tufte-style bar chart (data-driven SVG)}]
+/* Tufte-compliant D3 bar chart  --  data-ink ratio maximised
+   No gridlines, no background, direct data labels, 0-based y-axis */
+
+const data = [
+  { region: "New York",   cases: 4217 },
+  { region: "London",     cases: 1803 },
+  { region: "Berlin",     cases:  892 },
+  { region: "Sydney",     cases:  671 },
+  { region: "Toronto",    cases:  544 },
+];
+
+const margin = { top: 20, right: 60, bottom: 40, left: 90 };
+const W = 560 - margin.left - margin.right;
+const H = 320 - margin.top  - margin.bottom;
+
+const svg = d3.select("#chart")
+  .append("svg")
+    .attr("width",  W + margin.left + margin.right)
+    .attr("height", H + margin.top  + margin.bottom)
+  .append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`);
+
+const x = d3.scaleLinear()
+  .domain([0, d3.max(data, d => d.cases)])
+  .nice()
+  .range([0, W]);
+
+const y = d3.scaleBand()
+  .domain(data.map(d => d.region))
+  .range([0, H])
+  .padding(0.35);
+
+// Bars  --  single flat colour (no gradient, no shadow)
+svg.selectAll(".bar")
+   .data(data)
+   .join("rect")
+     .attr("class", "bar")
+     .attr("x",       0)
+     .attr("y",       d => y(d.region))
+     .attr("width",   d => x(d.cases))
+     .attr("height",  y.bandwidth())
+     .attr("fill",    "#003c78");   // DEBlue
+
+// Direct data labels (no legend needed)
+svg.selectAll(".label")
+   .data(data)
+   .join("text")
+     .attr("x",           d => x(d.cases) + 4)
+     .attr("y",           d => y(d.region) + y.bandwidth() / 2 + 4)
+     .text(d => d.cases.toLocaleString())
+     .attr("font-size",   11)
+     .attr("fill",        "#505050");
+
+// Minimal y-axis: region names only
+svg.append("g").call(d3.axisLeft(y).tickSize(0));
+
+// Minimal x-axis: no domain line, light ticks only
+svg.append("g")
+   .attr("transform", `translate(0,${H})`)
+   .call(d3.axisBottom(x).ticks(5).tickSizeOuter(0));
+
+/* Tooltip (Shneiderman: details-on-demand) */
+const tooltip = d3.select("body").append("div")
+  .style("position", "absolute")
+  .style("background", "#fff")
+  .style("border", "1px solid #ccc")
+  .style("padding", "6px 10px")
+  .style("font-size", "12px")
+  .style("pointer-events", "none")
+  .style("opacity", 0);
+
+svg.selectAll(".bar")
+   .on("mouseover", (event, d) => {
+     tooltip.style("opacity", 1)
+            .html(`<b>${d.region}</b><br>Cases: ${d.cases.toLocaleString()}`);
+   })
+   .on("mousemove", event => {
+     tooltip.style("left",  (event.pageX + 10) + "px")
+            .style("top",   (event.pageY - 28) + "px");
+   })
+   .on("mouseout", () => tooltip.style("opacity", 0));
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Grafana and Apache Superset: Open-Source Platforms}
+\label{subsec:grafana-superset}
+%--------------------------------------------------------------------
+
+\tool{Grafana} is the dominant open-source tool for operations and
+infrastructure monitoring dashboards. It natively integrates with
+\tool{InfluxDB} (time-series database optimised for metrics),
+\tool{Prometheus} (pull-based monitoring used in Kubernetes deployments),
+and \tool{Elasticsearch} (for log aggregates). Grafana implements
+Shneiderman's zoom-and-filter via its time-range selector (click-drag
+on any chart to zoom into a sub-interval) and variable dropdowns
+(dynamic query parameters). Its stat panel widget renders a number with
+a sparkline---a direct implementation of Tufte's sparkline concept.
+
+\tool{Apache Superset} (open-source, Apache Software Foundation) is
+the standard open-source BI tool for organisations that run their data
+platform on Presto, Trino, Apache Hive, or Spark SQL. Its SQL Lab
+feature allows analysts to write arbitrary SQL and render the results
+as charts; its dashboard builder allows interactive filter boxes and
+cross-chart drill-down. For organisations that cannot afford or prefer
+not to use Tableau, Superset provides comparable BI functionality with
+direct connectivity to the Hadoop/Spark ecosystem.
+
+%%====================================================================
+\section{Research Spotlight}
+\label{sec:ch9-research}
+%%====================================================================
+
+\begin{researchspotlight}{Tufte (1983) · Shneiderman (1996) · Bostock,
+Ogievetsky \& Heer (2011) --- The Three Pillars of Data Visualization}
+
+\textbf{Three works that together define the field:}
+
+\medskip
+\textbf{Work 1: Tufte, E.\,R. (1983). \textit{The Visual Display of
+Quantitative Information.} Graphics Press.} ($>$20{,}000 citations.)
+
+Tufte analysed 4{,}000 charts from science, business, and journalism
+publications and derived the data-ink ratio principle: of all the ink
+used in a graphic, maximise the fraction that encodes data. He coined
+``chartjunk'' to describe ink that encodes no data (grids, 3-D effects,
+gradients, redundant legends) and documented the lie factor---a metric
+for quantifying graphic deception from axis truncation or scale distortion.
+His concept of small multiples described a grid of same-scale same-axes
+charts as the most efficient form of comparative display, and his sparklines
+(formalised in his 2006 follow-up) described word-sized trend indicators
+now ubiquitous in Grafana, Bloomberg terminals, and spreadsheets. Tufte's
+book is unique in data engineering in that it both states the principle and
+implements it beautifully in the book's own typography and layout: the book
+itself has a high data-ink ratio. Every modern dashboard framework---from
+Tableau's clean minimal default theme to D3's blank-canvas philosophy---is
+a direct application of Tufte's principles.
+
+\medskip
+\textbf{Work 2: Shneiderman, B. (1996). ``The Eyes Have It: A Task by
+Data Type Taxonomy for Information Visualizations.'' \textit{Proc.\ IEEE
+Visual Languages}, pp.~336--343.} ($>$5{,}000 citations.)
+
+Shneiderman identified seven types of data (linear, 2-D planar,
+3-D volumetric, temporal, multi-dimensional, tree, network) and seven
+tasks that users perform on visualisations (overview, zoom, filter,
+details-on-demand, relate, history, extract). He proposed the
+``visual information seeking mantra''---overview first, zoom and filter,
+then details on demand---as a universal three-step design pattern for
+interactive information visualisation. He also invented the \emph{treemap}
+(1991) and the \emph{dynamic query} concept (sliders and checkboxes that
+update the visualisation in $<$100~ms). The 1996 paper's taxonomy
+directly shapes how modern BI platforms are designed: Tableau's hierarchy
+drill-down implements ``overview $\to$ zoom''; Grafana's variable dropdowns
+implement ``filter''; hover tooltips implement ``details-on-demand.''
+The mantra is the single most widely implemented design pattern in
+data visualisation software.
+
+\medskip
+\textbf{Work 3: Bostock, M., Ogievetsky, V., \& Heer, J. (2011). ``D$^3$:
+Data-Driven Documents.'' \textit{IEEE Transactions on Visualization and
+Computer Graphics}, 17(12), 2301--2309.} ($>$3{,}000 citations.)
+
+Bostock, Ogievetsky, and Heer introduced D3.js---a JavaScript library
+that binds data arrays to DOM elements (SVG shapes, HTML elements) and
+applies visual transformations based on data values. The key innovation
+over previous web charting libraries (Protovis, Raphaël) was \emph{general
+selections}: any set of DOM elements can be bound to any array; the
+enter-update-exit pattern handles data-driven creation, modification, and
+removal of elements. D3 does not prescribe chart types; instead it
+provides general primitives (scales, axes, path generators, force
+simulations, geographic projections) from which any chart can be assembled.
+This philosophy---maximum expressive power at the cost of requiring more
+code---directly reflects Tufte's principle that the graphic designer must
+control every pixel of ink. D3 became the production tool of the New York
+Times Graphics Desk, The Guardian, Reuters, the FT's Visual Journalism
+team, and the US 2020 Census Bureau's interactive data explorer. It is the
+most widely cited visualisation systems paper of the 2010s and is used in
+the graduate visualisation curriculum at Harvard (CS171), MIT (6.859),
+and Stanford (CS448B).
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: The New York Times Graphics Desk}
+\label{sec:nyt-case}
+%%====================================================================
+
+\begin{casestudy}{New York Times Graphics Desk --- Interactive Data
+Journalism at 6 Million Readers per Day}
+
+\textbf{Context.} The New York Times Graphics Desk is a team of
+approximately 50 journalists, designers, and engineers who produce
+interactive data visualisations for nytimes.com---reaching 6~million
+readers per day. The desk is responsible for some of the most widely
+read and most cited data visualisations of the past decade, including
+the 2012 US presidential election maps, the 2016 election needle, and
+the COVID-19 tracker that was loaded 800~million times in 2020.
+
+Mike Bostock---co-creator of D3.js---worked at the NYT Graphics Desk
+from 2010 to 2015, during which time he created D3.js to replace the
+desk's previous tool (Protovis). D3.js was born at the NYT not as a
+research project but as a production engineering need: the desk required
+pixel-level control over chart layout, custom geographic projections,
+and animated transitions between data states that no existing library
+provided.
+
+\medskip
+\textbf{Technical stack.}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{ll}
+  \toprule
+  \textbf{Component} & \textbf{Technology} \\
+  \midrule
+  Data collection and cleaning  & Python (pandas, requests, BeautifulSoup) \\
+  Geographic processing         & PostGIS, GDAL, Mapbox \\
+  Statistical analysis          & R (ggplot2, tidyverse) \\
+  Interactive web charts        & D3.js (SVG and Canvas) \\
+  Static print graphics         & Adobe Illustrator + ai2html \\
+  Collaborative prototyping     & Observable Notebooks \\
+  Data publication              & GitHub CSV repository \\
+  Content delivery              & nytimes.com CDN (AWS CloudFront) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+\textbf{COVID-19 Tracker (2020--2022): a big data visualisation at journalism scale.}
+
+From March 2020 the desk built and maintained the most-read COVID-19
+data tracker in the English-speaking world. The data engineering
+challenges were representative of any big data pipeline at scale:
+
+\begin{enumerate}
+  \item \textbf{Data acquisition at scale.} The tracker aggregated case
+        and death data from the US Centers for Disease Control (CDC),
+        50 state health departments, and 3{,}000 county health departments
+        ---each with different update schedules, different column names,
+        and different definitions of ``confirmed case.'' Python scrapers
+        ran hourly; a pandas pipeline normalised schemas and detected
+        anomalies (negative daily case counts from retroactive
+        corrections; impossible date values; duplicate state-county records).
+
+  \item \textbf{The rolling average as a design decision.} Raw daily
+        counts exhibited strong day-of-week artefacts: fewer cases were
+        reported on weekends because fewer testing sites operated.
+        The desk chose a 7-day rolling average to smooth these artefacts,
+        encoding the average as the primary line and the raw counts as a
+        lighter bar chart behind it. This is a \emph{journalistic} choice
+        with statistical implications: the 7-day window delays the
+        detection of a surge by 3--4 days compared to the raw count.
+
+  \item \textbf{Tufte principles in production.} The 50-state
+        small-multiples chart (all states on a single page, same scale,
+        same axes) allowed readers to compare New York, Texas, and
+        California in one glance without animation. No gridlines appeared
+        on the case charts; only a single light horizontal reference line
+        at the prior peak provided context. Hover tooltips provided
+        exact date, raw count, and 7-day average (Shneiderman's
+        details-on-demand). The colour scale was tested for
+        colour-blindness (deuteranopia and protanopia) using the
+        \texttt{chroma.js} simulator.
+
+  \item \textbf{Accessibility at 800 million page loads.} Every chart
+        had a data-table alternative for screen readers. SVG title
+        and desc elements described each chart's content to assistive
+        technology. This was not optional: Section 508 of the US
+        Rehabilitation Act requires federal government and major news
+        organisations to make digital content accessible.
+
+  \item \textbf{GitHub as data infrastructure.} The NYT published its
+        cleaned CSV data daily on GitHub (\texttt{nytimes/covid-19-data}).
+        Within 30 days of the tracker's launch, over 1{,}000 derivative
+        dashboards had been built by universities, local governments,
+        and independent developers worldwide---all using the NYT's
+        cleaned dataset. This transformed the NYT from a single publisher
+        into a data infrastructure provider.
+\end{enumerate}
+
+\medskip
+\textbf{Engineering lessons.}
+\begin{enumerate}
+  \item \textbf{Data quality is the invisible half of visualisation.}
+        The hardest engineering work on the COVID tracker was schema
+        normalisation across 50 health departments---not SVG rendering.
+        A visualisation pipeline without a robust data quality gate
+        produces misleading charts with high production values.
+  \item \textbf{Small multiples beat animation for comparative analysis.}
+        The 50-state grid was more actionable than an animated spreading-map
+        because it allowed simultaneous comparison of all states
+        without requiring readers to hold past frames in working memory.
+  \item \textbf{Accessibility is an engineering requirement, not a
+        nicety.} At 6~million readers per day, even 1\% of readers
+        with visual impairments represents 60{,}000 people per day who
+        would be excluded by inaccessible charts.
+  \item \textbf{Rolling averages are editorial decisions.}
+        The choice of window size changes the story the chart tells.
+        A 3-day window reveals surges earlier but amplifies noise;
+        a 14-day window is more stable but delays detection. These
+        decisions have public health consequences and must be documented
+        transparently in the chart's methodology notes.
+\end{enumerate}
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch9-summary}
+%%====================================================================
+
+Effective data visualization is not a presentation afterthought: it is
+the first quality check on any analytical result and the primary interface
+between data infrastructure and human decision-making.
+
+Tufte's data-ink ratio provides an actionable metric for graphical
+efficiency: maximise the fraction of ink that encodes data; erase
+everything else. His lie factor quantifies graphical deception from
+axis truncation. Small multiples and sparklines solve the
+comparative-display problem without animation. Shneiderman's mantra
+(overview $\to$ zoom/filter $\to$ details-on-demand) is the universal
+interaction design pattern for interactive information visualisation,
+implemented in every major dashboard platform.
+
+Big data introduces three engineering challenges not present with small
+datasets: overplotting (solved by hexbin aggregation and KDE contours),
+latency (solved by pre-aggregated data cubes and approximate query
+processing), and streaming (solved by the Kafka $\to$ stream processor
+$\to$ TSDB $\to$ Grafana/WebSocket architecture). Tool selection---Tableau
+for analyst-facing BI, D3.js for custom interactive journalism and
+production web graphics, Grafana for real-time operational monitoring,
+Apache Superset for open-source lake-native analytics---determines what
+is achievable without custom development.
+
+The New York Times COVID-19 tracker demonstrated that at journalistic
+scale the data quality pipeline is harder than the rendering pipeline,
+and that responsible visualization design---rolling-average window
+selection, colour-blindness testing, accessibility requirements---carries
+ethical weight proportional to audience size.
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch9-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq What is Anscombe's Quartet? What property of summary statistics does
+it illustrate, and what does this imply about the role of visualization
+in data analysis?
+
+\sq Define Tufte's data-ink ratio. Identify three specific chart elements
+that commonly lower the data-ink ratio and should be removed.
+
+\sq A bar chart shows four annual revenue figures. The data changed from
+\$82M in 2022 to \$90M in 2023---a 9.8\% increase. The chart's $y$-axis
+starts at \$80M. The bar for 2023 appears five times taller than the
+bar for 2022. Calculate Tufte's lie factor.
+
+\sq What is a ``small multiples'' chart? Give an example of a small
+multiples grid that would be more effective than an animated chart for
+communicating the same information.
+
+\sq State Shneiderman's visual information seeking mantra in full.
+Give one example of how each of the three steps is implemented in Tableau,
+in Grafana, and in a D3.js chart.
+
+\sq What is overplotting? At what approximate number of data points does
+it typically become a problem in a standard scatterplot?
+
+\sq Describe the hexbin technique for addressing overplotting. What does
+it show that alpha transparency cannot?
+
+\sq What is a data cube? If a fact table has four dimensions---date,
+region, category, and channel---how many cuboids does the full data
+cube contain?
+
+\sq Explain the difference between a \emph{periodic poll} and a
+\emph{WebSocket push} architecture for streaming visualization. Give
+a use case where each is appropriate.
+
+\sq Which visualization tool is most appropriate for: (a) a real-time
+operations dashboard monitoring Kafka consumer lag; (b) a business analyst
+building a quarterly sales report in a company that uses Azure; (c) a data
+journalist building a custom interactive choropleth map for publication
+on a news website?
+
+\sq What is the Shneiderman treemap? Explain how area and colour are
+used to encode two variables simultaneously.
+
+\sq Why does Tufte argue that 3-D effects on bar charts lower the
+data-ink ratio \emph{and} increase the lie factor?
+
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Data-Ink Ratio Audit.}
+A data engineer builds a Grafana dashboard for a Kafka pipeline showing
+hourly message throughput per topic. The current chart has the following
+elements: a 3-D bar chart; a $y$-axis that starts at 500{,}000 messages/hour
+(when the true minimum is 480{,}000); a thick black border around the chart
+area; a gradient fill on each bar (dark blue at bottom, light blue at top);
+a legend listing all 8 topic names in a box overlapping the chart; and
+heavy horizontal gridlines every 10{,}000 messages.
+\begin{enumerate}[label=(\alph*)]
+  \item Identify every element that violates Tufte's data-ink principle,
+        classify each as chartjunk or a lie-factor violation, and explain
+        what information is lost by removing it (if any).
+  \item Compute the approximate lie factor for the truncated $y$-axis
+        if the true range is 480{,}000--560{,}000 messages/hour but the
+        chart displays 500{,}000--560{,}000. The highest bar appears to be
+        $5\times$ the height of the lowest bar on screen.
+  \item Redesign the chart: describe each element of the corrected
+        version, applying Tufte's principles.
+\end{enumerate}
+
+\ap \textbf{Shneiderman Dashboard Design.}
+A ride-sharing company data scientist needs to build an operations dashboard
+for the city fleet management team showing:
+\begin{itemize}
+  \item City-wide active driver count by zone (20 city zones)
+  \item Trip completion rate per hour over the past 7 days
+  \item Distribution of trip duration (in minutes) for completed trips
+  \item Geographic density of trip pickups (GPS coordinates)
+\end{itemize}
+For each requirement:
+(a) identify Shneiderman's data type;
+(b) choose the appropriate chart type, citing the data-type taxonomy;
+(c) specify how overview, zoom/filter, and details-on-demand are implemented;
+(d) identify which big data challenge (overplotting, latency, or streaming)
+applies and how to address it.
+
+\ap \textbf{Streaming Visualization Latency Budget.}
+A mobile payment fraud operations dashboard must update its fraud alert
+rate chart within 10 seconds of an event arriving at the source system.
+The pipeline is: Mobile app $\to$ Kafka (1 partition, 50~MB/s)
+$\to$ Spark Structured Streaming (1-minute tumbling window)
+$\to$ InfluxDB $\to$ Grafana (WebSocket push).
+
+Allocate the 10-second latency budget across the pipeline components.
+For each component: (a) state the typical latency contribution; (b) identify
+one configuration parameter that can reduce it; (c) identify the trade-off
+of reducing it.
+
+\ap \textbf{Data Cube Design.}
+A national electricity utility has a 5-year fact table with 120 billion
+rows and four dimensions: \texttt{meter\_id} (10 million distinct values),
+\texttt{hour\_ts} (43{,}800 hours over 5 years), \texttt{region}
+(50 regions), and \texttt{tariff\_band} (5 bands).
+\begin{enumerate}[label=(\alph*)]
+  \item How many cuboids are in the full data cube? How many are practically
+        useful for a dashboard (explain which dimensions are too high
+        cardinality to materialise)?
+  \item Design the materialised cuboids for a dashboard that must serve:
+        (i) hourly consumption per region for any 30-day window;
+        (ii) monthly total consumption per tariff band; (iii) peak-hour
+        demand by region.
+  \item Estimate the storage size (in GB) of the hourly-by-region
+        cuboid assuming 30 bytes per row.
+\end{enumerate}
+
+\exercisesection{Design Problems}
+
+\dpr \textbf{Public Health Surveillance Dashboard.}
+A national public health agency (e.g., CDC or NHS) needs a disease
+surveillance dashboard communicating:
+\begin{enumerate}[label=(\alph*)]
+  \item National COVID-19 confirmed case counts by region over 24 months,
+        using a 7-day rolling average.
+  \item Real-time hospitalisation rate updated every 5 minutes from hospital
+        daily reporting forms submitted via a REST API.
+  \item Demographic breakdown (age group $\times$ gender) of confirmed cases
+        as a proportion of population.
+  \item A ``situation map'' showing the 7-day incidence rate per 100{,}000
+        population for all regions.
+\end{enumerate}
+Design the complete dashboard: specify the chart type and justification
+for each panel; describe how Shneiderman's mantra is implemented for each
+panel; describe the data pipeline (ingestion, aggregation, storage, and
+rendering tools); identify and address the big data visualization challenge
+for each panel; and describe two accessibility requirements.
+
+\dpr \textbf{Streaming Payment Operations Dashboard.}
+Design a real-time operations dashboard for a mobile payment platform
+(10 million transactions/day, peak 500 transactions/second) that shows:
+\begin{enumerate}[label=(\alph*)]
+  \item Total transaction volume (USD) per minute, last 60 minutes,
+        updated every 5 seconds.
+  \item Number of active fraud alerts, updated every 30 seconds.
+  \item Geographic heatmap of transaction density across a metro area
+        (GPS coordinates from merchant terminal locations).
+  \item Top-5 error codes by frequency in the past 15 minutes.
+\end{enumerate}
+Specify: the Kafka topic structure and partition count for each stream;
+the Spark Structured Streaming window and aggregation for each metric;
+the TSDB schema for each metric; the Grafana panel type and refresh interval;
+and any pre-aggregation required to achieve the specified latency.
+
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Overplotting Solutions in Python.}
+Given a simulated dataset of 2 million ride-sharing GPS trip origin points
+(longitude, latitude) distributed across five city zones:
+\begin{enumerate}[label=(\alph*)]
+  \item Plot the raw scatterplot with $\alpha = 0.005$. Describe the
+        overplotting effect observed.
+  \item Create a hexbin plot with \texttt{gridsize=100} and a sequential
+        blue colour scale. Describe what information is now visible.
+  \item Compute and plot a 2-D KDE contour using \texttt{scipy.stats.gaussian\_kde}
+        on a 10{,}000-point random subsample. Identify the location of the
+        three highest-density zones.
+  \item Create a 2$\times$2 panel figure (overview in panel 1; one city zone
+        zoomed in panels 2--4 with hexbin). Label each panel with its
+        Shneiderman interaction level (overview, zoom, detail).
+\end{enumerate}
+
+\begin{lstlisting}[style=pyspark, caption={PE9.1: GPS overplotting simulation}]
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+
+rng = np.random.default_rng(2024)
+
+# Five NYC zones: (lon_center, lat_center, sigma, n_points)
+zones = [
+    (-73.970, 40.785, 0.020, 600_000),  # Upper West Side
+    (-73.990, 40.730, 0.015, 500_000),  # Greenwich Village
+    (-73.940, 40.760, 0.018, 400_000),  # Midtown East
+    (-73.950, 40.820, 0.012, 300_000),  # Harlem
+    (-74.010, 40.710, 0.010, 200_000),  # Lower Manhattan
+]
+
+lons, lats = [], []
+for lon_c, lat_c, sigma, n in zones:
+    lons.append(rng.normal(lon_c, sigma, n))
+    lats.append(rng.normal(lat_c, sigma, n))
+
+lons = np.concatenate(lons)
+lats = np.concatenate(lats)
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+# Panel 1  --  Overview: raw scatter (overplotted)
+axes[0,0].scatter(lons, lats, s=0.003, alpha=0.004, c="steelblue")
+axes[0,0].set_title("(a) Scatterplot  --  overplotted (Shneiderman: overview)")
+
+# Panel 2  --  Zoom: hexbin full city
+hb = axes[0,1].hexbin(lons, lats, gridsize=100, cmap="Blues", mincnt=1)
+fig.colorbar(hb, ax=axes[0,1], label="Trip count")
+axes[0,1].set_title("(b) Hexbin  --  density readable (Shneiderman: zoom)")
+
+# Panel 3  --  Zoom: KDE contour on subsample
+idx     = rng.choice(len(lons), 10_000, replace=False)
+kde     = gaussian_kde(np.vstack([lons[idx], lats[idx]]), bw_method=0.08)
+xi, yi  = np.mgrid[lons.min():lons.max():150j, lats.min():lats.max():150j]
+zi      = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
+cf = axes[1,0].contourf(xi, yi, zi, levels=12, cmap="Blues")
+fig.colorbar(cf, ax=axes[1,0], label="Density")
+axes[1,0].set_title("(c) KDE contour  --  shape revealed (Shneiderman: zoom)")
+
+# Panel 4  --  Detail: Upper West Side zone only
+mask = (lons > -73.99) & (lons < -73.95) & (lats > 40.77) & (lats < 40.80)
+axes[1,1].hexbin(lons[mask], lats[mask], gridsize=60, cmap="Reds", mincnt=1)
+axes[1,1].set_title("(d) Upper West Side detail (Shneiderman: detail)")
+
+for ax in axes.ravel():
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+
+plt.tight_layout()
+plt.savefig("nyc_overplotting.png", dpi=150, bbox_inches="tight")
+print("Saved: nyc_overplotting.png")
+\end{lstlisting}
+
+\pe \textbf{Pre-Aggregated Data Cube (PySpark).}
+Using PySpark, build a pre-aggregated data cube for a simulated 100
+million-row e-commerce fact table with columns: \texttt{order\_date},
+\texttt{region}, \texttt{category}, and \texttt{revenue\_usd}.
+\begin{enumerate}[label=(\alph*)]
+  \item Generate 100 million synthetic rows using Spark's built-in
+        random functions.
+  \item Use \texttt{DataFrame.cube()} to materialise all cuboids for the
+        three dimensions \texttt{(order\_date, region, category)}.
+  \item Write the cube as Parquet, partitioned by \texttt{order\_date}.
+  \item Simulate three Tableau/Superset queries (filter by date range,
+        filter by region, group by category) against the cube and
+        measure their execution time using \texttt{time.perf\_counter()}.
+        Compare to the same queries against the raw fact table.
+  \item Report the size of the materialised cube in MB and the speedup
+        factor for each query.
+\end{enumerate}
+
+\pe \textbf{Streaming Dashboard Simulation (Python + InfluxDB).}
+Build a simulated streaming pipeline using Python threads:
+\begin{enumerate}[label=(\alph*)]
+  \item Thread 1 (``producer''): generates 100 synthetic payment
+        transaction events per second, writing them to a Python queue.
+  \item Thread 2 (``stream processor''): reads from the queue; aggregates
+        over a 10-second tumbling window; computes total USD, transaction
+        count, and fraud flag count per window.
+  \item Thread 3 (``TSDB writer''): writes each window's aggregates
+        to an InfluxDB local instance (using the \texttt{influxdb-client}
+        Python library) with a \texttt{payment\_metrics} measurement and
+        fields \texttt{total\_usd}, \texttt{txn\_count},
+        \texttt{fraud\_count}.
+  \item Configure a local Grafana instance to display the three metrics
+        as a time-series chart with a 10-second auto-refresh interval.
+  \item Run the pipeline for 5 minutes and capture a screenshot
+        showing the live chart updating.
+\end{enumerate}
+
+\begin{lstlisting}[style=pyspark, caption={PE9.3: Streaming aggregation and InfluxDB write}]
+import queue, time, random, threading
+from datetime import datetime, timezone
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+
+INFLUX_URL    = "http://localhost:8086"
+INFLUX_TOKEN  = "mytoken"
+INFLUX_ORG    = "cse4345"
+INFLUX_BUCKET = "payment_metrics"
+WINDOW_SEC    = 10
+
+event_queue: queue.Queue = queue.Queue(maxsize=5000)
+
+def producer():
+    """Generates 100 synthetic events/sec."""
+    while True:
+        for _ in range(100):
+            event_queue.put({
+                "amount":    round(random.uniform(50, 5000), 2),
+                "is_fraud":  random.random() < 0.003,   # 0.3% fraud rate
+                "ts":        time.time(),
+            })
+        time.sleep(1)
+
+def stream_processor(write_api):
+    """Aggregates events in 10-second tumbling windows."""
+    window_start = time.time()
+    total_usd, txn_count, fraud_count = 0.0, 0, 0
+
+    while True:
+        try:
+            event = event_queue.get(timeout=0.05)
+            total_usd   += event["amount"]
+            txn_count   += 1
+            fraud_count += int(event["is_fraud"])
+        except queue.Empty:
+            pass
+
+        now = time.time()
+        if now - window_start >= WINDOW_SEC:
+            # Write window aggregate to InfluxDB
+            point = (Point("payment_metrics")
+                     .field("total_usd",   total_usd)
+                     .field("txn_count",   txn_count)
+                     .field("fraud_count", fraud_count)
+                     .time(datetime.now(timezone.utc)))
+            write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=point)
+            print(f"Window: {txn_count} txns | "
+                  f"USD {total_usd:,.0f} | "
+                  f"Fraud {fraud_count}")
+            total_usd, txn_count, fraud_count = 0.0, 0, 0
+            window_start = now
+
+if __name__ == "__main__":
+    client    = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+
+    t_prod = threading.Thread(target=producer, daemon=True)
+    t_proc = threading.Thread(target=stream_processor,
+                              args=(write_api,), daemon=True)
+    t_prod.start()
+    t_proc.start()
+
+    print("Pipeline running. Press Ctrl+C to stop.")
+    time.sleep(300)   # run for 5 minutes
+\end{lstlisting}
+
+%%====================================================================
+\section*{Further Reading}
+\label{sec:ch9-further}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{\cite{Tufte1983}} --- Self-published masterpiece that
+        founded the analytical visualization discipline. Chapters 1--4
+        cover data-ink ratio, chartjunk, and the lie factor with
+        hundreds of printed examples.
+  \item \textbf{\cite{Shneiderman1996}} --- The original mantra paper.
+        Five pages. Read it in full; every page has a principle directly
+        applicable to dashboard design.
+  \item \textbf{\cite{Bostock2011}} --- The D3 paper. Section 3 (Design
+        Considerations) explains why D3 provides general primitives rather
+        than chart types, and how the enter-update-exit pattern works.
+        Reading this alongside the D3 API documentation is the fastest
+        path to production D3 fluency.
+  \item \textbf{\cite{Acharya2015}} --- Chapter 10 covers data
+        visualisation tools for big data, including Tableau, R, and Python
+        with a practical emphasis suited to the course level.
+  \item \textbf{Wilke, C.\,O. (2019). \textit{Fundamentals of Data
+        Visualization.} O'Reilly.} A modern, freely available book that
+        extends Tufte's principles with colour theory, perceptual accuracy
+        research, and R ggplot2 implementation examples.
+        (Available at \texttt{clauswilke.com/dataviz}.)
+  \item \textbf{Bostock, M. (2022). Observable Plot documentation.}
+        Bostock's successor to D3 for exploratory data analysis in the
+        browser; simpler API while preserving the data-binding philosophy.
+\end{itemize}

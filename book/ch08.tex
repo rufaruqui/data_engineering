@@ -1,0 +1,1999 @@
+%% ch08.tex — Chapter 8: Data Pipelines, Data Lakes, and Real-Time Integration
+%% Part of "Data Engineering" textbook
+
+\chapter{Data Pipelines, Data Lakes, and Real-Time Integration}
+\label{ch:pipelines}
+
+\epigraph{\textit{``I believe that a unified log is the central data structure
+that can solve the coherency problem in a distributed, heterogeneous data system
+--- a structure so simple that we take it for granted, and so fundamental that
+we underestimate it.''}}{Jay Kreps, \textit{The Log: What Every Software
+Engineer Should Know About Real-Time Data's Unifying Abstraction},
+LinkedIn Engineering, 2013}
+
+\vspace{4pt}
+
+\begin{chapterlearning}
+After completing this chapter, you will be able to:
+\begin{enumerate}
+  \item Explain why traditional point-to-point ETL produces an $O(N^2)$
+        integration complexity problem and describe how a central message
+        bus reduces this to $O(N)$.
+  \item Compare the five major data integration tools---Apache Sqoop,
+        Apache Flume, Apache Kafka, Apache NiFi, and Spark Streaming---on
+        their primary use case, data direction, and throughput characteristics.
+  \item Describe how Apache Sqoop uses MapReduce to parallelise bulk data
+        transfer between an RDBMS and HDFS, and configure an incremental
+        import with \texttt{--incremental append}.
+  \item Explain the three components of an Apache Flume agent---Source,
+        Channel, and Sink---and distinguish between Memory Channel and
+        File Channel in terms of durability guarantees.
+  \item Define the five core Kafka concepts---Topic, Partition, Offset,
+        Broker, and Consumer Group---and explain how they combine to deliver
+        durability, parallelism, and exactly-once-capable messaging.
+  \item Explain how Kafka achieves high throughput through sequential disk
+        writes, zero-copy transfer via the Linux \texttt{sendfile()} system
+        call, producer batching, and partition-level parallelism.
+  \item Describe the three layers of the Lambda architecture---Batch Layer,
+        Speed Layer, and Serving Layer---and identify its primary engineering
+        disadvantage: the dual-code-path maintenance burden.
+  \item Explain how the Kappa architecture eliminates the batch layer by
+        using Kafka log replay for historical reprocessing, and identify
+        workloads for which Kappa is \emph{not} a viable replacement for Lambda.
+  \item Describe the four-layer architecture of a data lake---Ingestion,
+        Storage, Processing, and Catalogue/Governance---and explain what
+        turns a data lake into a data swamp.
+  \item Explain how table formats such as Delta Lake and Apache Iceberg add
+        ACID transaction semantics to object-store data lakes, and describe
+        the role of the transaction log in enabling time-travel queries.
+\end{enumerate}
+\end{chapterlearning}
+
+\bigskip
+
+Chapter~\ref{ch:spark} introduced Apache Spark as an in-memory distributed
+compute engine and Chapter~\ref{ch:sql-scale} extended Spark SQL into the
+interactive analytics domain with Hive, Presto, and LLAP. Both chapters
+addressed \emph{how to process} data that is already resident in HDFS or an
+object store. This chapter asks the prior question: \emph{how does data arrive
+there in the first place, and how can we ensure it arrives continuously, at
+low latency, and with sufficient quality to be trusted downstream?}
+
+The shift from nightly batch ETL to continuous data pipelines is one of the
+most consequential architectural transitions in enterprise data engineering.
+That transition was enabled by a deceptively simple idea: replace the web of
+point-to-point connections between systems with a single, durable,
+append-only log. Apache Kafka, introduced by LinkedIn engineers in 2011,
+is the canonical implementation of that idea, and it has become the backbone
+of modern event-driven architecture at companies ranging from Netflix and
+Uber to Grab and Revolut.
+
+The chapter covers the full pipeline picture: bulk batch transfer with
+Sqoop and Flume; real-time streaming with Kafka; the two competing
+system architectures---Lambda and Kappa---that organise batch and stream
+processing into coherent pipelines; and the data lake as the storage
+substrate that absorbs all of this data at petabyte scale. The chapter
+closes with the governance problem that makes data lakes fail in practice,
+and a preview of the table formats (Delta Lake, Apache Iceberg) that
+are beginning to solve it.
+
+%%====================================================================
+\section{From Batch ETL to Streaming Pipelines}
+\label{sec:etl-to-pipelines}
+%%====================================================================
+
+For two decades, the standard approach to moving data between enterprise
+systems was the \term{ETL pipeline}: a scheduled job that \textbf{E}xtracts
+data from a source system, \textbf{T}ransforms it into the target schema,
+and \textbf{L}oads it into a destination (typically a data warehouse). ETL
+pipelines are straightforward to build and reason about---a single job has
+a defined source, a defined transformation, and a defined target---but they
+scale poorly as the number of systems in an organisation grows.
+
+%--------------------------------------------------------------------
+\subsection{The $N^2$ Integration Problem}
+\label{subsec:n2-problem}
+%--------------------------------------------------------------------
+
+In a point-to-point ETL architecture, each pair of systems that needs to
+exchange data requires a dedicated ETL job. With $N$ systems, the number
+of direct connections in the worst case is $N(N-1)/2 = O(N^2)$.
+
+A bank with 50 operational systems (core banking, CRM, risk management,
+fraud detection, mobile wallet, settlement, audit, compliance\ldots) may
+require up to $50 \times 49 / 2 = 1{,}225$ separate ETL jobs. This
+creates four interconnected problems:
+
+\begin{enumerate}
+  \item \textbf{Brittleness:} When the schema of source system $A$
+        changes, every ETL job that reads from $A$ must be updated
+        simultaneously. A column rename cascades into a multi-day
+        incident.
+  \item \textbf{No replay:} Traditional ETL jobs delete data from the
+        source queue after consumption. If a downstream system is
+        offline when a job runs, that data is lost unless the ETL
+        job is re-run from scratch.
+  \item \textbf{High latency:} All jobs are scheduled nightly (or
+        hourly at best). Real-time fraud detection, live dashboards,
+        and event-driven personalisation are architecturally impossible
+        in this model.
+  \item \textbf{Tight coupling:} Source and consumer are tightly bound.
+        Adding a new consumer of an existing source requires modifying
+        or duplicating the source-side ETL job.
+\end{enumerate}
+
+\begin{keyinsight}{The Event Bus Reduces $O(N^2)$ to $O(N)$}
+Replacing direct ETL connections with a central \emph{event bus}
+eliminates the coupling between producers and consumers. Each of the
+$N$ systems connects to the bus once: producers write events to named
+topics; consumers subscribe to the topics they care about. Adding a
+new consumer requires \textbf{zero changes} to any producer. The total
+number of connections is $2N$ (one publish connection and one subscribe
+connection per system), reducing integration complexity from $O(N^2)$
+to $O(N)$.
+\end{keyinsight}
+
+The logical architecture of a central event bus is shown in
+Figure~\ref{fig:event-bus}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    sys/.style={circle, draw=DEBlue!40, fill=DEBlue!12,
+                minimum size=1.0cm, font=\small\bfseries\sffamily},
+    bus/.style={rectangle, rounded corners=5pt, fill=DEAccent!18,
+                draw=DEAccent!60, minimum width=2.6cm,
+                minimum height=4.5cm, font=\small\bfseries\sffamily,
+                align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
+  ]
+  %% Left panel: point-to-point
+  \node[font=\small\bfseries\sffamily, text=DERed] at (-3.6, 5.0)
+        {Point-to-Point ETL ($O(N^2)$)};
+  \node[sys] (a1) at (-5.0, 4.0) {A};
+  \node[sys] (a2) at (-2.2, 4.0) {B};
+  \node[sys] (a3) at (-5.0, 2.4) {C};
+  \node[sys] (a4) at (-2.2, 2.4) {D};
+  \foreach \x in {a1,a2,a3,a4} {
+    \foreach \y in {a1,a2,a3,a4} {
+      \draw[DERed!30, very thin] (\x)--(\y);
+    }
+  }
+  \node[font=\small\itshape, text=DERed!70] at (-3.6, 1.5)
+        {fragile, no replay};
+
+  %% Right panel: event bus
+  \node[font=\small\bfseries\sffamily, text=DEGreen] at (3.6, 5.0)
+        {Event Bus ($O(N)$)};
+  \node[bus] (bus) at (3.6, 3.2) {Event\\Bus\\{\small (Kafka)}};
+
+  \foreach \y/\lbl in {4.2/Src~A, 3.2/Src~B, 2.2/Src~C} {
+    \node[sys, fill=DEGreen!20] (p\lbl) at (1.6, \y) {\scriptsize\lbl};
+    \draw[arr, DEGreen!70] (p\lbl)--(bus);
+  }
+  \foreach \y/\lbl in {4.2/Con~1, 3.2/Con~2, 2.2/Con~3} {
+    \node[sys, fill=DEBlue!20] (c\lbl) at (5.6, \y) {\scriptsize\lbl};
+    \draw[arr, DEBlue!60] (bus)--(c\lbl);
+  }
+  \node[font=\small\itshape, text=DEGreen!70!black] at (3.6, 1.5)
+        {decoupled, replayable};
+\end{tikzpicture}
+\caption{Point-to-point ETL (left) versus a central event bus (right).
+         With $N=4$ systems, point-to-point requires up to six direct
+         connections; the event bus requires only $2N = 8$ connections,
+         and each source is oblivious to the number of consumers.}
+\label{fig:event-bus}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{The Data Integration Tool Landscape}
+\label{subsec:tool-landscape}
+%--------------------------------------------------------------------
+
+The transition from batch ETL to streaming pipelines did not happen
+overnight: a family of tools emerged to fill specific niches on the
+spectrum between pure batch and pure stream processing.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{lllp{4.2cm}l}
+  \toprule
+  \textbf{Tool} & \textbf{Direction} & \textbf{Type}
+    & \textbf{Primary Use Case} & \textbf{Throughput} \\
+  \midrule
+  Apache Sqoop
+    & RDBMS $\leftrightarrow$ HDFS
+    & Batch
+    & Nightly bulk transfer of relational tables
+    & GB--TB/hour \\
+  Apache Flume
+    & Logs $\to$ HDFS
+    & Batch/micro-batch
+    & Web server log ingestion; multi-source aggregation
+    & MB--GB/hour \\
+  Apache Kafka
+    & Any $\to$ Any
+    & Real-time stream
+    & Centralised event bus; fraud, clickstream, IoT
+    & GB--TB/hour \\
+  Apache NiFi
+    & Any $\to$ Any
+    & Visual pipeline
+    & No-code data routing; IoT edge to cloud
+    & MB--GB/hour \\
+  Spark Streaming
+    & Kafka $\to$ HDFS/DB
+    & Stream processing
+    & Stateful aggregation; enrichment; stream joins
+    & GB/hour \\
+  \midrule
+  \multicolumn{5}{l}{\small \textit{Rule of thumb:}
+    Sqoop = bulk DB sync;\;
+    Flume = log collection;\;
+    Kafka = real-time events;\;
+    NiFi = visual routing;\;
+    Spark = stream computation} \\
+  \bottomrule
+\end{tabular}
+\caption{Data integration tool landscape. No single tool is optimal for
+         all scenarios; the correct choice depends on data direction, latency
+         requirement, and operational complexity budget.}
+\label{tab:tool-landscape}
+\end{table}
+
+%%====================================================================
+\section{Batch Integration: Apache Sqoop and Apache Flume}
+\label{sec:batch-integration}
+%%====================================================================
+
+Before real-time messaging systems like Kafka were available, two
+Hadoop-ecosystem tools dominated data ingestion: \tool{Apache Sqoop}
+for bulk database transfer and \tool{Apache Flume} for log collection.
+Both remain in production at organisations with legacy Hadoop deployments,
+and understanding their design illuminates why Kafka eventually displaced
+them for most use cases.
+
+%--------------------------------------------------------------------
+\subsection{Apache Sqoop: Bulk RDBMS--HDFS Transfer}
+\label{subsec:sqoop}
+%--------------------------------------------------------------------
+
+\term{Apache Sqoop} (\textit{SQL-to-Hadoop}) is a command-line tool that
+transfers data in bulk between a relational database---MySQL, Oracle,
+PostgreSQL, SQL Server, or any JDBC-compliant store---and HDFS (or Hive,
+HBase). Its design insight is deceptively simple: convert a table scan into
+a MapReduce job, where each Map task reads a non-overlapping range of rows
+from the database in parallel using JDBC.
+
+\textbf{Import pipeline.} When a Sqoop import command is submitted, Sqoop:
+\begin{enumerate}
+  \item Connects to the database via JDBC and queries the table metadata
+        (column names, types, primary key range).
+  \item Determines the number of mappers ($m$, default 4). It divides the
+        primary key range $[k_{\min}, k_{\max}]$ into $m$ equal-width
+        sub-ranges: mapper $i$ reads rows where
+        $k \in [k_{\min} + (i-1)\cdot\delta,\; k_{\min} + i\cdot\delta)$.
+  \item Submits a MapReduce job. Each Map task opens its own JDBC connection,
+        executes the bounded \texttt{SELECT}, and writes its partition to
+        HDFS as CSV, Avro, Parquet, or SequenceFile.
+  \item There is no Reduce phase: each mapper writes an independent part
+        file, and HDFS assembles them into the output directory.
+\end{enumerate}
+
+\begin{lstlisting}[style=shell, caption={Sqoop: full import and incremental import}]
+# Full import: entire table to HDFS as Parquet, 8 parallel mappers
+sqoop import \
+  --connect jdbc:mysql://db-host:3306/finance \
+  --username analyst \
+  --password-file /user/analyst/.sqoop-pass \
+  --table transactions \
+  --as-parquetfile \
+  --num-mappers 8 \
+  --target-dir /data/raw/transactions \
+  --delete-target-dir
+
+# Incremental import: only rows newer than the last checkpoint
+# Use this for nightly appends to an existing HDFS dataset
+sqoop import \
+  --connect jdbc:mysql://db-host:3306/finance \
+  --username analyst \
+  --password-file /user/analyst/.sqoop-pass \
+  --table transactions \
+  --as-parquetfile \
+  --num-mappers 4 \
+  --target-dir /data/raw/transactions \
+  --incremental append \
+  --check-column txn_timestamp \
+  --last-value '2024-06-11 23:59:59'
+\end{lstlisting}
+
+\begin{defbox}{Sqoop Incremental Import}
+An \textbf{incremental import} transfers only rows added since the previous
+run, identified by a monotonically increasing column (\texttt{--check-column})
+and a checkpoint value (\texttt{--last-value}). Two modes are supported:
+\texttt{append} (new rows, identified by value greater than the checkpoint)
+and \texttt{lastmodified} (rows whose modification timestamp exceeds the
+checkpoint). Sqoop saves the new checkpoint to a \emph{saved job} so the
+next run picks up where the previous left off.
+\end{defbox}
+
+\textbf{Export pipeline.} Sqoop can also export data \emph{from} HDFS
+\emph{to} a relational database---for example, after a Spark batch job
+produces a summary table on HDFS, Sqoop exports it back to a MySQL
+reporting database for a business intelligence tool to query.
+
+\begin{lstlisting}[style=shell, caption={Sqoop: export from HDFS to MySQL}]
+sqoop export \
+  --connect jdbc:mysql://db-host:3306/reports \
+  --username loader \
+  --password-file /user/loader/.sqoop-pass \
+  --table daily_summary \
+  --export-dir /data/processed/daily_summary \
+  --input-fields-terminated-by '\t' \
+  --update-mode allowinsert \
+  --update-key summary_date,region
+\end{lstlisting}
+
+\begin{techdebt}{Why Sqoop Is Being Retired in Modern Stacks}
+Sqoop's dependency on MapReduce makes it incompatible with YARN-free
+deployments and cloud-native object stores where MapReduce locality
+is irrelevant. Its JDBC-per-mapper approach hammers source databases
+with concurrent connections, often requiring a dedicated read replica.
+In modern data platforms, \tool{Kafka Connect} with a JDBC source
+connector has replaced Sqoop for most use cases: it supports
+streaming incremental ingestion (capturing changes via CDC), requires no
+MapReduce infrastructure, and integrates with Kafka's replay semantics.
+Sqoop reached End of Life in 2021 and is no longer receiving Apache
+releases, though it remains in production at many Hadoop-era deployments.
+\end{techdebt}
+
+%--------------------------------------------------------------------
+\subsection{Apache Flume: Log Ingestion Pipelines}
+\label{subsec:flume}
+%--------------------------------------------------------------------
+
+\term{Apache Flume} is a distributed, reliable service for streaming log
+data from multiple sources into HDFS. Its primary use case is collecting
+semi-structured logs---web server access logs, application error logs,
+IoT sensor readings---and storing them in HDFS for subsequent batch
+analysis.
+
+\textbf{The Flume agent model.} The fundamental unit of Flume is the
+\term{agent}: a JVM process with three components.
+
+\begin{defbox}{Flume Agent: Source, Channel, Sink}
+A \textbf{Flume agent} consists of three components that form a directed
+pipeline:
+\begin{itemize}
+  \item \textbf{Source}: receives events from an external system. Types
+        include Exec source (\texttt{tail -F logfile}), Syslog source
+        (UDP/TCP syslog), Avro source (from another Flume agent), and
+        HTTP source (REST push).
+  \item \textbf{Channel}: buffers events between Source and Sink.
+        \emph{Memory Channel} (fast, non-durable) or \emph{File Channel}
+        (writes to local disk; survives agent restart at the cost of
+        throughput).
+  \item \textbf{Sink}: writes buffered events to the destination.
+        HDFS Sink (writes Avro or text files, rolling by time or size),
+        Kafka Sink (forwards events to a Kafka topic), HBase Sink.
+\end{itemize}
+Events flow Source $\to$ Channel $\to$ Sink. The channel decouples
+source read speed from sink write speed, absorbing bursts.
+\end{defbox}
+
+Multiple agents can be chained together: a \emph{fan-in} topology
+aggregates logs from many web servers into a single \emph{collector agent}
+before writing to HDFS, reducing the number of small files that would
+result from each server writing directly to HDFS.
+
+\begin{lstlisting}[style=shell, caption={Flume: agent configuration for web log collection}]
+# flume-agent.conf
+# Source: tail the nginx access log
+agent.sources  = nginx_src
+agent.channels = file_channel
+agent.sinks    = hdfs_sink
+
+agent.sources.nginx_src.type           = exec
+agent.sources.nginx_src.command        = tail -F /var/log/nginx/access.log
+agent.sources.nginx_src.channels       = file_channel
+
+agent.channels.file_channel.type       = file
+agent.channels.file_channel.checkpointDir = /var/flume/checkpoint
+agent.channels.file_channel.dataDirs      = /var/flume/data
+
+agent.sinks.hdfs_sink.type             = hdfs
+agent.sinks.hdfs_sink.hdfs.path        = hdfs://namenode:9000/logs/%Y/%m/%d
+agent.sinks.hdfs_sink.hdfs.fileType    = DataStream
+agent.sinks.hdfs_sink.hdfs.rollInterval= 300
+agent.sinks.hdfs_sink.hdfs.rollSize    = 134217728
+agent.sinks.hdfs_sink.channel          = file_channel
+\end{lstlisting}
+
+\begin{caution}{Small Files and the HDFS Namespace Tax}
+Flume's rolling policy controls how often a new HDFS file is created.
+A short roll interval (e.g., every 10 seconds) produces thousands of
+small files per day, each consuming a NameNode metadata entry and
+degrading NameNode heap. Best practice is to use a roll interval of
+300--600 seconds and a roll size of 128~MB (one HDFS block), so each
+rolled file is exactly one block. Alternatively, a downstream compaction
+job (Spark or Hive \texttt{INSERT OVERWRITE \ldots\ SELECT \ldots}) merges
+small files nightly into large Parquet files.
+\end{caution}
+
+\begin{systemdesign}{Flume Fan-In: Aggregating Logs from Many Servers}
+A typical Flume deployment for a web application with 20 application
+servers uses two tiers: twenty \emph{edge agents} (one per server)
+each with an Exec or Syslog source and a Memory Channel writing to
+an Avro Sink; and two \emph{collector agents} each with an Avro Source
+(receiving from 10 edge agents) and a File Channel writing to an HDFS
+Sink. The collector tier provides durability (File Channel survives
+collector restart) and aggregation (reducing 20 HDFS writers to 2,
+greatly reducing small file pressure). This fan-in topology is specified
+entirely in the Flume agent configuration files---no code is required.
+\end{systemdesign}
+
+%%====================================================================
+\section{Apache Kafka: The Distributed Append-Only Log}
+\label{sec:kafka}
+%%====================================================================
+
+Apache Kafka was created by Jay Kreps, Neha Narkhede, and Jun Rao at
+LinkedIn in 2010--2011 to solve the $N^2$ integration problem that LinkedIn
+faced with its rapidly growing activity data pipeline. It was open-sourced
+to the Apache Software Foundation in 2012 and has since become the dominant
+event streaming platform in the industry.
+
+Kafka's central innovation is not a clever algorithm or a novel hardware
+optimisation: it is a \emph{rethinking of what a message broker should be}.
+Traditional message queues (ActiveMQ, RabbitMQ) model messages as transient
+objects: once a consumer acknowledges receipt, the message is deleted.
+Kafka models messages as \emph{records in a durable, immutable, ordered
+log}: they are retained for a configurable period regardless of whether
+they have been consumed, and any consumer can read them at any time by
+specifying an offset.
+
+%--------------------------------------------------------------------
+\subsection{The Core Log Abstraction}
+\label{subsec:kafka-log}
+%--------------------------------------------------------------------
+
+A \term{log}, in the computer science sense, is the simplest possible
+storage abstraction: an append-only, totally ordered sequence of records.
+Every database transaction log, every write-ahead log, every file system
+journal is a log in this sense. Kafka's insight is that this same
+abstraction---which databases use for durability---can serve as the
+backbone of an entire distributed data infrastructure.
+
+\begin{defbox}{Kafka Log Abstraction}
+In Kafka, a \textbf{log} is a durable, append-only sequence of records.
+Each record has:
+\begin{itemize}
+  \item A \textbf{key} (optional): a byte array used to determine partition
+        assignment (all records with the same key go to the same partition,
+        preserving key-level ordering).
+  \item A \textbf{value}: the payload bytes (serialised JSON, Avro, Protobuf,
+        or raw bytes).
+  \item A \textbf{timestamp}: producer-assigned or broker-assigned event time.
+  \item An \textbf{offset}: a monotonically increasing integer assigned by the
+        broker that uniquely identifies the record within its partition.
+\end{itemize}
+Records are \textbf{never modified or deleted} within the retention period.
+The log is the single source of truth; all consumers derive their view
+from it by tracking their own read offset.
+\end{defbox}
+
+Figure~\ref{fig:kafka-log} contrasts the traditional queue model with
+Kafka's log model. In a traditional queue, a message is removed after
+it is consumed; a late-joining consumer has no access to past messages.
+In Kafka, all messages are retained for a configurable period, enabling
+any consumer---including one that joins weeks after the messages were
+written---to read from offset 0 and replay the full history.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    rec/.style={rectangle, draw=DEBlue!35, fill=DEBlue!10,
+                minimum width=0.8cm, minimum height=0.65cm,
+                font=\scriptsize\sffamily},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
+  ]
+  %% Traditional queue
+  \node[font=\small\bfseries\sffamily, text=DERed] at (0, 4.8)
+        {Traditional Queue};
+  \foreach \i/\x in {0/-1.5, 1/-0.5, 2/0.5, 3/1.5} {
+    \node[rec, fill=DERed!15, draw=DERed!30] at (\x, 4.1) {\tiny msg};
+  }
+  \node[font=\scriptsize, text=DERed!70, align=center] at (0, 3.5)
+        {consumed = deleted\\late consumer loses data};
+
+  %% Kafka log
+  \node[font=\small\bfseries\sffamily, text=DEBlue] at (7.0, 4.8)
+        {Kafka Partition (append-only log)};
+  \foreach \off/\x in {0/4.5, 1/5.4, 2/6.3, 3/7.2, 4/8.1, 5/9.0} {
+    \node[rec] (k\off) at (\x, 4.1) {\tiny\off};
+  }
+  \draw[arr, DEGray!50] (4.1,4.1)--(4.1,4.5)
+        node[above, font=\scriptsize\sffamily]{oldest};
+  \draw[arr, DEAccent] (9.4,4.1)--(9.4,4.5)
+        node[above, font=\scriptsize\sffamily]{newest};
+
+  %% Consumer A at offset 2
+  \draw[arr, DEGreen!70, thick] (6.3, 3.5)--(6.3, 3.8)
+        node[below=4pt, font=\scriptsize\sffamily\itshape,
+             text=DEGreen!70!black, align=center]{Con A\\off=2};
+  %% Consumer B at offset 5
+  \draw[arr, DEBlue!60, thick] (9.0, 3.5)--(9.0, 3.8)
+        node[below=4pt, font=\scriptsize\sffamily\itshape,
+             text=DEBlue, align=center]{Con B\\off=5};
+
+  \node[font=\scriptsize\itshape, text=DEGray, align=center] at (7.0, 2.9)
+        {each consumer tracks its own offset\\
+         messages retained for days or weeks};
+\end{tikzpicture}
+\caption{Traditional queue versus Kafka's append-only log. In the queue model,
+         consumed messages are deleted. In Kafka, all messages are retained;
+         each consumer independently tracks its read offset and can replay
+         history by resetting to any past offset.}
+\label{fig:kafka-log}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Kafka Architecture: Topics, Partitions, Offsets, and Brokers}
+\label{subsec:kafka-arch}
+%--------------------------------------------------------------------
+
+Kafka's architecture has five foundational concepts that work together to
+deliver durability, parallelism, and horizontal scalability.
+
+\begin{enumerate}
+  \item \textbf{Topic.} A \term{topic} is a named, durable, append-only log
+        for a category of events. Topics are analogous to database tables
+        but append-only: \texttt{payment-events}, \texttt{rideshare-gps-pings},
+        and \texttt{city-weather-sensors} might each be a Kafka topic.
+        Producers write to a topic; consumers read from it.
+
+  \item \textbf{Partition.} Each topic is split into $P \geq 1$ ordered
+        \term{partitions}. A partition is an independent ordered log residing
+        on a single broker. Partitions provide two things:
+        \emph{parallelism} (multiple producers can write to different
+        partitions simultaneously; multiple consumers in a group can
+        each process a distinct partition) and
+        \emph{key-based ordering} (all messages with the same key are
+        routed to the same partition via key hashing, guaranteeing that
+        a given customer's transactions are always read in order).
+
+  \item \textbf{Offset.} Each message within a partition has a unique,
+        monotonically increasing integer \term{offset}---its position in
+        the partition log. Offsets within a partition are dense and
+        ordered; they are not globally unique across partitions. Each
+        consumer independently tracks its read offset; the broker does
+        not maintain per-consumer state (offsets are stored by consumers
+        in a special Kafka topic named \texttt{\_\_consumer\_offsets}).
+
+  \item \textbf{Broker.} A \term{broker} is a Kafka server process that
+        stores partitions on its local disk and serves producers and
+        consumers over the Kafka wire protocol. A Kafka cluster contains
+        $B$ brokers. Each partition has one \term{leader replica} (handles
+        all reads and writes) and $R-1$ \term{follower replicas} (copy
+        data from the leader asynchronously; stand in as leader on
+        failure). The default replication factor is $R=3$, tolerating
+        the simultaneous failure of any two brokers without data loss.
+
+  \item \textbf{ZooKeeper / KRaft.} Kafka versions prior to 3.0 used
+        Apache ZooKeeper for cluster metadata and leader election.
+        Kafka 3.0 introduced \tool{KRaft} (Kafka Raft), a self-managed
+        metadata quorum built directly into the Kafka brokers, removing
+        the ZooKeeper dependency and simplifying deployment.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    part/.style={rectangle, draw=DEBlue!35, fill=DEBlue!10,
+                 minimum width=2.8cm, minimum height=0.6cm,
+                 font=\small\sffamily, rounded corners=2pt},
+    brk/.style={rectangle, rounded corners=5pt, draw=DEAccent!60,
+                fill=DEAccent!10, minimum width=3.0cm,
+                minimum height=2.6cm},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
+  ]
+  %% Topic label
+  \node[font=\normalsize\bfseries\sffamily, text=DEBlue] at (3.6, 6.4)
+        {Topic: \texttt{payment-txns}\ \ (3 partitions, RF\,=\,2)};
+
+  %% Brokers
+  \node[brk] at (0.8, 4.6) {};
+  \node[brk] at (6.4, 4.6) {};
+  \node[font=\small\bfseries\sffamily, text=DEAccent!80!black] at (0.8, 5.9)
+        {Broker 1};
+  \node[font=\small\bfseries\sffamily, text=DEAccent!80!black] at (6.4, 5.9)
+        {Broker 2};
+
+  %% Partitions on Broker 1
+  \node[part, fill=DEBlue!25, text=white] (p0l) at (0.8, 5.2)
+        {P0 (leader)};
+  \node[part]                             (p1l) at (0.8, 4.5)
+        {P1 (leader)};
+  \node[part]                             (p2r) at (0.8, 3.8)
+        {P2 (replica)};
+
+  %% Partitions on Broker 2
+  \node[part]                             (p0r) at (6.4, 5.2)
+        {P0 (replica)};
+  \node[part, fill=DEBlue!25, text=white] (p2l) at (6.4, 4.5)
+        {P2 (leader)};
+  \node[part]                             (p1r) at (6.4, 3.8)
+        {P1 (replica)};
+
+  %% Replication arrows
+  \draw[arr, DERed!40, dashed, bend left=15] (p0l) to (p0r);
+  \draw[arr, DERed!40, dashed, bend right=15] (p1l) to (p1r);
+  \draw[arr, DERed!40, dashed, bend left=10] (p2l) to (p2r);
+  \node[font=\scriptsize\itshape, text=DERed!60] at (3.6, 5.7)
+        {replication};
+
+  %% Producers
+  \node[font=\small\bfseries\sffamily] at (-2.2, 5.2) {Producer};
+  \draw[arr, DEGreen!70]  (-1.4,5.2)--(0.0,5.2)
+        node[midway,above,font=\scriptsize\sffamily]{key=txn\_id};
+  \draw[arr, DEGreen!50]  (-1.4,4.5)--(0.0,4.5);
+
+  %% Consumer Group
+  \node[font=\small\bfseries\sffamily, align=center] at (9.4, 5.2) {Consumer\\Group};
+  \draw[arr, DEBlue!60] (7.2,5.2)--(8.6,5.2)
+        node[midway,above,font=\scriptsize\sffamily]{analytics};
+  \draw[arr, DEBlue!60] (7.2,4.5)--(8.6,4.5);
+  \draw[arr, DEBlue!40] (7.2,3.8)--(8.6,3.8);
+\end{tikzpicture}
+\caption{Kafka cluster with two brokers, one topic, three partitions, and
+         replication factor 2. Partition leaders handle all reads and writes;
+         followers maintain copies for fault tolerance. If Broker~1 fails,
+         Broker~2 promotes its P0 and P1 replicas to leaders.}
+\label{fig:kafka-arch}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Producers, Consumers, and Consumer Groups}
+\label{subsec:kafka-producers-consumers}
+%--------------------------------------------------------------------
+
+A \term{Kafka producer} is any application that publishes messages to a
+topic. The producer selects the target partition either by hashing the
+message key (\texttt{hash(key) \% P}) or by round-robin if no key is
+specified. The producer batches messages in memory and sends a batch
+to the broker's partition leader in a single network request, trading
+latency for throughput via the \texttt{batch.size} and \texttt{linger.ms}
+configuration parameters.
+
+A \term{Kafka consumer} is any application that reads messages from one
+or more topics by polling the broker and advancing its read offset. The
+consumer never \emph{pushes} messages back to acknowledge deletion; it
+simply records that it has processed up to a given offset.
+
+\term{Consumer groups} are the key mechanism for parallel consumption.
+A consumer group is a named set of consumer processes that collectively
+consume all partitions of a topic. Kafka's partition-assignment guarantee
+ensures that each partition is assigned to \emph{exactly one consumer}
+in the group at any point in time. This means:
+\begin{itemize}
+  \item Adding consumers to a group (up to $P$ consumers) increases
+        parallelism proportionally.
+  \item Two independent applications (e.g., a fraud-detection service and
+        an analytics service) reading the same topic use \emph{different}
+        consumer groups. Each group maintains its own set of offsets,
+        so both applications receive every message independently.
+  \item When a consumer joins or leaves the group, Kafka triggers a
+        \term{rebalance}: partitions are reassigned among the remaining
+        consumers. Modern Kafka (2.4+) uses cooperative incremental
+        rebalancing to minimise the disruption.
+\end{itemize}
+
+\begin{lstlisting}[style=pyspark, caption={Kafka producer and consumer in Python (kafka-python)}]
+import json, random, time
+from kafka import KafkaProducer, KafkaConsumer
+
+BROKER = "localhost:9092"
+TOPIC  = "payment-events"
+
+# ---------- Producer ----------
+producer = KafkaProducer(
+    bootstrap_servers=BROKER,
+    key_serializer=lambda k: k.encode(),
+    value_serializer=lambda v: json.dumps(v).encode(),
+    # batch.size=16384 (16 KB), linger.ms=5  --  trade latency for throughput
+    batch_size=16384,
+    linger_ms=5,
+    acks='all',          # wait for all in-sync replicas
+    retries=5,
+)
+
+for i in range(10_000):
+    txn = {
+        "txn_id":    f"TXN{i:08d}",
+        "sender":    random.randint(1, 50_000),
+        "receiver":  random.randint(1, 50_000),
+        "amount":    round(random.uniform(10, 5000), 2),
+        "currency":  "USD",
+        "timestamp": int(time.time() * 1000),
+    }
+    # key = str(sender): ensures all transactions from the same
+    # sender land in the same partition, preserving send-order
+    producer.send(TOPIC, key=str(txn["sender"]), value=txn)
+
+producer.flush()   # block until all buffered records are sent
+print("Produced 10,000 transactions")
+
+# ---------- Consumer (fraud-detection group) ----------
+consumer = KafkaConsumer(
+    TOPIC,
+    bootstrap_servers=BROKER,
+    group_id="fraud-detection-v1",
+    auto_offset_reset="earliest",         # start from offset 0 if new group
+    enable_auto_commit=True,
+    auto_commit_interval_ms=5000,
+    value_deserializer=lambda m: json.loads(m.decode()),
+    key_deserializer=lambda k: k.decode() if k else None,
+)
+
+for record in consumer:
+    txn = record.value
+    # Simple heuristic: flag large transactions for review
+    if txn["amount"] > 4500:
+        print(f"[ALERT] Large txn {txn['txn_id']}: "
+              f"USD {txn['amount']:.2f} "
+              f"(partition={record.partition}, offset={record.offset})")
+\end{lstlisting}
+
+%--------------------------------------------------------------------
+\subsection{Kafka Throughput: Sequential I/O and Zero-Copy Transfer}
+\label{subsec:kafka-throughput}
+%--------------------------------------------------------------------
+
+The Kreps et al.\ (2011) paper reports Kafka producer throughput of
+505{,}000 messages/sec---roughly $11\times$ that of ActiveMQ and $3.4\times$
+that of RabbitMQ on equivalent hardware. Four engineering decisions explain
+this performance advantage.
+
+\begin{enumerate}
+  \item \textbf{Sequential disk writes.} Kafka never updates messages in
+        place. Partition logs are written by appending to the active
+        segment file. Sequential writes on a spinning hard disk achieve
+        500--600~MB/s; random writes to the same disk achieve only
+        50--100~MB/s due to seek latency. Kafka exploits this difference
+        fully. The OS page cache prefetches the next disk blocks
+        automatically, making Kafka's effective write speed close to
+        raw disk bandwidth even without SSDs.
+
+  \item \textbf{Zero-copy transfer.} When a consumer fetches messages,
+        a traditional broker copies data along the following path:
+        disk $\to$ kernel buffer $\to$ user-space buffer $\to$ socket
+        buffer $\to$ NIC (four copies, two context switches). Kafka
+        uses the Linux \texttt{sendfile()} system call to transfer data
+        from the kernel buffer directly to the NIC, bypassing the
+        user-space copy entirely (two copies, zero context switches).
+        This halves CPU usage for read-heavy workloads.
+
+  \item \textbf{Batch compression.} Producers compress a \emph{batch}
+        of messages as a single unit (Snappy, LZ4, Zstandard, or GZIP)
+        before transmitting to the broker. The broker stores the
+        compressed batch without decompressing it; consumers decompress
+        on receipt. For structured log data, batch compression
+        ratios of 5--10$\times$ are typical, reducing both network
+        and disk I/O proportionally.
+
+  \item \textbf{Partition parallelism.} Throughput scales linearly
+        with partition count: $P$ partitions allow $P$ parallel
+        producer threads and up to $P$ consumers in a group to
+        operate simultaneously. Increasing partitions from 1 to 32
+        increases end-to-end throughput by a factor approaching 32,
+        bounded by broker and network capacity.
+\end{enumerate}
+
+\begin{keyinsight}{Kafka's Disk Is Faster Than Memory for Sequential I/O}
+A common assumption is that memory-based messaging (e.g., keeping all
+messages in RAM) is faster than disk-based messaging. This is true
+for \emph{random} access. For the \emph{sequential} access pattern
+that Kafka's append-only log produces, the OS page cache makes
+sequential disk access \emph{faster than a heap-allocated data structure}
+at large scale: sequential disk reads saturate the memory bus rather
+than L3 cache, and the page cache is managed by the kernel's LRU policy
+which is better tuned than a custom in-process cache for this workload.
+\end{keyinsight}
+
+%--------------------------------------------------------------------
+\subsection{Retention, Replay, and Exactly-Once Semantics}
+\label{subsec:kafka-retention}
+%--------------------------------------------------------------------
+
+\textbf{Retention policy.} Kafka retains messages for a configurable
+period (\texttt{retention.ms}, default 7 days) or up to a configurable
+total log size (\texttt{retention.bytes}). When both conditions are
+reached, the oldest segment files are deleted. A consumer that has not
+read a partition before its messages expire will miss those messages---a
+design choice that prioritises throughput over guaranteed delivery to
+slow consumers.
+
+\textbf{Replay.} Because offsets are persistent and messages are not
+deleted on consumption, any consumer can reset its offset to any point
+in the retention window and re-read messages. This enables:
+\begin{itemize}
+  \item \textbf{Backfilling}: a new downstream service can be launched
+        and immediately process historical data without re-ingesting
+        from the source.
+  \item \textbf{Bug recovery}: if a consumer has a bug that corrupts its
+        state, it can reset to the last known-good offset and reprocess.
+  \item \textbf{Multi-consumer independence}: a second consumer group
+        reading the same topic starts fresh at offset 0 without affecting
+        the first group's offset position.
+\end{itemize}
+
+\textbf{Exactly-once semantics.} Kafka 0.11 (2017) introduced two
+mechanisms for exactly-once message delivery:
+\begin{itemize}
+  \item \textbf{Idempotent producer.} The producer assigns a monotonically
+        increasing sequence number to each batch. If the broker receives
+        a duplicate batch (e.g., due to a network retry), it deduplicates
+        using the sequence number. This prevents duplicate writes caused
+        by producer retries.
+  \item \textbf{Transactional API.} A producer can open a transaction,
+        send messages to multiple partitions, and either commit (making
+        all messages visible atomically) or abort (rolling back). Combined
+        with \texttt{isolation.level=read\_committed} on the consumer side,
+        this provides exactly-once semantics across the full
+        produce--consume--produce pipeline.
+\end{itemize}
+
+\begin{techdebt}{Schema Governance at Scale: The Schema Registry}
+At small scale, Kafka consumers can deserialise message bytes using
+any format they agree upon with producers. At scale---4{,}000 topics
+and 400 microservices, as at Netflix---schema evolution breaks consumers:
+a producer that adds a field to its Avro schema without warning causes
+all consumers to crash on the next schema change.
+
+The \tool{Confluent Schema Registry} (open-source) solves this by
+registering every Avro, Protobuf, or JSON Schema version under a
+subject (typically \texttt{\{topic\}-value}). Producers embed the
+schema ID (an integer) in each message; consumers look up the schema
+by ID on receipt. The Registry enforces a \emph{compatibility policy}
+(BACKWARD, FORWARD, FULL) that rejects schema changes which would break
+existing consumers. At Netflix and LinkedIn, deploying a schema registry
+is considered non-negotiable for production Kafka usage.
+\end{techdebt}
+
+%%====================================================================
+\section{Lambda Architecture}
+\label{sec:lambda}
+%%====================================================================
+
+As real-time stream processing systems matured alongside batch processing
+frameworks, practitioners faced a design dilemma: how to serve queries that
+require both low latency (seconds) \emph{and} high accuracy (based on
+complete historical data), when stream processors are fast but approximate
+and batch processors are accurate but slow?
+
+Nathan Marz formulated the \term{Lambda architecture} in 2011 as a systematic
+answer to this dilemma. The name is drawn from the Greek letter $\lambda$,
+reflecting the three-way branching of the data path.
+
+%--------------------------------------------------------------------
+\subsection{The Three-Layer Design}
+\label{subsec:lambda-layers}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Lambda Architecture}
+The \textbf{Lambda architecture} is a data pipeline pattern that serves
+both accurate historical batch views and low-latency real-time views from
+the same input data, without choosing one at the expense of the other.
+It has three layers:
+\begin{enumerate}
+  \item \textbf{Batch Layer}: stores the complete, immutable master dataset
+        (typically on HDFS or S3). Periodically recomputes \emph{batch views}
+        by running MapReduce, Spark, or Hive jobs over the entire dataset.
+        Output is \emph{accurate} but \emph{high-latency}: views are
+        1~hour to 24~hours stale.
+  \item \textbf{Speed Layer}: processes new data arriving since the last
+        batch run using a stream processor (Kafka + Spark Streaming or
+        Flink). Produces \emph{real-time views} covering the most recent
+        window. Output is \emph{low-latency} ($<$1~second to seconds) but
+        may be \emph{approximate} (bounded by available state in the
+        stream processor).
+  \item \textbf{Serving Layer}: merges batch views and real-time views
+        to answer user queries. A query result equals
+        \emph{batch view (up to N hours ago)} $\cup$ \emph{real-time view
+        (last N hours)}. Apache Druid, Cassandra, or a custom merge index
+        typically implements the serving layer.
+\end{enumerate}
+\end{defbox}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, rounded corners=5pt, minimum width=3.6cm,
+                minimum height=0.8cm, font=\small\bfseries\sffamily,
+                align=center},
+    arr/.style={-{Stealth[length=5pt,width=5pt]}, thick}
+  ]
+  %% Raw data
+  \node[box, fill=DEBlue!80, text=white, minimum width=6.0cm]
+        (raw) at (0, 6.0) {Raw Data (immutable event log)};
+
+  %% Batch layer
+  \node[box, fill=DERed!18, minimum width=2.6cm]
+        (bl) at (-2.5, 4.6) {Batch Layer\\{\small HDFS + Spark/Hive}};
+  %% Speed layer
+  \node[box, fill=DEGreen!22, minimum width=2.6cm]
+        (sl) at (2.5, 4.6) {Speed Layer\\{\small Kafka + Flink}};
+
+  \draw[arr, DERed!55] (raw)--(-2.5,5.4)--(-2.5,5.1);
+  \draw[arr, DEGreen!55] (raw)--(2.5,5.4)--(2.5,5.1);
+
+  %% Views
+  \node[box, fill=DERed!10, minimum width=2.6cm] (bv) at (-2.5, 3.3)
+        {Batch Views\\{\small hours-old, accurate}};
+  \node[box, fill=DEGreen!12, minimum width=2.6cm] (rv) at (2.5, 3.3)
+        {Real-time Views\\{\small seconds-old, approx.}};
+
+  \draw[arr, DERed!45]   (bl)--(bv);
+  \draw[arr, DEGreen!45] (sl)--(rv);
+
+  %% Serving layer
+  \node[box, fill=DEAccent!22, minimum width=6.0cm]
+        (srv) at (0, 2.0) {Serving Layer (merge + query)};
+  \draw[arr, DERed!45]   (bv)--(srv);
+  \draw[arr, DEGreen!45] (rv)--(srv);
+
+  %% Application
+  \node[box, fill=DEBlue!12, minimum width=6.0cm]
+        (app) at (0, 0.8) {Application / Dashboard};
+  \draw[arr, DEBlue!50] (srv)--(app);
+\end{tikzpicture}
+\caption{Lambda architecture. Raw data flows into both the batch layer
+         (for accurate periodic recomputation) and the speed layer (for
+         low-latency real-time views). The serving layer merges both view
+         types to answer queries.}
+\label{fig:lambda-arch}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Strengths and the Dual-Code-Path Problem}
+\label{subsec:lambda-weaknesses}
+%--------------------------------------------------------------------
+
+The Lambda architecture has four significant strengths:
+\begin{itemize}
+  \item \textbf{Accuracy from immutability.} The batch layer always
+        recomputes from the raw, immutable dataset. A bug in a past
+        batch job can be corrected by fixing the logic and re-running
+        the job---the historical truth is never lost.
+  \item \textbf{Low latency for recent data.} The speed layer delivers
+        query results for the most recent window within seconds,
+        regardless of how large the historical dataset is.
+  \item \textbf{Fault tolerance.} No derived view is irreplaceable:
+        batch views and real-time views can both be recomputed from
+        the master dataset or from Kafka's retained log.
+  \item \textbf{Separation of concerns.} Batch and speed components
+        can be built with the most appropriate tools for each: Hive
+        for batch SQL, Flink for streaming CEP, for example.
+\end{itemize}
+
+The Lambda architecture's critical weakness is the \textbf{dual-code-path
+problem}: the same business logic must be implemented \emph{twice}---once
+in the batch layer (SQL or Spark batch) and once in the speed layer
+(streaming SQL or Flink operators).
+
+\begin{caution}{The Dual-Code-Path Maintenance Burden}
+Consider a data engineering team computing ``daily active users per region''
+for a fraud monitoring system. In a Lambda deployment this requires:
+\begin{enumerate}
+  \item A Spark batch job (running nightly) that aggregates the full
+        historical table and writes batch views for periods up to midnight.
+  \item A Flink streaming job that maintains a rolling count of active
+        users from midnight to now (the real-time view).
+\end{enumerate}
+When the definition of ``active user'' changes (e.g., the business adds
+a minimum session-duration threshold), \emph{both jobs must be updated
+simultaneously}. Industry reports indicate that 30--40\% of data
+engineering effort in Lambda deployments is spent keeping the two
+implementations in sync---a tax that grows with the number of metrics
+and the frequency of business logic changes.
+\end{caution}
+
+%%====================================================================
+\section{Kappa Architecture}
+\label{sec:kappa}
+%%====================================================================
+
+In 2014, Jay Kreps (Kafka co-creator) proposed the \term{Kappa
+architecture} as a simplification of Lambda. The core argument: if a
+stream processing system is powerful enough to reprocess historical data
+at the same rate as live data, the batch layer is unnecessary.
+
+%--------------------------------------------------------------------
+\subsection{Stream-Only Processing and Log Replay}
+\label{subsec:kappa-design}
+%--------------------------------------------------------------------
+
+\begin{defbox}{Kappa Architecture}
+The \textbf{Kappa architecture} replaces Lambda's three-layer design
+with two components:
+\begin{enumerate}
+  \item \textbf{Log storage} (Kafka with long-term retention, or an
+        object store like S3 with Apache Iceberg providing table-level
+        access): stores the complete immutable event history. This
+        replaces the HDFS batch layer.
+  \item \textbf{Stream processing engine} (Apache Flink or Spark
+        Structured Streaming): the \emph{single code path} that handles
+        both live events and historical replay. To reprocess history,
+        a new consumer reads from Kafka offset 0 and processes events
+        in order until it catches up to the live stream.
+\end{enumerate}
+The \textbf{reprocessing workflow} when business logic changes:
+\begin{enumerate}
+  \item Deploy a new version of the stream job alongside the current
+        version (they write to different output topics or tables).
+  \item Start the new job at Kafka offset~0; it reprocesses the full
+        retained history.
+  \item When the new job catches up to the live stream, atomically
+        swap the serving layer to read from the new output.
+  \item Shut down the old version.
+\end{enumerate}
+\end{defbox}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, rounded corners=5pt, minimum width=4.2cm,
+                minimum height=0.8cm, font=\small\bfseries\sffamily,
+                align=center},
+    arr/.style={-{Stealth[length=5pt,width=5pt]}, thick}
+  ]
+  %% Raw events
+  \node[box, fill=DEBlue!80, text=white]
+        (raw) at (0, 5.8) {Raw Events (producers)};
+
+  %% Kafka log
+  \node[box, fill=DEAccent!22, minimum height=1.1cm]
+        (kaf) at (0, 4.4) {Kafka (durable log)\\{\small history retained at offset 0\ldots N}};
+  \draw[arr, DEBlue!55] (raw)--(kaf);
+
+  %% Stream job live
+  \node[box, fill=DEGreen!25]
+        (live) at (0, 3.0) {Stream Job v2 (live, offset = now)};
+  %% Stream job replay
+  \node[box, fill=DEGreen!12]
+        (rply) at (0, 2.0) {Stream Job v2 (replay, offset = 0)};
+
+  \draw[arr, DEAccent!70] (kaf)--(live);
+  \draw[arr, DEAccent!40, dashed] (kaf)--(rply);
+
+  %% Serving store
+  \node[box, fill=DEBlue!15]
+        (srv) at (0, 0.8) {Serving Store (swap when caught up)};
+  \draw[arr, DEGreen!60] (live)--(srv);
+  \draw[arr, DEGreen!30, dashed] (rply)--
+        node[right,font=\scriptsize\sffamily\itshape]{when ready} (srv);
+
+  \node[font=\small\bfseries\sffamily, text=DEAccent!80!black] at (0, 0.2)
+        {one code path — infinite replayability};
+\end{tikzpicture}
+\caption{Kappa architecture. A single stream processing job handles
+         both live events and historical replay. When business logic
+         changes, a new job version is started at offset~0, reprocesses
+         history, and atomically replaces the old serving store.}
+\label{fig:kappa-arch}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{Lambda vs.\ Kappa: Comparison and Selection}
+\label{subsec:lambda-vs-kappa}
+%--------------------------------------------------------------------
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lp{4.8cm}p{4.8cm}}
+  \toprule
+  \textbf{Property}
+    & \textbf{Lambda}
+    & \textbf{Kappa} \\
+  \midrule
+  Code paths
+    & Two (batch + stream), must stay in sync
+    & One (stream only) \\
+  Historical reprocessing
+    & Re-run batch job on HDFS
+    & Replay Kafka log from offset~0 \\
+  Latency
+    & Low (speed layer) $+$ High (batch layer)
+    & Uniformly low \\
+  Complexity
+    & High: two systems, merge serving layer
+    & Lower: single pipeline \\
+  Batch throughput
+    & Very high (Spark/Hive, full dataset in parallel)
+    & Bounded by stream engine throughput \\
+  Long-term storage cost
+    & HDFS (commodity storage, dense packing)
+    & Kafka retention (more expensive per GB than HDFS) \\
+  Fault tolerance
+    & Disk-based; individual task retries
+    & Checkpoint-based; replay on failure \\
+  Best when
+    & Business logic is too complex for streaming SQL;
+      regulatory batch reconciliation required;
+      training datasets for ML must be reproducible
+    & Stream engine is fast enough to reprocess history;
+      single code path is worth the stream-storage cost;
+      schema/logic evolves frequently \\
+  \bottomrule
+\end{tabular}
+\caption{Lambda versus Kappa architecture. Neither is universally superior;
+         the correct choice depends on the organisation's latency requirements,
+         operational capabilities, and the pace of business logic change.}
+\label{tab:lambda-vs-kappa}
+\end{table}
+
+\begin{caution}{When Kappa Is Not Suitable}
+Kappa is \emph{not} a universal Lambda replacement. Three scenarios
+favour Lambda:
+\begin{enumerate}
+  \item \textbf{Terabyte-scale reprocessing is too slow for the stream
+        engine.} A Flink job reprocessing 5~PB of Kafka history at
+        1~GB/s takes \textasciitilde{}58~days. A Spark batch job over
+        the same data on a 200-node cluster completes in hours.
+  \item \textbf{Batch SQL analytics dominate the workload.} If the
+        primary consumers are data analysts running ad-hoc HiveQL or
+        Spark SQL queries over months of history, a Kafka-backed Kappa
+        architecture cannot serve these workloads without first landing
+        the data to a queryable store---effectively recreating the
+        batch layer.
+  \item \textbf{Regulatory requirement mandates independent batch
+        reconciliation.} EU PSD2 Article~94 and equivalent national
+        payment regulations require that all electronic payment
+        transactions be reconciled in a separate batch system to detect
+        discrepancies between the real-time ledger and the daily
+        settlement---a process that cannot be replaced by a streaming job.
+\end{enumerate}
+\end{caution}
+
+%%====================================================================
+\section{Data Lakes and the Data Swamp Risk}
+\label{sec:data-lakes}
+%%====================================================================
+
+Both Lambda and Kappa architectures produce large volumes of raw and
+processed data that must be stored somewhere accessible to the processing
+layer. The dominant storage abstraction for this purpose in the 2010s
+was the \term{data lake}: a centralised repository that stores raw data
+at any scale and in any format---structured, semi-structured, and
+unstructured---without requiring upfront schema definition.
+
+The term was coined by James Dixon, then CTO of Pentaho, in 2010, in
+contrast to the \term{data mart}: ``If you think of a data mart as a
+store of bottled water---cleansed and packaged and structured for easy
+consumption---the data lake is a large body of water in a more natural
+state.''
+
+%--------------------------------------------------------------------
+\subsection{Data Lake Architecture}
+\label{subsec:lake-architecture}
+%--------------------------------------------------------------------
+
+A well-designed data lake has four layers that transform raw ingested
+bytes into query-ready, governed datasets.
+
+\begin{defbox}{Data Lake Four-Layer Architecture}
+\begin{enumerate}
+  \item \textbf{Ingestion Layer.} Pulls data from all sources and
+        writes raw files to the storage layer without transformation.
+        Tools: Apache Sqoop (RDBMS bulk), Apache Flume (log streaming),
+        Apache Kafka (event streaming), Apache NiFi (visual pipelines),
+        REST API connectors.
+  \item \textbf{Storage Layer.} Holds all data in its raw and processed
+        forms. Organised into \emph{zones}:
+        \begin{itemize}
+          \item \textbf{Raw zone}: byte-for-byte copy of source data;
+                never modified after ingest.
+          \item \textbf{Processed zone}: cleaned, de-duplicated,
+                schema-normalised data; typically Parquet or ORC.
+          \item \textbf{Curated zone}: aggregated, business-ready
+                datasets; typically Hive tables or Delta Lake tables.
+        \end{itemize}
+        Underlying storage: HDFS (on-premise) or S3/Azure ADLS
+        (cloud-native).
+  \item \textbf{Processing Layer.} Transforms and queries data on demand.
+        Tools: Apache Spark (batch ETL and ML), Apache Hive (SQL
+        analytics), Apache Presto/Trino (interactive queries), Apache Flink
+        (stream processing).
+  \item \textbf{Catalogue and Governance Layer.} Tracks schemas, data
+        lineage, ownership, and access policies across all datasets.
+        Tools: Apache Atlas, AWS Glue Data Catalog, Hive Metastore,
+        Apache Ranger (access control).
+\end{enumerate}
+\end{defbox}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, rounded corners=4pt, minimum width=2.5cm,
+                minimum height=0.75cm, font=\small\sffamily, align=center},
+    layer/.style={rectangle, rounded corners=5pt, minimum width=10.0cm,
+                  minimum height=1.2cm, font=\small\bfseries\sffamily,
+                  align=center},
+    arr/.style={-{Stealth[length=4pt,width=4pt]}, thick}
+  ]
+
+  %% Sources
+  \node[box, fill=DEGray!15] (rdb)  at (-4.8, 7.0) {RDBMS};
+  \node[box, fill=DEGray!15] (logs) at (-2.8, 7.0) {Logs};
+  \node[box, fill=DEGray!15] (api)  at (-0.8, 7.0) {APIs};
+  \node[box, fill=DEGray!15] (iot)  at (1.2, 7.0)  {IoT};
+  \node[box, fill=DEGray!15] (files) at (3.2, 7.0) {Files};
+
+  %% Ingestion layer
+  \node[layer, fill=DEBlue!15, draw=DEBlue!35, minimum width=10.0cm]
+        (ingest) at (-0.8, 5.8)
+        {Ingestion Layer\\{\small Sqoop · Flume · Kafka · NiFi}};
+
+  \foreach \src in {rdb,logs,api,iot,files} {
+    \draw[arr, DEGray!50] (\src.south)--(\src.south |- ingest.north);
+  }
+
+  %% Storage layer: three zones
+  \node[layer, fill=DERed!10, draw=DERed!25, minimum width=3.0cm,
+        minimum height=1.8cm]
+        (raw) at (-3.3, 4.2) {Raw Zone\\{\small byte-for-byte copy}};
+  \node[layer, fill=DEAccent!12, draw=DEAccent!30, minimum width=3.0cm,
+        minimum height=1.8cm]
+        (proc) at (-0.8, 4.2) {Processed Zone\\{\small Parquet/ORC}};
+  \node[layer, fill=DEGreen!12, draw=DEGreen!30, minimum width=3.0cm,
+        minimum height=1.8cm]
+        (cur) at (1.7, 4.2) {Curated Zone\\{\small Hive tables}};
+
+  \draw[arr, DEBlue!50] (ingest.south)--(-3.3,5.3)--(-3.3,5.1);
+  \draw[arr, DERed!40] (raw)--(proc);
+  \draw[arr, DEAccent!50] (proc)--(cur);
+
+  %% Processing layer
+  \node[layer, fill=DEBlue!10, draw=DEBlue!25, minimum width=8.0cm]
+        (processing) at (-0.8, 2.6)
+        {Processing Layer\\{\small Spark · Hive · Presto · Flink}};
+
+  \draw[arr, DEGreen!50] (cur.south)--(cur.south |- processing.north);
+  \draw[arr, DEAccent!40] (proc.south)--(proc.south |- processing.north);
+
+  %% Governance overlay
+  \node[layer, fill=DEPurple!10, draw=DEPurple!30, minimum width=10.0cm]
+        (gov) at (-0.8, 1.2)
+        {Catalogue \& Governance Layer (Atlas · Ranger · Glue)};
+  \draw[arr, DEPurple!40] (processing.south)--(gov.north);
+
+\end{tikzpicture}
+\caption{Data lake four-layer architecture. Raw data is ingested without
+         schema enforcement, then progressively transformed through raw,
+         processed, and curated zones. The governance layer enforces data
+         quality, lineage tracking, and access control across all zones.}
+\label{fig:data-lake}
+\end{figure}
+
+%--------------------------------------------------------------------
+\subsection{The Data Swamp Problem and Governance}
+\label{subsec:data-swamp}
+%--------------------------------------------------------------------
+
+A data lake without active governance degrades rapidly into a
+\term{data swamp}: a repository where data accumulates without metadata,
+owners, or quality guarantees, rendering it unusable in practice despite
+being physically present.
+
+Data swamp symptoms are predictable:
+\begin{itemize}
+  \item \textbf{Undiscoverability.} Analysts cannot find the dataset
+        they need because there is no searchable catalogue. Directories
+        like \texttt{/data/raw/2019/export\_v3\_FINAL\_FINAL2} proliferate
+        without documentation.
+  \item \textbf{Unknown freshness.} Without a timestamp or freshness
+        SLA in the catalogue, an analyst cannot tell whether
+        \texttt{/data/curated/customers} was updated today or six months ago.
+  \item \textbf{Schema drift.} Multiple copies of the same dataset
+        accumulated over time with inconsistent column names and types,
+        because different teams ran their own transformations without
+        a shared schema registry.
+  \item \textbf{Privacy leakage.} Personally identifiable information
+        (PII) mixes with non-sensitive data because ingest bypassed
+        the governance layer. Under GDPR Article~83(5) and equivalent
+        data-protection frameworks worldwide, this can result in
+        significant regulatory penalties and mandatory breach notification.
+  \item \textbf{Unreliable quality.} Without automated quality checks
+        at ingest time, downstream ML models silently train on corrupted
+        or incomplete data.
+\end{itemize}
+
+\begin{systemdesign}{Data Lake Governance in Practice}
+Preventing a data swamp requires enforcing governance at \emph{ingest
+time}, not as a remediation activity. Four controls are foundational:
+\begin{enumerate}
+  \item \textbf{Mandatory catalogue registration.} Every ingest pipeline
+        must register its output dataset in the data catalogue (Apache
+        Atlas or AWS Glue) with at minimum: owner, source system,
+        update frequency, schema version, and PII classification.
+        Ingest pipelines that fail to register are blocked by a catalogue
+        gateway.
+  \item \textbf{Schema enforcement at the boundary.} Use Apache Avro with
+        a Schema Registry for Kafka-sourced data, and enforce schema
+        compatibility checks before writing to the processed zone. A
+        schema-breaking change triggers a Slack alert to the owning team.
+  \item \textbf{Automated data quality checks.} Deploy \tool{Apache
+        Griffin} or \tool{Great Expectations} to run null-rate, outlier,
+        and referential integrity checks on every batch landed in the
+        processed zone. Datasets failing checks are quarantined in a
+        \texttt{/data/quarantine/} zone and not promoted to curated.
+  \item \textbf{Column-level access control.} Use Apache Ranger to define
+        column-level access policies: analysts see masked customer names
+        and phone numbers; only the compliance team sees raw PII.
+        Row-level security restricts access to regional data.
+\end{enumerate}
+\end{systemdesign}
+
+%--------------------------------------------------------------------
+\subsection{Table Formats: Delta Lake and Apache Iceberg}
+\label{subsec:table-formats}
+%--------------------------------------------------------------------
+
+Object stores (HDFS, S3) do not natively support ACID transactions:
+two concurrent Spark jobs writing to the same directory can corrupt
+each other's output (the \emph{lost-update} problem). Traditional
+partitioned Hive tables suffer from further limitations: schema
+evolution requires \texttt{ALTER TABLE} operations that can break
+existing readers; time-travel (querying the state of a table at a
+past timestamp) is not supported; and partition discovery is an
+expensive NameNode scan for tables with thousands of partitions.
+
+\term{Open table formats}---specifically \tool{Delta Lake} (Databricks,
+2019) and \tool{Apache Iceberg} (Netflix, 2020)---solve these
+problems by adding a \emph{transaction log} layer on top of Parquet
+files in an object store.
+
+\begin{defbox}{Transaction Log in Open Table Formats}
+An \textbf{open table format} such as Delta Lake or Apache Iceberg
+maintains a \emph{transaction log}: an ordered list of committed
+operations (add file, remove file, update schema, change partition
+spec). Each operation is an atomic JSON or Avro record written to a
+separate log directory. Properties enabled by the transaction log:
+\begin{itemize}
+  \item \textbf{ACID writes.} A Spark job writes new Parquet files to
+        a staging location, then atomically commits a ``add files''
+        entry to the transaction log. If the job fails, no partial
+        state is visible to readers.
+  \item \textbf{Snapshot isolation.} Readers always see a consistent
+        snapshot of the table as of the latest committed transaction;
+        concurrent writers do not interfere.
+  \item \textbf{Time travel.} Querying the table \texttt{AS OF TIMESTAMP
+        '2024-01-01'} reads the transaction log backward to find the
+        snapshot valid at that time, then reads the corresponding
+        Parquet files.
+  \item \textbf{Schema evolution.} New columns, renamed columns, and
+        changed nullability are recorded in the log and propagated to
+        readers automatically.
+\end{itemize}
+\end{defbox}
+
+\begin{lstlisting}[style=pyspark, caption={Delta Lake: ACID writes, time travel, and schema evolution}]
+from delta.tables import DeltaTable
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, current_timestamp
+
+spark = (SparkSession.builder
+         .appName("DeltaLakeDemo")
+         .config("spark.sql.extensions",
+                 "io.delta.sql.DeltaSparkSessionExtension")
+         .config("spark.sql.catalog.spark_catalog",
+                 "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+         .getOrCreate())
+
+TABLE_PATH = "s3://data-lake/curated/transactions"
+
+# --- Write (ACID-guaranteed) ---
+df = spark.read.parquet("s3://data-lake/raw/transactions/2024-06-28/")
+(df.write
+   .format("delta")
+   .mode("append")
+   .partitionBy("txn_date", "region")
+   .save(TABLE_PATH))
+
+# --- Merge (upsert: update existing rows, insert new ones) ---
+target = DeltaTable.forPath(spark, TABLE_PATH)
+updates = spark.read.parquet("s3://data-lake/raw/corrections/")
+
+(target.alias("t")
+       .merge(updates.alias("u"),
+              "t.txn_id = u.txn_id")
+       .whenMatchedUpdateAll()
+       .whenNotMatchedInsertAll()
+       .execute())
+
+# --- Time travel: read the table as it was yesterday ---
+yesterday = spark.read.format("delta") \
+                 .option("timestampAsOf", "2024-06-27") \
+                 .load(TABLE_PATH)
+yesterday.count()
+
+# --- Inspect transaction history ---
+(DeltaTable.forPath(spark, TABLE_PATH)
+           .history()
+           .select("version", "timestamp", "operation", "operationMetrics")
+           .show(10, truncate=False))
+\end{lstlisting}
+
+\begin{keyinsight}{Delta Lake and Iceberg Converge the Lake and Warehouse}
+The combination of (1) object-store economics (\$0.02/GB/month on S3 vs.\
+\$2--\$5/GB/month for proprietary data warehouse storage), (2) ACID
+transaction semantics from Delta Lake or Iceberg, and (3) SQL query
+engines like Presto and Spark SQL creates a new architecture called the
+\term{Lakehouse} (Armbrust et al., 2020)---a data lake with the ACID
+guarantees and performance characteristics of a data warehouse, without
+the data movement and duplication costs of maintaining separate systems.
+The Lakehouse is the subject of Chapter~\ref{ch:modern-stack}.
+\end{keyinsight}
+
+%%====================================================================
+\section{Research Spotlight}
+\label{sec:ch8-research}
+%%====================================================================
+
+\begin{researchspotlight}{Kreps, Narkhede \& Rao (2011) --- Kafka: A
+Distributed Messaging System for Log Aggregation}
+
+\textbf{Full citation:} Kreps, J., Narkhede, N., \& Rao, J. (2011).
+Kafka: A Distributed Messaging System for Log Aggregation. In
+\textit{Proceedings of the NetDB Workshop at VLDB 2011}. Seattle, WA.
+Cited by $>$3{,}500 (Google Scholar, 2024).
+
+\medskip
+\textbf{Problem context.} By 2010, LinkedIn was generating billions of
+activity events per day (profile views, connection requests, job searches,
+feed impressions). The existing pipeline---custom ad-hoc processes copying
+log files over NFS to Hadoop---was fragile, could not replay past data,
+and could not scale to the growing event volume. Existing message brokers
+(ActiveMQ, RabbitMQ) were designed for transactional messaging at thousands
+of messages/sec, not streaming at 100~MB/s per broker with multi-day retention.
+
+\medskip
+\textbf{Key insight.} \textit{``A log is the most primitive form of storage.
+If you model your data infrastructure as a distributed, replicated,
+append-only log, you get durability, replayability, and decoupling for free.''}
+This insight---that the database write-ahead log primitive could be
+generalised into a distributed messaging infrastructure---is the paper's
+central contribution.
+
+\medskip
+\textbf{Technical contributions.}
+\begin{enumerate}
+  \item \textbf{Topic-partition-offset data model.} The paper formalises
+        the abstraction of a topic (named log), partition (ordered,
+        independent sub-log for parallelism), and offset (consumer-tracked
+        position). This model provides ordered delivery within a partition,
+        unlimited consumer fan-out (each consumer group tracks its own
+        offsets independently), and log-time ordering without a global
+        coordinator.
+  \item \textbf{Sequential disk I/O and zero-copy.} The paper quantifies
+        the performance advantage of append-only log files over B-tree
+        indexed stores: sequential disk bandwidth on spinning media is
+        600~MB/s versus 100~MB/s for random access. Kafka's \texttt{sendfile()}
+        zero-copy transfer reduces consumer-side CPU to near zero at peak
+        throughput. The benchmark reports 505{,}000 producer msgs/sec and
+        220{,}000 consumer msgs/sec on a single broker, outperforming
+        ActiveMQ by $11.7\times$ and $5.5\times$ respectively.
+  \item \textbf{Pull-based consumers.} Unlike push-based brokers that must
+        track per-consumer queue state, Kafka's brokers maintain only the
+        log itself. Consumers pull messages at their own rate; the broker
+        never needs to know which consumers exist or what they have consumed.
+        This eliminates a significant bottleneck: a slow consumer cannot
+        slow down the broker.
+\end{enumerate}
+
+\medskip
+\textbf{Impact.} Kafka was open-sourced to the Apache Software Foundation
+in 2012. By 2021, LinkedIn's Kafka cluster processed 1.8~trillion
+messages/day across 4{,}400 brokers; production deployments at Netflix,
+Uber, Airbnb, Twitter/X, and thousands of enterprises handle aggregate
+event volumes exceeding 10~trillion messages/day. The paper triggered
+a rethinking of data infrastructure: Jay Kreps's 2013 essay \textit{The
+Log} (which extends the paper's ideas) became one of the most widely
+shared technical articles in the data engineering community. The paper
+directly inspired the Dataflow model (Akidau et al., 2015) and the
+Kappa architecture (Kreps, 2014), both covered in Chapter~\ref{ch:modern-stack}.
+\end{researchspotlight}
+
+%%====================================================================
+\section{Case Study: Netflix Keystone Real-Time Data Pipeline}
+\label{sec:netflix-case}
+%%====================================================================
+
+\begin{casestudy}{Netflix Keystone Pipeline --- 100 Billion Events per Day}
+
+\textbf{Context and scale.} Netflix serves 200 million subscribers
+(as of 2021) across 190 countries. Every user action---play, pause,
+seek, quality switch, UI click, search query, content impression---is
+recorded as an event. At 1.3~million events/second at peak (Friday at
+9\,pm US Eastern) and 100~billion events/day at average load, Netflix's
+data infrastructure operates at a scale few organisations approach.
+The Keystone pipeline is the internal name for the real-time event
+ingestion and routing system that processes all of these events before
+they reach analytics, personalisation, A/B testing, and operational
+monitoring systems.
+
+\medskip
+\textbf{Problem.} Before Keystone, Netflix used a custom log-based
+pipeline where applications wrote events to local disk, a daemon
+collected them and pushed to a queue, and batch jobs processed the
+queue nightly. This pipeline could not support real-time personalisation
+(the home screen must reflect what a user watched 10 minutes ago, not
+yesterday) or same-day A/B test results.
+
+\medskip
+\textbf{Architecture.}
+
+Netflix's Keystone architecture is a hybrid Lambda-Kappa system:
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llll}
+  \toprule
+  \textbf{Layer} & \textbf{Tool} & \textbf{Latency} & \textbf{Output} \\
+  \midrule
+  Event bus
+    & Apache Kafka (4{,}000+ topics)
+    & $<$100\,ms
+    & All raw events \\
+  Speed layer
+    & Apache Flink (150+ jobs)
+    & $<$1\,min
+    & Real-time dashboards, alerts \\
+  Batch layer
+    & Kafka $\to$ S3 $\to$ Spark (EMR) + Iceberg
+    & $\sim$1\,hour--1\,day
+    & ML datasets, billing, BI \\
+  Serving
+    & Cassandra (user state), Druid (OLAP)
+    & $<$10\,ms
+    & Personalisation, analytics \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+Every device (TV, mobile, web browser) sends events to Kafka topics via
+a client SDK. Kafka acts as the \emph{single event bus}: no downstream
+system receives events directly from devices. Flink jobs subscribe to
+Kafka topics and compute real-time aggregates (per-user play counts,
+per-title impression rates, A/B test counters). A Kafka Connect S3
+Sink connector writes all raw events to Amazon S3 in Avro format,
+partitioned by hour. Spark jobs on Amazon EMR read from S3, compute
+higher-fidelity aggregates using Apache Iceberg ACID tables, and
+write results to the curated S3 zone.
+
+\medskip
+\textbf{A/B testing pipeline.} Netflix runs $>$200 concurrent A/B tests
+at any time---different thumbnail artwork, autoplay delays, recommendation
+algorithm variants, and UI layouts. Each test requires:
+\begin{enumerate}
+  \item An \emph{assignment event} when the user is bucketed into control
+        or treatment (stored in Cassandra keyed by user ID).
+  \item An \emph{exposure event} logged to Kafka when the user actually
+        sees the tested feature.
+  \item \emph{Outcome events} (play, click, subscription) logged to
+        Kafka within seconds.
+\end{enumerate}
+A Flink job performs a three-way event-time window join over the
+\texttt{assignments}, \texttt{exposures}, and \texttt{outcomes} Kafka
+topics, computing conversion rates with a 30-second watermark lag to
+handle late-arriving mobile events. Experiment dashboards are updated
+every 5 minutes, enabling engineers to ship winning variants the same day
+instead of waiting for a nightly batch run.
+
+\medskip
+\textbf{Engineering lessons.}
+\begin{enumerate}
+  \item \textbf{Kafka as the single source of truth eliminates
+        inconsistency.} By having both the speed layer (Flink) and the
+        batch layer (Spark on S3) read from the same Kafka topics, Netflix
+        avoids the classic Lambda problem of two separate ingestion paths
+        diverging. The S3 landing is just a materialised snapshot of the
+        Kafka log.
+  \item \textbf{7-day retention enables operational recovery.} When a
+        Flink job has a bug, engineers reset the consumer group offset to
+        the time before the bug was introduced and reprocess---without
+        contacting source teams or rebuilding input datasets.
+  \item \textbf{Schema Registry is non-negotiable at 4{,}000 topics.}
+        Netflix co-developed the Confluent Schema Registry and mandates
+        Avro schema registration for every Kafka topic. A schema change
+        that would break downstream consumers is rejected at deployment time.
+  \item \textbf{Backpressure is the production problem, not throughput.}
+        During Super Bowl commercial breaks, event rates spike $5\times$
+        in 30 seconds. Kafka absorbs the burst; Flink consumers catch
+        up within minutes because they are stateless with respect to the
+        Kafka log. Designing for backpressure---not peak throughput---is
+        the key operational insight.
+  \item \textbf{Iceberg enables schema evolution without downtime.}
+        Netflix's batch pipeline manages 5{,}000+ Iceberg tables, many
+        of which evolve weekly. Iceberg's schema evolution support allows
+        columns to be added or renamed without rewriting existing Parquet
+        files or pausing consuming Spark jobs.
+\end{enumerate}
+
+\medskip
+\textbf{Open-source contributions.} Netflix open-sourced \tool{Metacat}
+(a unified metadata store and catalogue for Hive, Iceberg, S3, and Druid),
+and was a co-developer of \tool{Apache Iceberg}, both driven by the
+requirements of the Keystone pipeline. Netflix's engineering blog posts
+on Kafka, Flink, and Iceberg (2015--2022) are widely used reference
+material in the data engineering community.
+\end{casestudy}
+
+%%====================================================================
+\section*{Chapter Summary}
+\label{sec:ch8-summary}
+%%====================================================================
+
+This chapter traced the evolution of data integration from fragile
+point-to-point ETL to the continuous, event-driven pipelines that
+underpin modern data infrastructure.
+
+The $N^2$ coupling problem of direct ETL connections is resolved by a
+central \emph{event bus}, of which Apache Kafka is the dominant
+implementation. Kafka's performance advantage---$10\times$ throughput over
+traditional message brokers---derives from two engineering decisions:
+sequential-write-only disk access and zero-copy transfer via \texttt{sendfile()}.
+Its durability advantage---consumers can replay any historical window---derives
+from the append-only log abstraction that treats messages as records in a
+database, not as transient queue entries.
+
+Two architectural patterns organise batch and stream processing around
+Kafka: the \emph{Lambda architecture} (Marz, 2011), which serves both
+accurate batch views and low-latency real-time views at the cost of
+maintaining two code paths; and the \emph{Kappa architecture} (Kreps, 2014),
+which eliminates the batch layer by using Kafka log replay for historical
+reprocessing, at the cost of higher storage requirements and the constraint
+that the stream processing engine must be capable of reprocessing history
+at acceptable speed.
+
+Data lakes provide the petabyte-scale storage substrate for pipeline output.
+Without active governance---schema registration, data quality checks,
+ownership tracking, and access control---a data lake degrades into a
+data swamp. Open table formats (Delta Lake, Apache Iceberg) add ACID
+transaction semantics to object-store data lakes, enabling time travel,
+schema evolution, and concurrent writer safety. They form the foundation
+of the Lakehouse pattern explored in Chapter~\ref{ch:modern-stack}.
+
+%%====================================================================
+\section*{Exercises}
+\label{sec:ch8-exercises}
+%%====================================================================
+
+\exercisesection{Short Questions}
+
+\sq What is the $N^2$ problem in point-to-point ETL integration? With 30
+systems, how many direct connections are required in the worst case? How
+does an event bus reduce this number?
+
+\sq Describe the three components of an Apache Flume agent. What is the
+difference between a Memory Channel and a File Channel in terms of
+durability?
+
+\sq What is the difference between an Apache Kafka \emph{topic} and a
+Kafka \emph{partition}? Why must messages with the same key be routed to
+the same partition?
+
+\sq Explain what a Kafka \emph{offset} is. Who is responsible for tracking
+offsets in the Kafka data model---the broker or the consumer? What is the
+benefit of this design?
+
+\sq What is a Kafka consumer group? If a topic has 6 partitions and a
+consumer group has 4 consumers, how many partitions does each consumer
+process (assuming uniform assignment)?
+
+\sq Explain the Linux \texttt{sendfile()} system call and its role in
+Kafka's consumer throughput. How many memory copies does a traditional
+message broker require compared to Kafka?
+
+\sq Describe the Lambda architecture's three layers. What is the purpose
+of the Serving Layer?
+
+\sq What is the ``dual-code-path problem'' in the Lambda architecture?
+Why does it create a maintenance burden?
+
+\sq In the Kappa architecture, how is historical reprocessing accomplished?
+Describe the step-by-step reprocessing workflow when business logic
+changes.
+
+\sq What is a data lake? List four symptoms that indicate a data lake has
+become a data swamp.
+
+\sq What is an open table format (e.g., Delta Lake or Apache Iceberg)?
+Name three features that open table formats add to a standard Parquet-on-S3
+data lake.
+
+\sq Compare Apache Sqoop and Apache Kafka on: (a) data direction, (b) latency,
+(c) replay capability, and (d) the underlying parallelism mechanism.
+
+\exercisesection{Analytical Problems}
+
+\ap \textbf{Kafka Partition Sizing.}
+A mobile payment company expects the following workload
+on its \texttt{wallet-transactions} Kafka topic:
+\begin{itemize}
+  \item Peak producer throughput: 80{,}000 transactions/second
+  \item Average message size: 512 bytes
+  \item Required consumer throughput per partition: 10~MB/s (broker limit)
+  \item Replication factor: 3
+  \item Required retention: 14 days
+  \item Average message rate: 20{,}000 transactions/second
+\end{itemize}
+(a) Calculate the minimum number of partitions required to sustain the
+peak producer throughput. (b) Calculate the total storage required on the
+Kafka cluster for 14-day retention (assuming average rate, before replication).
+(c) Calculate the total storage \emph{after} replication. (d) If each
+broker node has 12~TB of usable disk, how many brokers are needed?
+
+\ap \textbf{Lambda vs.\ Kappa Architecture Selection.}
+An international commercial bank is designing a data pipeline for three
+workloads:
+\begin{enumerate}
+  \item Real-time fraud detection: flag suspicious card-swipe transactions
+        within 200~ms with a rolling 24-hour transaction history per card.
+  \item Monthly regulatory capital report: aggregates 36 months of
+        transaction data into statutory metrics as required by
+        Basel~III / EU CRR capital adequacy reporting rules.
+  \item Live risk dashboard: shows current total exposure per counterparty
+        updated every 30 seconds, combining live transactions (from the
+        past 5 minutes) with a settled position snapshot from the previous
+        close of business.
+\end{enumerate}
+For each workload, identify whether Lambda, Kappa, or a different
+architecture is most appropriate. Justify each choice with reference
+to latency requirement, reprocessing cost, and regulatory constraints.
+
+\ap \textbf{Consumer Group Rebalancing.}
+A Kafka topic has 12 partitions. A consumer group starts with 6 consumers,
+each processing 2 partitions.
+\begin{enumerate}[label=(\alph*)]
+  \item Consumer~3 fails (crashes without a graceful shutdown). Describe
+        what Kafka does: which consumers take over its partitions, and
+        how long does the rebalance take (Kafka's default
+        \texttt{session.timeout.ms} is 45 seconds)?
+  \item Two new consumers join the group simultaneously. How are the 12
+        partitions reassigned under the default RangeAssignor strategy?
+  \item A new version of the consumer is deployed with 12 instances
+        (one per partition). What happens if 4 additional instances are
+        accidentally started, making the total 16?
+\end{enumerate}
+
+\ap \textbf{Data Lake Zone Design.}
+Design the zone structure for a regional healthcare data lake that will
+store:
+\begin{itemize}
+  \item Patient records from 80 regional hospitals (structured, RDBMS)
+  \item Doctor appointment audio recordings (unstructured, MP3)
+  \item Lab result CSV uploads from 200 diagnostic centres
+  \item Real-time vital signs from 1{,}000 ICU monitoring devices (Kafka)
+\end{itemize}
+For each data source: (a) identify which ingestion tool to use (Sqoop,
+Flume, Kafka, NiFi); (b) specify the landing zone (raw, processed, or
+curated); (c) identify the format in the processed zone; (d) describe
+which governance controls are mandatory given that patient records are
+sensitive health data under HIPAA (US) or GDPR Article~9 (EU).
+
+\exercisesection{Design Problems}
+
+\dpr \textbf{Mobile Money Real-Time Fraud Pipeline.}
+Design a complete Kafka-based data pipeline for a mobile financial service
+(e.g., M-Pesa Kenya, 30+ million users, 10 million transactions/day)
+that must:
+\begin{enumerate}[label=(\alph*)]
+  \item Detect fraudulent transactions in real time ($<$200~ms decision
+        latency) using velocity checks (more than 5 transactions from
+        the same wallet in 60 seconds).
+  \item Power a live operations dashboard showing total transaction
+        volume and flagged transactions per minute, updated every 30
+        seconds.
+  \item Provide a daily reconciliation file to the financial regulator
+        containing all flagged transactions and final dispositions
+        (confirmed fraud vs.\ false positive).
+  \item Allow the fraud detection rules to be updated and back-tested
+        against 30 days of historical transactions without re-ingesting
+        from the source database.
+\end{enumerate}
+Your design must specify: Kafka topic structure (topic names, partition
+count, key, retention); the processing framework for each workload (Kafka
+Streams, Flink, Spark batch); which architecture pattern (Lambda or Kappa)
+fits each requirement and why; and the serving layer technology for the
+dashboard and the reconciliation file.
+
+\dpr \textbf{University Data Lake Design.}
+A mid-size university wishes to build a data lake to unify its operational
+data for academic analytics, student counselling, and research reporting.
+Data sources include: student RDBMS (Oracle, 50K student records), LMS
+(Moodle, JSON event logs), library system (MySQL, book borrowing records),
+exam results (Excel uploads by faculty), and Wi-Fi access logs (syslog,
+100K events/day).
+\begin{enumerate}[label=(\alph*)]
+  \item Design the ingestion pipeline for each source.
+  \item Define the zone structure and the schema for the curated zone
+        \texttt{student\_engagement} table (columns, types, partitioning).
+  \item Describe three data quality checks that must pass before a dataset
+        is promoted from raw to processed zone.
+  \item Identify which datasets contain PII under FERPA (US) or GDPR
+        (EU) and describe the access control policies (who can see what,
+        in what form) to be enforced by Apache Ranger.
+\end{enumerate}
+
+\exercisesection{Programming Exercises}
+
+\pe \textbf{Kafka Producer and Consumer (Python).}
+Using the \texttt{kafka-python} library and a local single-broker
+Docker container:
+\begin{enumerate}[label=(\alph*)]
+  \item Implement a producer that generates 50{,}000 synthetic mobile
+        payment events (fields: \texttt{txn\_id}, \texttt{sender},
+        \texttt{receiver}, \texttt{amount\_usd}, \texttt{timestamp\_ms}).
+        Key each message by \texttt{sender} to ensure all transactions
+        from a given sender land in the same partition.
+  \item Implement a consumer in group \texttt{analytics-v1} that reads
+        all messages and computes: (i) total transaction volume in USD;
+        (ii) top-10 senders by count; (iii) average transaction amount
+        per minute over the message timestamps.
+  \item Reset the consumer offset to the beginning and re-run the
+        computation. Verify that results are identical (idempotency test).
+  \item Create a second consumer group \texttt{fraud-v1}. Verify that
+        both groups independently read all messages from offset~0,
+        with no offset interference between them.
+\end{enumerate}
+
+\begin{lstlisting}[style=pyspark, caption={PE8.1: Kafka producer skeleton}]
+import json, random, time, uuid
+from kafka import KafkaProducer
+
+BROKER = "localhost:9092"
+TOPIC  = "mobile-payments"
+
+producer = KafkaProducer(
+    bootstrap_servers=BROKER,
+    key_serializer=str.encode,
+    value_serializer=lambda v: json.dumps(v).encode(),
+    acks='all',
+    retries=3,
+)
+
+COUNTRY_CODES = ["+1", "+44", "+49", "+33", "+81", "+61"]
+SENDERS = [f"{random.choice(COUNTRY_CODES)}{random.randint(2000000000,9999999999)}"
+           for _ in range(1000)]
+
+for _ in range(50_000):
+    sender = random.choice(SENDERS)
+    event = {
+        "txn_id":       str(uuid.uuid4()),
+        "sender":       sender,
+        "receiver":     random.choice(SENDERS),
+        "amount_usd":   round(random.uniform(1.00, 5_000.00), 2),
+        "timestamp_ms": int(time.time() * 1000),
+    }
+    producer.send(TOPIC, key=sender, value=event)
+
+producer.flush()
+print("Done: 50,000 events produced")
+\end{lstlisting}
+
+\pe \textbf{Lambda Architecture Simulator (PySpark).}
+Simulate a Lambda architecture for a ride-sharing app (e.g., Uber or Grab)
+using PySpark and local files:
+\begin{enumerate}[label=(\alph*)]
+  \item \textbf{Batch layer:} Read a 1-million-row Parquet file of
+        historical ride events (columns: \texttt{ride\_id},
+        \texttt{driver\_id}, \texttt{pickup\_zone}, \texttt{fare\_usd},
+        \texttt{ride\_date}). Compute the hourly fare total per pickup
+        zone and write as a batch view Parquet file.
+  \item \textbf{Speed layer:} Generate 10{,}000 synthetic ``live'' events
+        for the current hour (using \texttt{datetime.now()}). Compute
+        the same fare-total-per-zone aggregate as an in-memory DataFrame.
+  \item \textbf{Serving layer:} Union the batch view with the real-time
+        view on \texttt{(pickup\_zone, hour)} and resolve overlaps (the
+        current hour appears in both; the batch view value should be
+        discarded in favour of the real-time value).
+  \item Report the total number of rides and fare sum per zone for the
+        most recent 24-hour period.
+\end{enumerate}
+
+\begin{lstlisting}[style=pyspark, caption={PE8.2: Lambda serving layer union in PySpark}]
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum as _sum, hour, lit
+from datetime import datetime, timedelta
+
+spark = SparkSession.builder.appName("LambdaSim").getOrCreate()
+
+# --- Batch layer view (pre-computed) ---
+batch_view = spark.read.parquet("data/batch_views/fare_by_zone_hour/")
+# Schema: pickup_zone, hour_ts, total_fare_usd, source='batch'
+
+# --- Speed layer (in-memory simulation) ---
+import random
+
+live_events = spark.createDataFrame([
+    {
+        "ride_id":      f"R{i:06d}",
+        "driver_id":    random.randint(1, 5000),
+        "pickup_zone":  random.choice(["Downtown","Midtown","Airport",
+                                       "Suburbs","University","Harbour"]),
+        "fare_usd":     round(random.uniform(5.00, 80.00), 2),
+        "ride_ts":      datetime.now() - timedelta(seconds=random.randint(0, 3599)),
+    }
+    for i in range(10_000)
+])
+
+real_time_view = (live_events
+    .groupBy("pickup_zone")
+    .agg(_sum("fare_usd").alias("total_fare_usd"))
+    .withColumn("hour_ts", lit(datetime.now().replace(minute=0, second=0,
+                                                       microsecond=0)))
+    .withColumn("source", lit("realtime")))
+
+# --- Serving layer: union, prefer real-time for current hour ---
+current_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
+batch_historical = batch_view.filter(col("hour_ts") < lit(current_hour))
+
+served = batch_historical.unionByName(real_time_view)
+served.orderBy("pickup_zone", "hour_ts").show(20, truncate=False)
+\end{lstlisting}
+
+\pe \textbf{Data Quality Gate (Python + Great Expectations).}
+Implement an automated data quality gate that must pass before a dataset
+is promoted from the raw zone to the processed zone of a data lake:
+\begin{enumerate}[label=(\alph*)]
+  \item Load a CSV file of customer records (fields: \texttt{customer\_id},
+        \texttt{mobile}, \texttt{name}, \texttt{region}, \texttt{balance\_usd},
+        \texttt{account\_opened}).
+  \item Using the \texttt{great\_expectations} library, define and run
+        the following expectations:
+        \begin{itemize}
+          \item \texttt{customer\_id} must not be null and must be unique.
+          \item \texttt{mobile} must match the E.164 international format
+                regex \texttt{\textasciicircum{}\textbackslash +[1-9]\textbackslash
+                d\{7,14\}\$}.
+          \item \texttt{balance\_usd} must be between 0 and 10{,}000{,}000.
+          \item \texttt{region} must be one of the values in a reference
+                catalogue (e.g., ISO~3166-2 region codes for the country
+                of operation).
+          \item No more than 1\% of rows may have a null \texttt{name}.
+        \end{itemize}
+  \item If all expectations pass, write the dataset to the processed zone
+        as Parquet. If any expectation fails, write the dataset to a
+        quarantine directory and raise an alert (print a summary report).
+\end{enumerate}
+%%====================================================================
+\section*{Further Reading}
+\label{sec:ch8-further}
+%%====================================================================
+
+\begin{itemize}
+  \item \textbf{\cite{Kafka2011}} --- The original Kafka paper. Short and
+        readable; the benchmark section is directly relevant to
+        understanding why Kafka displaced existing message brokers.
+  \item \textbf{\cite{Kleppmann2017}} --- Chapters 10 and 11 cover batch
+        processing (Lambda batch layer) and stream processing (speed layer
+        and Kappa) at graduate level. The ``unified log'' discussion
+        expands Kreps's original insight into a full architectural theory.
+  \item \textbf{\cite{White2015}} --- Chapters 14 (Flume) and 15 (Sqoop)
+        provide implementation details not covered in this chapter, including
+        Flume interceptors, channel selectors, and Sqoop's \texttt{sqoop-import-all-tables}
+        command.
+  \item \textbf{Kreps, J. (2013). ``The Log: What Every Software Engineer
+        Should Know About Real-Time Data's Unifying Abstraction.''
+        LinkedIn Engineering Blog.} Freely available online; the most
+        important essay in data engineering of the last decade.
+  \item \textbf{Arun, M.\ et al.\ (2016). ``Kafka Inside Keystone Pipeline.''
+        Netflix Tech Blog.} The primary Netflix source describing the
+        Keystone architecture, Kafka configuration, and engineering
+        challenges at 1.3~million events/second.
+\end{itemize}

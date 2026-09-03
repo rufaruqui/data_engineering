@@ -59,7 +59,7 @@ Data is generated every second — from social networks, sensors, financial tran
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Doug Laney (2001):** *"3D Data Management: Controlling Data Volume, Velocity and Variety."* META Group Research Note.
 
@@ -173,7 +173,7 @@ Even after collecting big data, organizations face a harder problem: **making se
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Halevy, Rajaraman & Ordille (2006):** *"Data Integration: The Teenage Years."* Proceedings of VLDB.
 
@@ -265,7 +265,7 @@ The "Big Data Ecosystem" is a stack of interoperable open-source tools built aro
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Ghemawat, Gobioff & Leung (2003):** *"The Google File System."* ACM SOSP 2003.
 
@@ -376,7 +376,7 @@ Once data is stored in HDFS, how do we compute over it? The answer Google invent
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Dean & Ghemawat (2004):** *"MapReduce: Simplified Data Processing on Large Clusters."* OSDI 2004. *(One of the most cited systems papers in history — 20,000+ citations)*
 
@@ -487,7 +487,7 @@ Storing data in HDFS is only half the battle. How data is **formatted, compresse
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Vavilapalli et al. (2013):** *"Apache Hadoop YARN: Yet Another Resource Negotiator."* ACM SoCC 2013.
 
@@ -586,7 +586,7 @@ MapReduce has a critical weakness: every intermediate result is written to disk.
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Zaharia et al. (2010):** *"Spark: Cluster Computing with Working Sets."* USENIX HotCloud 2010.
 
@@ -706,7 +706,7 @@ Most business analysts speak SQL, not Java. The SQL-on-Hadoop movement created d
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Thusoo et al. (2009):** *"Hive – A Warehousing Solution Over a Map-Reduce Framework."* PVLDB 2009.
 
@@ -819,7 +819,7 @@ Data integration at big data scale is not just a technical challenge — it is a
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Kreps, Narkhede & Rao (2011):** *"Kafka: A Distributed Messaging System for Log Aggregation."* LinkedIn Engineering.
 
@@ -934,7 +934,7 @@ Netflix ingests **500 billion events per day** (playback events, errors, recomme
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Edward Tufte (1983):** *The Visual Display of Quantitative Information.* Graphics Press. *(The foundational text — required at Harvard, Yale, and Stanford data courses)*
 
@@ -1055,7 +1055,7 @@ Theory becomes power only when applied. This week bridges the full technical sta
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 **Social Media Analytics:**
 > **Kwak et al. (2010):** *"What is Twitter, a Social Network or a News Media?"* WWW 2010.
@@ -1174,7 +1174,7 @@ Big data is not a destination — it is an evolving frontier. The tools we taugh
 
 ---
 
-### 2. Formal Introduction — Seminal Research
+### 2. Formal Introduction — Research Article
 
 > **Armbrust et al. (2020):** *"Delta Lake: High-Performance ACID Table Storage over Cloud Object Stores."* VLDB 2020. — The next evolution of data lakes: ACID transactions on S3/Azure Blob using Apache Spark.
 
@@ -1327,7 +1327,7 @@ Google unified batch and stream processing in a single programming model (Apache
 
 ---
 
-## Appendix C: Key Seminal Papers Chronologically
+## Appendix C: Key Research Articles Chronologically
 
 | Year | Paper | Relevance |
 |------|-------|-----------|

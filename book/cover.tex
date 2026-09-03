@@ -1,0 +1,246 @@
+%% cover.tex — Standalone front cover for "Data Engineering" textbook
+%% Compile: pdflatex cover.tex
+%% B5 = 176 mm wide × 250 mm tall
+
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{newpxtext}
+\usepackage[expansion=false]{microtype}
+\usepackage[b5paper, margin=0pt, noheadfoot]{geometry}
+\usepackage[dvipsnames,svgnames]{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{calc,backgrounds}
+
+%-- palette --%
+\definecolor{DEBlue}{RGB}{0,60,120}
+\definecolor{DENavy}{RGB}{0,38,80}
+\definecolor{DEAccent}{RGB}{210,120,0}
+\definecolor{DEGreen}{RGB}{0,110,70}
+\definecolor{DEGray}{RGB}{80,80,80}
+\definecolor{DELightBlue}{RGB}{228,240,255}
+
+\pagestyle{empty}
+
+\begin{document}
+\noindent
+\begin{tikzpicture}[remember picture, overlay, shift={(current page.south west)}]
+
+  %% B5: width=176mm, height=250mm
+
+  %==============================================================
+  % BACKGROUND — full dark navy, top-to-bottom
+  %==============================================================
+  \fill[DENavy]  (0,0) rectangle (176mm,250mm);
+
+  % Subtle tonal panel: slightly lighter blue in lower third
+  \fill[DEBlue!70!DENavy, opacity=0.45]
+    (0,0) rectangle (176mm,90mm);
+
+  %==============================================================
+  % NETWORK PATTERN — spans full page, top-to-bottom
+  %==============================================================
+
+  % Rows at y = 25, 45, 65, 82, 100, 118, 136, 154, 172, 190, 208, 226
+  % Cols at x = 11, 27, 43, 59, 75, 91, 107, 123, 139, 155, 171
+  \foreach \px/\py in {
+    27/35,  59/35,  91/35,  123/35, 155/35,
+    11/55,  43/55,  75/55,  107/55, 139/55, 171/55,
+    27/72,  59/72,  91/72,  123/72, 155/72,
+    11/90,  43/90,  75/90,  107/90, 139/90, 171/90,
+    27/108, 59/108, 91/108, 123/108,155/108,
+    11/126, 43/126, 75/126, 107/126,139/126,171/126,
+    27/144, 59/144, 91/144, 123/144,155/144,
+    11/162, 43/162, 75/162, 107/162,139/162,171/162,
+    27/180, 59/180, 91/180, 123/180,155/180,
+    11/198, 43/198, 75/198, 107/198,139/198,171/198,
+    27/216, 59/216, 91/216, 123/216,155/216,
+    27/232, 59/232, 91/232, 123/232,155/232
+  }{
+    \fill[white, opacity=0.10] (\px mm,\py mm) circle (1.4pt);
+  }
+
+  % horizontal edges
+  \foreach \ax/\ay/\bx/\by in {
+    27/35/59/35,   91/35/123/35,
+    11/55/43/55,   75/55/107/55,  139/55/171/55,
+    27/72/59/72,   91/72/123/72,
+    11/90/43/90,   75/90/107/90,  139/90/171/90,
+    27/108/59/108, 91/108/123/108,
+    11/126/43/126, 75/126/107/126,139/126/171/126,
+    27/144/59/144, 91/144/123/144,
+    11/162/43/162, 75/162/107/162,139/162/171/162,
+    27/180/59/180, 91/180/123/180,
+    11/198/43/198, 75/198/107/198,139/198/171/198,
+    27/216/59/216, 91/216/123/216
+  }{
+    \draw[white, opacity=0.08, line width=0.35pt]
+      (\ax mm,\ay mm) -- (\bx mm,\by mm);
+  }
+
+  % diagonal edges
+  \foreach \ax/\ay/\bx/\by in {
+    27/35/11/55,   59/35/75/55,   123/35/107/55,
+    43/55/27/72,   75/55/91/72,   139/55/123/72,
+    11/72/27/90,   59/72/43/90,   107/72/91/90,  155/72/139/90,
+    27/90/11/108,  75/90/59/108,  107/90/123/108,171/90/155/108,
+    43/108/27/126, 91/108/75/126, 123/108/139/126,
+    11/126/27/144, 59/126/75/144, 107/126/91/144,171/126/155/144,
+    27/144/43/162, 75/144/59/162, 123/144/107/162,155/144/171/162,
+    11/162/27/180, 59/162/75/180, 107/162/91/180,139/162/155/180,
+    43/180/27/198, 91/180/75/198, 123/180/139/198,
+    11/198/27/216, 59/198/75/216, 107/198/91/216,155/198/139/216,
+    27/216/59/232, 91/216/123/232
+  }{
+    \draw[white, opacity=0.07, line width=0.28pt]
+      (\ax mm,\ay mm) -- (\bx mm,\by mm);
+  }
+
+  % cluster circles — suggest graph topology
+  \draw[white, opacity=0.09, line width=0.8pt, dashed]
+    (52mm,160mm) circle (22mm);
+  \draw[white, opacity=0.09, line width=0.8pt, dashed]
+    (118mm,115mm) circle (26mm);
+  \draw[white, opacity=0.07, line width=0.6pt, dashed]
+    (152mm,70mm) circle (16mm);
+
+  % highlighted "active" nodes — DEAccent glow
+  \foreach \px/\py in {43/162, 75/144, 91/126, 107/108, 123/126, 59/180}{
+    \fill[DEAccent, opacity=0.70] (\px mm,\py mm) circle (2.8pt);
+    \fill[white,    opacity=0.45] (\px mm,\py mm) circle (1.2pt);
+  }
+
+  %==============================================================
+  % THIN ACCENT RULE — below title block
+  %==============================================================
+  \draw[DEAccent, line width=2pt, opacity=0.90]
+    (13mm,198mm) -- (160mm,198mm);
+
+  %==============================================================
+  % TITLE TEXT
+  %==============================================================
+
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{56}{56}\sffamily\bfseries,
+        text=white]
+    at (12mm, 230mm) {DATA};
+
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{30}{30}\sffamily\bfseries,
+        text=white]
+    at (12mm, 213mm) {ENGINEERING};
+
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{10}{15}\sffamily,
+        text=white, opacity=0.72,
+        text width=148mm, align=left]
+    at (12mm, 195mm)
+    {Distributed Systems \enspace\textbullet\enspace
+     Scalable Processing \enspace\textbullet\enspace
+     Modern Architectures};
+
+  %==============================================================
+  % COURSE BADGE (upper-right corner)
+  %==============================================================
+  \fill[DEAccent, rounded corners=3pt, opacity=0.92]
+    (129mm,232mm) rectangle (173mm,247mm);
+  \node[anchor=center,
+        font=\fontsize{7.5}{11}\sffamily\bfseries,
+        text=white, align=center, text width=40mm]
+    at (151mm, 239.5mm) {CSE 4345\\Big Data Analytics};
+
+  %==============================================================
+  % EDITION TAG (left margin, rotated)
+  %==============================================================
+  \node[rotate=90, anchor=south,
+        font=\fontsize{6}{6}\sffamily,
+        text=white, opacity=0.28, inner sep=0pt]
+    at (5mm, 168mm) {FIRST EDITION · 2026};
+
+  %==============================================================
+  % PART OVERVIEW  (left column, lower half)
+  %==============================================================
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{7}{12}\sffamily,
+        text=white, opacity=0.85,
+        text width=76mm, align=left]
+    at (13mm, 178mm) {%
+      {\color{DEAccent}\bfseries I}\enspace
+        The Data Engineering Landscape\\[3pt]
+      {\color{DEAccent}\bfseries II}\enspace
+        Distributed File Systems\\[3pt]
+      {\color{DEAccent}\bfseries III}\enspace
+        Batch Processing at Scale\\[3pt]
+      {\color{DEAccent}\bfseries IV}\enspace
+        In-Memory Processing\\[3pt]
+      {\color{DEAccent}\bfseries V}\enspace
+        Data Pipelines \& Integration\\[3pt]
+      {\color{DEAccent}\bfseries VI}\enspace
+        Insight Delivery\\[3pt]
+      {\color{DEAccent}\bfseries VII}\enspace
+        The Modern Data Stack%
+    };
+
+  %==============================================================
+  % KEYWORD TAGS (right column)
+  %==============================================================
+  \foreach \kw/\xpos/\ypos in {
+    {Hadoop}/100/175,
+    {HDFS}/137/175,
+    {MapReduce}/100/164,
+    {Apache Spark}/138/164,
+    {Kafka}/100/153,
+    {Delta Lake}/137/153,
+    {HiveQL}/100/142,
+    {MLOps}/136/142,
+    {Data Mesh}/100/131,
+    {Apache Beam}/137/131,
+    {Lakehouse}/100/120,
+    {Diff. Privacy}/136/120
+  }{
+    \node[fill=white, fill opacity=0.10,
+          rounded corners=2pt,
+          text=white, text opacity=0.82,
+          font=\fontsize{6.5}{6.5}\sffamily,
+          inner xsep=4pt, inner ysep=3pt]
+      at (\xpos mm, \ypos mm) {\kw};
+  }
+
+  %==============================================================
+  % DIVIDER
+  %==============================================================
+  \draw[white, opacity=0.15, line width=0.5pt]
+    (8mm, 38mm) -- (168mm, 38mm);
+
+  %==============================================================
+  % AUTHOR / INSTITUTION
+  %==============================================================
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{13}{13}\sffamily\bfseries,
+        text=white]
+    at (13mm, 30mm) {Rokan Uddin Faruqui};
+
+  \node[anchor=north west, inner sep=0pt,
+        font=\fontsize{8}{13}\sffamily,
+        text=white, opacity=0.60,
+        text width=130mm, align=left]
+    at (13mm, 25.5mm)
+    {Professor, Department of Computer Science \& Engineering \enspace
+     University of Chittagong};
+
+  %==============================================================
+  % BOTTOM LINE
+  %==============================================================
+  \node[anchor=west, inner sep=0pt,
+        font=\fontsize{7}{7}\sffamily,
+        text=white, opacity=0.35]
+    at (13mm, 10mm) {2026 \textbullet\ First Edition};
+
+  \node[anchor=east, inner sep=0pt,
+        font=\fontsize{7}{7}\sffamily,
+        text=white, opacity=0.35]
+    at (163mm, 10mm) {rufaruqui@cu.ac.bd};
+
+\end{tikzpicture}
+\end{document}
